@@ -1,0 +1,18 @@
+# 依赖：这是 DSH profile 的 node_modules，用软链接挂进来的，不进仓库
+node_modules/
+
+# 内部开发记录（项目说明 / 开发进度 / 开发计划 / 看板说明 + 灌记录的脚本）。
+# 里面是本机的路径、流程A/B、端口这些，只留本地 PrivHub，不公开。
+privhub/
+
+# 备份与运行时落的东西
+*.bak
+*.log
+backups/
+store/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

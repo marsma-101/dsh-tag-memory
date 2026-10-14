@@ -1,0 +1,54 @@
+{
+  "name": "dsh-tag-memory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DSH plugin: 标签记忆系统。把技能 marsma101-tag-memory 的 CSV 标签记忆接进 DSH——每个智能体每轮自动注入标签字典（systemPrompt.section，函数值），并提供 memory_write / memory_recall 两个工具。读写逻辑与技能共用同一份 lib/core.mjs，不另抄一遍。安装时会探测各智能体的 MEMORY.md 并写入一段受控的「记忆系统在运行」说明（标记块、幂等、块外一个字节不碰、挂载自愈）。",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./preset": "./preset.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "preset.js",
+    "client.js",
+    "lib/store.mjs",
+    "lib/notice.mjs",
+    "cordis.patch.yml",
+    "scripts/install.mjs",
+    "scripts/selftest.mjs",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marsma-101/dsh-tag-memory.git"
+  },
+  "homepage": "https://github.com/marsma-101/dsh-tag-memory#readme",
+  "bugs": {
+    "url": "https://github.com/marsma-101/dsh-tag-memory/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "tag-memory",
+    "agent-memory",
+    "csv",
+    "local-first"
+  ],
+  "license": "Apache-2.0",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  }
+}
