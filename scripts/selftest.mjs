@@ -651,7 +651,7 @@ try {
       26: {
         error: '',
         listing: {
-          path: 'D:\\bak', home: 'C:\\Users\\Administrator',
+          path: 'D:\\bak', home: 'C:\\Users\\someone',
           crumbs: [{ name: 'D:', path: 'D:\\', hidden: false }, { name: 'bak', path: 'D:\\bak', hidden: false }],
           entries: [{ name: '记忆库', path: 'D:\\bak\\记忆库', hidden: false }],
           truncated: false,

@@ -200,7 +200,7 @@ function overview(notice) {
 }
 
 function entries(params) {
-  if (!ready()) return { error: '记忆技能未就绪（找不到技能目录或真库）', hits: [], total: 0 }
+  if (!ready()) return { error: '记忆库未就绪（找不到记忆库目录或 store/memory.csv）', hits: [], total: 0 }
   const core = getCore()
   const schema = loadSchema()
   const rawCond = params.get('cond') ?? ''
@@ -231,12 +231,12 @@ function entries(params) {
 // ── 备份 ────────────────────────────────────────────────
 
 function backupCore() {
-  if (!backupReady()) throw new Error('备份核心未加载（技能里缺 scripts/lib/backup.mjs）')
+  if (!backupReady()) throw new Error('备份核心未加载（缺 scripts/lib/backup.mjs）')
   return getBackupCore()
 }
 
 function backupStatus() {
-  if (!backupReady()) return { available: false, error: '备份核心未加载（技能里缺 scripts/lib/backup.mjs）', storeDir: STORE_DIR }
+  if (!backupReady()) return { available: false, error: '备份核心未加载（缺 scripts/lib/backup.mjs）', storeDir: STORE_DIR }
   return { available: true, ...backupCore().readBackupStatus(STORE_DIR, { recent: 6 }) }
 }
 
@@ -397,7 +397,7 @@ function rowToFields(core, schema, header, row) {
 
 /**
  * 合并一份外来的 memory.csv（别的机器 / 别的库）。
- * 守技能 §6 的铁律：**先备份 / 只追加不重写 / 不删任何条目 / id 撞号按内容判**。
+ * 守铁律：**先备份 / 只追加不重写 / 不删任何条目 / id 撞号按内容判**。
  * `apply !== true` 就是预演（dryRun），只出报告不落笔。
  */
 function mergeFrom(body) {

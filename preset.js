@@ -34,12 +34,12 @@ export const name = 'tag-memory-preset'
 /** `systemPrompt` 供字典段，`tools` 供两个工具。 */
 export const inject = ['systemPrompt', 'tools']
 
-/** 技能未就绪时，给模型一句可执行的提示，而不是空段。 */
+/** 记忆库没就位时，给模型一句可执行的提示，而不是空段。 */
 function degradedNotice() {
   return [
-    '## 记忆：标签记忆技能未就绪',
-    `> 未找到技能 \`marsma101-tag-memory\`（找的是 \`${SKILL_DIR}\`）。`,
-    '> 记忆写入 / 召回不可用；请先安装该技能，或用 `DSH_TAG_MEMORY_SKILL_DIR` 指定其位置。',
+    '## 记忆库未就绪',
+    `> 没找到记忆库目录（找的是 \`${SKILL_DIR}\`）。`,
+    '> 记忆写入 / 召回不可用；请把记忆库放到该位置，或用 `DSH_TAG_MEMORY_SKILL_DIR` 指定它的位置。',
   ].join('\n')
 }
 

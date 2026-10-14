@@ -129,10 +129,9 @@ if (memoryFiles.length === 0) {
   report.push(`PASS  记忆文件探测：命中 ${memoryFiles.length} 个 → ${memoryFiles.map((f) => f.agent + '/' + f.file).join('、')}`)
 }
 
-// ── 技能侧齐不齐 ────────────────────────────────────────
-// 插件的读写/备份/恢复/合并逻辑**整个托在技能里**（一份逻辑）。技能要是太旧——比如少了
-// scripts/lib/backup.mjs——插件装上了，「备份 / 恢复 / 合并」那排按钮也只会显示「不可用」。
-// 这正是流程B 踩过的坑：技能是早先拷过去的，插件已更新到 M1.9，技能还停在没有 backup.mjs 的版本。
+// ── 记忆库侧齐不齐 ──────────────────────────────────────
+// 读写的**一份逻辑**与字典都在记忆库里。库要是太旧——比如少了 scripts/lib/backup.mjs——
+// 插件装上了，「备份 / 恢复 / 合并」那排按钮也只会显示「不可用」。所以这道闸必须查。
 const SKILL_DIR = process.env.DSH_TAG_MEMORY_SKILL_DIR?.trim() || join(DSH_HOME, 'skills', 'marsma101-tag-memory')
 const SKILL_MUST_HAVE = [
   'scripts/lib/core.mjs',
@@ -141,10 +140,10 @@ const SKILL_MUST_HAVE = [
   'store/memory.csv',
 ]
 const skillMissing = SKILL_MUST_HAVE.filter((f) => !existsSync(join(SKILL_DIR, f)))
-check(`技能侧文件齐（${SKILL_DIR}）`, skillMissing.length === 0,
+check(`记忆库侧文件齐（${SKILL_DIR}）`, skillMissing.length === 0,
   skillMissing.length === 0 ? '' : `缺 ${skillMissing.join('、')} —— 缺 backup.mjs 的话备份/恢复/合并会显示「不可用」`)
 if (skillMissing.includes('scripts/lib/backup.mjs')) {
-  report.push('      修法：把插件仓库同版本的 scripts/lib/backup.mjs 拷进技能的 scripts/lib/ 下')
+  report.push('      修法：把插件仓库同版本的 scripts/lib/backup.mjs 拷进记忆库的 scripts/lib/ 下')
 }
 
 // ── check 模式收尾 ──────────────────────────────────────
@@ -219,7 +218,7 @@ if (wirePresets) {
     '',
     '# ── 记忆：标签记忆（dsh-tag-memory）──────────────────────────────',
     '# 字典每轮由插件注入；memory_write / memory_recall 两个工具。',
-    '# 数据在技能 marsma101-tag-memory 的 store/memory.csv。回滚：删掉下面三行。',
+    '# 数据在记忆库的 store/memory.csv。回滚：删掉下面三行。',
     '- id: tag-memory',
     "  name: 'dsh-tag-memory/preset'",
     '  config:',

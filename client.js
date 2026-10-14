@@ -1556,8 +1556,8 @@ window.__ModuleLoader__.load({
 					React.createElement(
 						'div',
 						{ className: 'tm-card' },
-						React.createElement('div', { className: 'tm-note tm-err' }, '记忆技能未就绪：找不到技能目录或真库 store/memory.csv。'),
-						React.createElement('div', { className: 'tm-note', style: { marginTop: '8px' } }, `技能目录：${overview.skillDir}`),
+						React.createElement('div', { className: 'tm-note tm-err' }, '记忆库未就绪：找不到记忆库目录或 store/memory.csv。'),
+						React.createElement('div', { className: 'tm-note', style: { marginTop: '8px' } }, `记忆库目录：${overview.skillDir}`),
 						React.createElement('div', { className: 'tm-note' }, `库文件：${overview.csvPath}`),
 					),
 				)
