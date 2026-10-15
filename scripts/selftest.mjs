@@ -53,10 +53,14 @@ copyFileSync(join(realSkill, 'scripts', 'lib', 'backup.mjs'), join(sandboxSkill,
 
 // 表头照真库首行（保持列顺序一致）；数据自造两条（含一条 已归档 供默认排除用）
 const header = readFileSync(join(realSkill, 'store', 'memory.csv'), 'utf8').split('\n')[0]
-const seed = [
-  'M-20260101-001,自检件A,2026-01-01,selftest 沙箱,验证用,备注,稳定,语义,常驻,selftest,通用,生效,,,推断',
-  'M-20260101-002,自检件B（已归档，不该被默认读到）,2026-01-01,selftest 沙箱,验证默认排除,,稳定,语义,深藏,selftest,通用,已归档,,,推断',
-].join('\n')
+// 种子行**按列名定位**再照表头顺序拼——原先手写成定长字符串，表头一加列（如 `类型`）
+// 就整排错位；行尾少几个空列时，值还会往前挤一格。
+const HEAD = header.split(',')
+const seedRows = [
+  { id: 'M-20260101-001', 内容: '自检件A', 时间: '2026-01-01', 环境: 'selftest 沙箱', 原因: '验证用', 备注: '备注', 稳定性: '稳定', 成熟度: '语义', 距离: '常驻', 角色: 'selftest', 项目: '通用', 状态: '生效', 依据: '推断', 类型: '记忆' },
+  { id: 'M-20260101-002', 内容: '自检件B（已归档，不该被默认读到）', 时间: '2026-01-01', 环境: 'selftest 沙箱', 原因: '验证默认排除', 稳定性: '稳定', 成熟度: '语义', 距离: '深藏', 角色: 'selftest', 项目: '通用', 状态: '已归档', 依据: '推断', 类型: '记忆' },
+]
+const seed = seedRows.map((o) => HEAD.map((c) => o[c] ?? '').join(',')).join('\n')
 writeFileSync(join(sandboxSkill, 'store', 'memory.csv'), header + '\n' + seed + '\n', 'utf8')
 // 备份要备三件套（memory.csv / index.md / backup.json）；backup.json 由 /backup/dir 生成。
 writeFileSync(join(sandboxSkill, 'store', 'index.md'), '# 索引\n\n自检沙箱索引。\n', 'utf8')
@@ -75,7 +79,7 @@ try {
   ok('store 已指向沙箱技能', csvPath.startsWith(sandbox), csvPath)
 
   const id1 = core.appendEntry({ schema, csvPath, lockPath, row: {
-    内容: '自检件C', 环境: 'selftest 沙箱', 原因: '验证 appendEntry',
+    内容: '自检件C', 时间: '2026-01-01', 环境: 'selftest 沙箱', 原因: '验证 appendEntry',
     类型: '记忆', 深度: '语义', 稳定性: '稳定', 距离: '按需', 角色: 'selftest', 项目: '通用', 依据: '推断',
   } })
   ok('core.appendEntry 返回 M-YYYYMMDD-NNN', /^M-\d{8}-\d{3}$/.test(id1), id1)
@@ -222,6 +226,8 @@ try {
   const en2 = await call('/entries', 'GET', '?q=' + encodeURIComponent('自检件A'))
   ok('index /entries 关键词搜到 A（1 条）', en2.json.total === 1, String(en2.json.total))
   // P1：排序 / 分页 / 含已归档
+  ok('index /overview 报出认得的排序档（客户端照它过滤下拉）',
+    Array.isArray(ov.json.sorts) && ov.json.sorts.includes('file_desc') && ov.json.sorts.includes('id_desc'), JSON.stringify(ov.json.sorts))
   ok('index /overview 给出 状态 全集', Array.isArray(ov.json.statusValues) && ov.json.statusValues.join(',') === '生效,被取代,已归档', JSON.stringify(ov.json.statusValues))
   const own = '?cond=' + encodeURIComponent('{"角色":"selftest"}')
   const sAsc = await call('/entries', 'GET', `${own}&sort=id_asc`)
@@ -230,6 +236,13 @@ try {
   ok('index /entries 升/降序头条目相反', sAsc.json.hits[0].id !== sDesc.json.hits[0].id, `${sAsc.json.hits[0].id} vs ${sDesc.json.hits[0].id}`)
   const tDesc = await call('/entries', 'GET', `${own}&sort=time_desc`)
   ok('index /entries sort=time_desc 最新在前', tDesc.json.hits[0].时间 >= tDesc.json.hits[1].时间, tDesc.json.hits.map((h) => h.时间).join(','))
+  // A / C 的「时间」并列（同一天写进去的就是这样），这时不许塌回文件原序（＝最老的在前）。
+  ok('index /entries sort=time_desc 并列时后写进去的排前面', tDesc.json.hits[0].id === id1, tDesc.json.hits.map((h) => h.id).join(','))
+  const fDesc = await call('/entries', 'GET', `${own}&sort=file_desc`)
+  const plain = await call('/entries', 'GET', own)
+  ok('index /entries sort=file_desc ＝ 文件原序倒过来（最后写进去的排最前）',
+    fDesc.json.hits.map((h) => h.id).join(',') === plain.json.hits.map((h) => h.id).reverse().join(','),
+    `file_desc=${fDesc.json.hits.map((h) => h.id).join(',')} 原序=${plain.json.hits.map((h) => h.id).join(',')}`)
   const pg0 = await call('/entries', 'GET', `${own}&limit=1&offset=0`)
   const pg1 = await call('/entries', 'GET', `${own}&limit=1&offset=1`)
   ok('index /entries 分页 offset=0：示 1 条且 hasMore', pg0.json.shown === 1 && pg0.json.total === 2 && pg0.json.hasMore === true, JSON.stringify({ shown: pg0.json.shown, total: pg0.json.total, hasMore: pg0.json.hasMore }))
@@ -373,6 +386,14 @@ try {
   ok('client.js 有「含已归档」与详情展开（P1）', clientSrc.includes('includeArchived') && clientSrc.includes('DETAIL_FIELDS'))
   ok('client.js 同维多值 + 条件面包屑（P2）', clientSrc.includes('function dimOn') && clientSrc.includes('function renderCrumbs'))
   ok('client.js 勾选与导出（P2）', clientSrc.includes('function rowsToMarkdown') && clientSrc.includes('function rowsToCSV') && clientSrc.includes('function exportSelected'))
+  ok('client.js 缺省排序 = id ↓（最新写的在最上面）', clientSrc.includes("? saved.sort : 'id_desc'"), '')
+  ok('client.js 视图存档带版本号（改缺省值才顶得动老存档）',
+    clientSrc.includes('const STORE_VERSION =') && clientSrc.includes('v: STORE_VERSION') && clientSrc.includes('parsed.v !== STORE_VERSION'), '')
+  ok('client.js 排序档含「最近加入」', clientSrc.includes("'file_desc'") && clientSrc.includes('最近加入'), '')
+  // 旧宿主（不报 overview.sorts）不许把新档摆出来：file_desc 在旧宿主上不报错，只是当没看见、
+  // 照样返回原序——点下去没反应还不吭声，比报错更难查。
+  ok('client.js 按宿主能力过滤排序档（旧宿主不摆死选项）',
+    clientSrc.includes('Array.isArray(overview.sorts) ? overview.sorts : SORTS_LEGACY') && clientSrc.includes('sortOptions.map'), '')
   ok('client.js 记住视图偏好 + 键盘 / 与 Esc（P3）', clientSrc.includes('STORE_KEY') && clientSrc.includes("event.key === '/'") && clientSrc.includes("event.key === 'Escape'"))
   ok('client.js 单条复制（P3）', clientSrc.includes('function copyOne'))
   // 页面「点一下就刷」的根因：按钮落在 <form> 里且没写 type 时，浏览器按 submit 处理，整页导航。
@@ -534,6 +555,8 @@ try {
       dimensions: [{ name: '深度', column: '成熟度' }, { name: '稳定性', column: '稳定性' }, { name: '类型', column: null }],
       byDimension: { 深度: { 熟手: 2, 生手: 1 }, 稳定性: { 常驻: 3 }, 类型: {} },
       statusValues: ['生效', '被取代', '已归档'],
+      // 宿主自报「认哪些排序档」——客户端照它过滤下拉。旧宿主没这一项，见下面那条断言。
+      sorts: ['id_desc', 'file_desc', 'time_desc', 'time_asc', 'id_asc'],
       notice: { enabled: true, files: [{ agent: 'a', file: 'MEMORY.md', hasNotice: true }] },
     }
 
@@ -577,6 +600,18 @@ try {
     ok('下拉里带取值与计数（熟手（2））',
       (Array.isArray(dimSelects[0].props.children) ? dimSelects[0].props.children : []).flat(Infinity)
         .some((o) => String(o.props.children).includes('熟手（2）')))
+
+    // 排序下拉：宿主报什么就摆什么。旧宿主不报 `overview.sorts`——新档在它那儿**不报错**，
+    // 只是当没看见、照样返回原序，比报错还难查；所以宁可不摆，也不给一颗点了没反应的。
+    const sortTexts = (s) => (Array.isArray(s.props.children) ? s.props.children : []).flat(Infinity).map((o) => String(o.props.children))
+    const pickSort = (o) => o.selects.find((s) => sortTexts(s).some((t) => t.includes('id ↓')))
+    const sortSel = pickSort(table)
+    ok('宿主报全档位时，排序下拉里有「最近加入」', sortTexts(sortSel).some((t) => t.includes('最近加入')), sortTexts(sortSel).join(' | '))
+    const legacy = render('main', [ROW], { 0: { ...OVERVIEW, sorts: undefined } })
+    const legacySort = pickSort(legacy)
+    ok('旧宿主（不报 sorts）只摆老四档，不给死选项',
+      sortTexts(legacySort).length === 4 && !sortTexts(legacySort).some((t) => t.includes('最近加入')),
+      sortTexts(legacySort).join(' | '))
 
     const cards = render('settings.section', [ROW])
     ok('设置页默认仍是卡片（没有 table）', !cards.tags.includes('table') && cards.classes.includes('tm-item'))

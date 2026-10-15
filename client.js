@@ -29,12 +29,12 @@ window.__ModuleLoader__.load({
 		 * 表格的列**照库自己的表头来**（`overview.header`），不另立一套——
 		 * 库加一列，表格就多一列。这份只在 overview 还没回来时兜底。
 		 */
-		const FALLBACK_HEADER = ['id', '内容', '时间', '环境', '原因', '备注', '稳定性', '成熟度', '距离', '角色', '项目', '状态', '关键词', '工具', '版本', '依据']
+		const FALLBACK_HEADER = ['id', '内容', '时间', '环境', '原因', '备注', '稳定性', '成熟度', '距离', '角色', '项目', '状态', '关键词', '工具', '版本', '依据', '类型']
 		/**
 		 * 默认摆出来的列。挑的是「一行看得完」的；环境/原因/备注/工具/版本/依据
 		 * 这些长文本或常空的留在「详情」里，想要也能在「列」里勾出来。
 		 */
-		const DEFAULT_COLUMNS = ['id', '内容', '时间', '稳定性', '成熟度', '距离', '角色', '项目', '状态', '关键词']
+		const DEFAULT_COLUMNS = ['id', '内容', '时间', '类型', '稳定性', '成熟度', '距离', '角色', '项目', '状态', '关键词']
 		/** 列的显示宽窄：mono 等宽（id/时间）、wide 放宽（长文本）、其余按内容自适应。 */
 		const COLUMN_KIND = {
 			id: 'mono', 时间: 'mono',
@@ -45,12 +45,31 @@ window.__ModuleLoader__.load({
 		/** 正文超过这么多字先折叠。 */
 		const CONTENT_CLIP = 120
 		const PAGE_SIZES = [20, 50, 100, 200]
-		const SORTS = [['time_desc', '时间 ↓'], ['time_asc', '时间 ↑'], ['id_desc', 'id ↓'], ['id_asc', 'id ↑']]
+		/**
+		 * 排序档。缺省是「id ↓」——库是只追加的，id 里的日期 + 序号就是写入次序，
+		 * 倒过来放＝**最新写的在最上面**，一眼看得到新加的是什么。
+		 * 「最近加入」看的是文件顺序：并库进来的条目 id 带着来源那边的日期，按 id 排会插回老位置，
+		 * 想看「这一趟新进来的」就用那一档。
+		 */
+		const SORTS = [
+			['id_desc', 'id ↓（新 → 旧）'],
+			['file_desc', '最近加入（含并库）'],
+			['time_desc', '时间 ↓'],
+			['time_asc', '时间 ↑'],
+			['id_asc', 'id ↑（旧 → 新）'],
+		]
+		/** 旧宿主只认这四档——它不报 `overview.sorts`，不知道「最近加入」是什么。 */
+		const SORTS_LEGACY = ['id_desc', 'time_desc', 'time_asc', 'id_asc']
 		/** 状态的兜底全集——overview 还没回来时用。 */
 		const STATUS_FALLBACK = ['生效', '被取代', '已归档']
 		const asArr = (x) => (Array.isArray(x) ? x : [x])
 		/** 视图偏好（条件/排序/每页数）的本地记忆键。 */
 		const STORE_KEY = 'dsh-tag-memory:view'
+		/**
+		 * 视图偏好的存档版本。**改了缺省值就得 +1**：存档里连「用户没动过的缺省」也一并写着，
+		 * 不换版本号的话，旧缺省（时间 ↓）会一直压着新缺省，改了等于没改。
+		 */
+		const STORE_VERSION = 2
 
 		/** 读取上次的视图偏好；隐私模式等拿不到就返回 null。 */
 		function loadView() {
@@ -58,7 +77,11 @@ window.__ModuleLoader__.load({
 				const raw = window.localStorage.getItem(STORE_KEY)
 				if (raw === null) return null
 				const parsed = JSON.parse(raw)
-				return parsed !== null && typeof parsed === 'object' ? parsed : null
+				if (parsed === null || typeof parsed !== 'object') return null
+				// 老存档的「排序」那一格存的是**当时的缺省**（时间 ↓）——用户根本没动过下拉，
+				// 可存档里就是写着它。版本对不上就把这一格丢掉（其余偏好照旧），否则新缺省顶不动它。
+				if (parsed.v !== STORE_VERSION) return { ...parsed, sort: undefined }
+				return parsed
 			} catch { return null }
 		}
 
@@ -313,7 +336,7 @@ window.__ModuleLoader__.load({
 			const [q, setQ] = React.useState('')
 			const [cond, setCond] = React.useState(() => (saved.cond !== null && typeof saved.cond === 'object' ? saved.cond : {}))
 			const [limit, setLimit] = React.useState(() => (typeof saved.limit === 'number' && PAGE_SIZES.includes(saved.limit) ? saved.limit : 50))
-			const [sort, setSort] = React.useState(() => (SORTS.some(([value]) => value === saved.sort) ? saved.sort : 'time_desc'))
+			const [sort, setSort] = React.useState(() => (SORTS.some(([value]) => value === saved.sort) ? saved.sort : 'id_desc'))
 			const [includeArchived, setIncludeArchived] = React.useState(() => saved.includeArchived === true)
 			/**
 			 * 表格 / 卡片两种视图。默认值看宿主：主区宽，给表格；设置页窄，给卡片。
@@ -330,7 +353,7 @@ window.__ModuleLoader__.load({
 			// 视图偏好落本地，重开设置页还在。
 			React.useEffect(() => {
 				try {
-					window.localStorage.setItem(STORE_KEY, JSON.stringify({ cond, sort, limit, includeArchived, view }))
+					window.localStorage.setItem(STORE_KEY, JSON.stringify({ v: STORE_VERSION, cond, sort, limit, includeArchived, view }))
 				} catch { /* 隐私模式/配额，忽略 */ }
 			}, [cond, sort, limit, includeArchived, view])
 
@@ -413,12 +436,22 @@ window.__ModuleLoader__.load({
 			})()
 			const condKey = JSON.stringify(effectiveCond)
 
+			/**
+			 * 宿主认哪几档排序：`overview.sorts` 说得很清楚就听它的；没这一项＝旧宿主，
+			 * 只摆它认得的四档（新档在旧宿主上不会报错，它只是**当没看见**，照样返回原序——
+			 * 那才是最坏的一种坏：不报错、结果不对）。
+			 */
+			const hostSorts = overview !== null && Array.isArray(overview.sorts) ? overview.sorts : SORTS_LEGACY
+			const sortOptions = SORTS.filter(([value]) => hostSorts.includes(value))
+			/** 存档里的档位宿主不认（用户在旧版上选过新档）→ 退回 id ↓，别让下拉摆个空值。 */
+			const effSort = sortOptions.some(([value]) => value === sort) ? sort : 'id_desc'
+
 			/** 拼一页的查询串；offset=0 即首页。 */
 			function pageQuery(offset) {
 				const params = new URLSearchParams()
 				if (condKey !== '{}') params.set('cond', condKey)
 				if (q.trim() !== '') params.set('q', q.trim())
-				params.set('sort', sort)
+				params.set('sort', effSort)
 				params.set('limit', String(limit))
 				params.set('offset', String(offset))
 				return params.toString()
@@ -439,7 +472,7 @@ window.__ModuleLoader__.load({
 					.catch((failure) => { if (alive) setError(String((failure && failure.message) || failure)) })
 					.finally(() => { if (alive) setLoading(false) })
 				return () => { alive = false }
-			}, [condKey, q, limit, sort, reloadKey])
+			}, [condKey, q, limit, effSort, reloadKey])
 
 			/** 「加载更多」：从已示条数接着取下一页。 */
 			async function loadMore() {
@@ -1692,8 +1725,8 @@ window.__ModuleLoader__.load({
 						}),
 						React.createElement(
 							'select',
-							{ className: 'tm-select', value: sort, onChange: (event) => setSort(event.target.value) },
-							SORTS.map(([value, text]) => React.createElement('option', { key: value, value }, text)),
+							{ className: 'tm-select', value: effSort, onChange: (event) => setSort(event.target.value) },
+							sortOptions.map(([value, text]) => React.createElement('option', { key: value, value }, text)),
 						),
 						React.createElement(
 							'select',

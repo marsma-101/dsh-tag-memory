@@ -173,7 +173,7 @@ export function apply(ctx, config = {}) {
 
 function overview(notice) {
   // `header` 是库自己的列序——表格视图照它排，库长什么样就显示什么样。
-  const base = { ready: ready(), skillDir: SKILL_DIR, csvPath: CSV_PATH, notice, header: [], dimensions: [], statusValues: [], total: 0, active: 0, byDimension: {} }
+  const base = { ready: ready(), skillDir: SKILL_DIR, csvPath: CSV_PATH, notice, sorts: SORT_ORDER, header: [], dimensions: [], statusValues: [], total: 0, active: 0, byDimension: {} }
   if (!base.ready) return base
   const schema = loadSchema()
   const core = getCore()
@@ -440,6 +440,11 @@ function mergeFrom(body) {
   for (const r of irows) {
     if (!r[0] || String(r[0]).trim() === '') continue // 空行 / 纯空白
     const fields = rowToFields(core, schema, ih, r)
+    // 来源库没有 `类型` 列 —— 迁移前的老库（含别的机器上的库）。这类库里的条目
+    // 都是「从对话里提炼的结论」，正是 `记忆` 的定义，所以按 `记忆` 落。
+    // 不兜这一下的话，并进来的行 `类型` 全是空的 —— 而留白=黑名单，一按 `类型` 筛，
+    // 这些新条目就全筛没了（不报错、静默少东西，最难查的那种坏）。
+    if (!ih.includes(core.fieldToColumn(schema, '类型') ?? '类型') && !fields.类型) fields.类型 = '记忆'
     const key = normText(fields.内容)
     if (key === '') { items.push({ kind: 'invalid', id: fields.id ?? '', why: '「内容」是空的', preview: '' }); continue }
     if (localNorm.has(key)) { items.push({ kind: 'duplicate', id: fields.id ?? '', fields, local: localNorm.get(key) }); continue }
@@ -457,7 +462,7 @@ function mergeFrom(body) {
 
   // ③ 标签差异：内容一样但标签不一样 —— §6.5 不删，报出来让人决定
   // 比标签要按**列名**比（维度名和列名不一定同名，比如 深度↔成熟度）。
-  const TAG_FIELDS = ['稳定性', '深度', '距离', '角色', '项目', '状态', '依据']
+  const TAG_FIELDS = ['类型', '稳定性', '深度', '距离', '角色', '项目', '状态', '依据']
   const tagDiffs = []
   for (const it of items) {
     if (it.kind !== 'duplicate') continue
@@ -519,13 +524,27 @@ function mergeFrom(body) {
 
 // ── 允许的排序：时间 / id 的升序降序。未指定或列不存在 → 原序。 ──
 const SORTS = { time_desc: ['时间', -1], time_asc: ['时间', 1], id_desc: ['id', -1], id_asc: ['id', 1] }
+/** 对外报的档位全集（含 file_desc）。客户端拿 `overview.sorts` 过滤自己的下拉——**旧宿主**
+ *  不报这一项，客户端就只摆老的四档，不会给出一颗点了没反应的「最近加入」。 */
+const SORT_ORDER = ['id_desc', 'file_desc', 'time_desc', 'time_asc', 'id_asc']
 
 function sortRows(rows, resolve, sort) {
+  // 「最近加入」＝把文件原序倒过来。库是只追加的，越靠后＝越晚写进去。
+  // 它跟 `id_desc` 不是一回事：并库进来的条目，id 带着**来源那边的日期**，
+  // 按 id 排会插回老位置——想看「这一趟新进来的」就得用这一档。
+  if (sort === 'file_desc') return rows.slice().reverse()
   const spec = SORTS[sort]
   if (spec === undefined) return rows
   const i = resolve(spec[0])
   if (i < 0) return rows
-  return rows.slice().sort((a, b) => spec[1] * natCompare(a[i] || '', b[i] || ''))
+  // 第一列并列时，拿「在文件里的先后」当第二把尺。V8 的 sort 是稳定的，并列就保留文件原序
+  // ——那对降序来说正好是**最老的在前**，跟「最新的排最上面」拧着来；库里同一天写进去的条目
+  // 「时间」全一样，没有这把尺，`时间 ↓` 等于没排。
+  const pos = new Map(rows.map((r, k) => [r, k]))
+  return rows.slice().sort((a, b) => {
+    const d = spec[1] * natCompare(a[i] || '', b[i] || '')
+    return d !== 0 ? d : spec[1] * (pos.get(a) - pos.get(b))
+  })
 }
 
 /** 自然序：数字段按数值比，其余按字符——`M-20260101-002` 这类也能排对。 */
