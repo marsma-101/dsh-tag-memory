@@ -4,16 +4,25 @@
  *   node scripts/install.mjs                       # 只读校验（profile: web），并预览会写哪些记忆文件
  *   node scripts/install.mjs --apply               # 真正安装
  *   node scripts/install.mjs --profile <name>      # 换个 profile
- *   node scripts/install.mjs --apply --wire-presets  # 顺带把 /preset 行接进各智能体的 agent.cordis.yml
+ *   node scripts/install.mjs --apply --wire-presets  # 顺带把 /preset 半接进 profile 补丁（全局注册）
+ *   node scripts/install.mjs --uninstall           # 预览要摘掉哪些东西（只读）
+ *   node scripts/install.mjs --uninstall --apply   # 真卸（摘回原样；记忆库一个字不碰）
  *   node scripts/install.mjs --dsh-home <path>     # 换个 DSH_HOME（装到别的 DSH 时用）
+ *   node scripts/install.mjs --apply --dest <path> # 把本体拷到 <path>，再从那儿发链接
  *
  * 写入（仅 apply）：
- *   1. <DSH_HOME>/profiles/<profile>/node_modules/dsh-tag-memory  （junction → 本仓库）
+ *   0. （--dest）<path>                                            （本体副本；不从会话下载目录发链接）
+ *   1. <DSH_HOME>/profiles/<profile>/node_modules/dsh-tag-memory  （junction → 本仓库 / --dest）
  *   2. <DSH_HOME>/profiles/<profile>/package.json                 （依赖 + bundle 条目）
  *   3. <DSH_HOME>/.agent-presets/<智能体>/MEMORY.md               （探测到才写；写的是受控说明块）
- *   4. （--wire-presets）<preset>/agent.cordis.yml                （接 /preset 行；先备份、装完校验）
+ *   4. （--wire-presets）<profile>/cordis.patch.yml               （接 /preset 行；先备份、装完校验）
  *
- * 它**不碰** profile 的 cordis.patch.yml：本包自带 bundle patch，加载器把它当一层应用。
+ * `--uninstall` 把上面四处**逐条摘回去**（先备份、逐条校验）。记忆库（`skills/…` 下的
+ * memory.csv 与字典）**一个字都不碰**——卸插件不等于删记忆。
+ *
+ * 本包自带 bundle patch，加载器把它当一层应用，**宿主半**（index.js：设置页 API + 记忆文件
+ * 托管）因此自动接上；**智能体半**（字典段 + memory_write / memory_recall）要另外挂，
+ * 见 `--wire-presets`。
  * 记忆文件的写法规矩见 lib/notice.mjs —— 只认标记、只追加/原位替换、块外一字节不碰。
  */
 import {
@@ -24,14 +33,19 @@ import {
   symlinkSync,
   lstatSync,
   copyFileSync,
+  cpSync,
+  rmSync,
+  unlinkSync,
+  realpathSync,
   readdirSync,
 } from 'node:fs'
 import { createRequire } from 'node:module'
-import { join, dirname, resolve } from 'node:path'
+import { join, dirname, resolve, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { DEFAULT_MEMORY_FILE_NAMES, detectMemoryFiles, renderNotice, upsertNotice } from '../lib/notice.mjs'
+import { DEFAULT_MEMORY_FILE_NAMES, detectMemoryFiles, renderNotice, removeNotice, upsertNotice } from '../lib/notice.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
+/** 源码所在（本仓库 / 解压出来的那一份）。 */
 const PACKAGE_DIR = resolve(HERE, '..')
 
 const argv = process.argv.slice(2)
@@ -47,12 +61,37 @@ const HOME = process.env.USERPROFILE ?? process.env.HOME ?? ''
 const DSH_HOME = getFlag('--dsh-home', process.env.DSH_HOME?.trim() || join(HOME, '.dsh'))
 const PROFILE_DIR = join(DSH_HOME, 'profiles', PROFILE_NAME)
 const PROFILE_MANIFEST = join(PROFILE_DIR, 'package.json')
+const PROFILE_PATCH = join(PROFILE_DIR, 'cordis.patch.yml')
 const PRESET_ROOT = join(DSH_HOME, '.agent-presets')
 
 const EXPECTED_NAME = 'dsh-tag-memory'
+/** 智能体半的接线标记：profile 补丁里出现这一串，就算接上了。 */
+const WIRE_MARK = 'dsh-tag-memory/preset'
 const manifest = JSON.parse(readFileSync(join(PACKAGE_DIR, 'package.json'), 'utf8'))
 const PACKAGE_NAME = manifest.name
+
+// ── 本体放哪（--dest）─────────────────────────────────────
+//
+// 链接默认直接指向源码目录。源码要是在**会话下载目录**里（`downloads\` 之类），
+// 被清理＝挂载本体凭空消失、装载报错——所以给一个 `--dest <路径>`：先把本体拷过去，
+// 再从那儿发链接。不填就与以前逐字一致（一个字节都不拷）。
+const DEST = getFlag('--dest', '')
+/** 装完之后本体所在处：给了 --dest 就是它，否则就是源码目录本身。 */
+const BODY_DIR = DEST ? resolve(DEST) : PACKAGE_DIR
+/** 这些是「只在本机、不该跟着搬」的东西：git 元数据、依赖锚点、开发记录、运行时落盘。 */
+const DEST_SKIP = new Set(['.git', 'node_modules', 'privhub', 'store', 'backups'])
+const destSkip = (name) => DEST_SKIP.has(name) || /\.bak(-|$)/.test(name) || /\.log$/i.test(name)
+
 const LINK_PATH = join(PROFILE_DIR, 'node_modules', PACKAGE_NAME)
+/** 解到「真实路径、大小写规范」那一版，用来比对两条链接指的到底是不是同一处。 */
+const real = (p) => { try { return resolve(realpathSync(p)) } catch { return resolve(p) } }
+/** 那条链接是不是「我们这条」：解到哪儿都行，但那儿得是个装着我们这个包的目录。 */
+const isOurLink = (p) => {
+  try {
+    if (!lstatSync(p).isSymbolicLink()) return false
+    return JSON.parse(readFileSync(join(real(p), 'package.json'), 'utf8')).name === EXPECTED_NAME
+  } catch { return false }
+}
 
 const report = []
 const fail = []
@@ -99,11 +138,21 @@ check('preset registers memory_write + memory_recall', /'memory_write'/.test(pre
 
 // ── bundle patch ────────────────────────────────────────
 
-const yamlPath = join(PROFILE_DIR, 'package.json')
-let yaml = null
-try {
-  yaml = createRequire(yamlPath)('js-yaml')
-} catch { /* 校验降级为文本检查 */ }
+// 目标 profile 的 node_modules 里未必有 js-yaml，所以按几处锚点依次找。
+const yaml = loadYaml()
+
+function loadYaml() {
+  const anchors = [
+    PROFILE_MANIFEST, // profile 自己的依赖树
+    join(PROFILE_DIR, '..', 'node_modules', 'package.json'), // profile 的 hoist 目录
+    join(PACKAGE_DIR, 'package.json'), // 本包自己的依赖锚点
+  ]
+  for (const a of anchors) {
+    try { return createRequire(a)('js-yaml') } catch { /* 试下一个 */ }
+  }
+  return null
+}
+
 if (yaml) {
   const patch = yaml.load(readFileSync(join(PACKAGE_DIR, 'cordis.patch.yml'), 'utf8'))
   const rows = Array.isArray(patch) ? patch.flatMap((l) => l?.insert ?? []) : []
@@ -113,12 +162,271 @@ if (yaml) {
   report.push('SKIP  bundle patch yaml parse (js-yaml unavailable)')
 }
 
+// ── 补丁里那一小段声明：长什么样、怎么加上去、怎么摘回来 ──────
+//
+// 装与卸共用同一段字面量，所以「摘」的前提是**当初是我们写的**：整段照抄地对上就摘，
+// 对不上（被人手改过）就报错让人自己删——宁可不摘，也不猜着改别人的文件。
+
+const WIRE_BLOCK = [
+  '# ── 记忆：标签记忆（dsh-tag-memory）—— 智能体半 ──────────────────',
+  '# 0.2.0 起 preset 是声明行：这一段在 **profile 平面全局注册**，因此对该 profile 下',
+  '# 所有智能体生效（含以后新建的），不必逐个 preset 挂。缺了它，界面照样能用，',
+  '# 但谁也拿不到标签字典、也调不到 memory_write / memory_recall。',
+  '# 回滚：删掉这一段。',
+  '- insert:',
+  '    - id: tag-memory-preset',
+  `      name: '${WIRE_MARK}'`,
+].join('\n')
+
+/** 解析补丁文本并确认顶层是数组；坏了一律抛（调用方据此不落盘）。 */
+function parsePatch(t, what) {
+  if (!yaml) throw new Error('没有 js-yaml，不敢动 profile 补丁（装了 js-yaml 再来）')
+  let v
+  try { v = yaml.load(t) } catch (e) { throw new Error(`${what} 不是合法 YAML：${e.message}`) }
+  if (v === null || v === undefined) v = []
+  if (!Array.isArray(v)) throw new Error(`${what} 顶层不是数组（期望一串 loader patch 条目）`)
+  return v
+}
+const patchHasWire = (v) => v.some((entry) => Array.isArray(entry?.insert) && entry.insert.some((row) => row?.name === WIRE_MARK))
+
+/** 返回追加后的全文；改不动就抛（调用方据此回滚，原文件不落盘）。 */
+function appendDeclaration(text) {
+  const before = parsePatch(text, 'profile 补丁')
+  // 空补丁模板写的是 `[]`：直接把它换成我们的条目，别在数组后面接一行（那是非法 YAML）。
+  const EMPTY = /^[ \t]*\[[ \t]*\][ \t]*$/m
+  const next = before.length === 0 && EMPTY.test(text)
+    ? text.replace(EMPTY, WIRE_BLOCK)
+    : text.replace(/\s*$/, '') + '\n\n' + WIRE_BLOCK + '\n'
+  if (!patchHasWire(parsePatch(next, '接线后的补丁'))) throw new Error('写进去以后解析不出那一行')
+  return next
+}
+
+/** 摘回原样：把 appendDeclaration 加的那一段拿走，返回摘后的全文；摘不干净就抛。 */
+function stripDeclaration(text) {
+  let next
+  if (text.includes('\n\n' + WIRE_BLOCK + '\n')) {
+    // 追加那一路：连前面那个空行一起拿掉，再把文件尾的空白收成一个换行——回到追加前那一版
+    next = text.replace('\n\n' + WIRE_BLOCK + '\n', '').replace(/\s*$/, '') + '\n'
+  } else if (text.includes(WIRE_BLOCK)) {
+    // 空模板那一路：当初是把 `[]` 换成这一段，换回去就是原样
+    next = text.replace(WIRE_BLOCK, '[]')
+  } else {
+    throw new Error(`补丁里有 ${WIRE_MARK}，但不是我们写的那一段（像是被人改过）——请自己把那几行删掉`)
+  }
+  if (next.trim() === '') next = '[]\n' // 整个文件只剩我们那段的话，摘完得留个合法的空补丁
+  if (patchHasWire(parsePatch(next, '摘完的补丁'))) throw new Error('摘完以后那行还在，没摘干净')
+  return next
+}
+
+// ── 卸载（--uninstall）──────────────────────────────────
+//
+// 装的时候只动四处，卸就把这四处逐条摘回去：
+//   ① <profile>/node_modules/dsh-tag-memory  （junction；只解我们自己拉的那条）
+//   ② <profile>/package.json                 （依赖条目 + bundle 层条目）
+//   ③ <profile>/cordis.patch.yml             （上面那段声明）
+//   ④ 各智能体的 MEMORY.md                   （托管说明块；只认标记，块外不碰）
+// **记忆库（`skills/…` 下的 memory.csv 与字典）一个字都不碰。**
+// 规矩同装：先备份、写完校验、一项不通就**整批不落盘**（宁可不卸，也不留半截）。
+
+if (argv.includes('--uninstall')) {
+  const doIt = mode === 'apply'
+  const plan = []
+  const note = (mark, msg) => plan.push(`${mark}  ${msg}`)
+
+  const curManifest = existsSync(PROFILE_MANIFEST) ? JSON.parse(readFileSync(PROFILE_MANIFEST, 'utf8')) : null
+  // 当初那条链接指向哪，就认哪——装了 `--dest` 的话，指向的是本体副本、不是本仓库。
+  // 清单里记着（`link:<路径>`），照它认；老版本装的（或清单没记）才回落到源码目录。
+  const recordedSpec = curManifest?.dependencies?.[PACKAGE_NAME]
+  const expectedLink = typeof recordedSpec === 'string' && recordedSpec.startsWith('link:')
+    ? resolve(recordedSpec.slice('link:'.length))
+    : resolve(PACKAGE_DIR)
+
+  // ① 链接：只解「当初是我们拉的那条」；实体目录、别人的链接一律不碰
+  let unlinkLink = false
+  try {
+    if (lstatSync(LINK_PATH).isSymbolicLink()) {
+      const to = real(LINK_PATH)
+      if (to === real(expectedLink)) { unlinkLink = true; note('摘', `解链 ${LINK_PATH} → ${to}`) }
+      else note('留', `${LINK_PATH} 是一条链接，但指向别处（${to}）——不动`)
+    } else {
+      note('留', `${LINK_PATH} 不是链接（像是拷进来的实体），不动——要删请自己动手`)
+    }
+  } catch { note('·', `${LINK_PATH} 不存在，跳过`) }
+
+  // ② profile 清单：摘依赖条目与 bundle 层条目（其它键原样保留）
+  let manifestNext = null
+  if (curManifest) {
+    const next = structuredClone(curManifest)
+    let touched = false
+    if (next.dependencies && PACKAGE_NAME in next.dependencies) {
+      delete next.dependencies[PACKAGE_NAME]
+      // 摘空了就整个删掉——空对象没意义，也回不到「本来就没有这个键」
+      if (Object.keys(next.dependencies).length === 0) delete next.dependencies
+      touched = true
+    }
+    const bundles = next.dsh?.profile?.bundles
+    if (Array.isArray(bundles) && bundles.includes(PACKAGE_NAME)) {
+      next.dsh.profile.bundles = bundles.filter((b) => b !== PACKAGE_NAME)
+      touched = true
+      // 摘空了就把我们自己搭起来的空壳一层层收掉——留着空的 bundles / profile / dsh，
+      // 就回不到「本来就没有这个键」那一版（卸载后 diff 不为空就是这么来的）。
+      // 只为别的插件写的那些键（非空数组、别的子键）一律不碰。
+      if (next.dsh.profile.bundles.length === 0) {
+        delete next.dsh.profile.bundles
+        if (Object.keys(next.dsh.profile).length === 0) {
+          delete next.dsh.profile
+          if (Object.keys(next.dsh).length === 0) delete next.dsh
+        }
+      }
+    }
+    if (touched) { manifestNext = JSON.stringify(next, null, 2) + '\n'; note('摘', `清单里的依赖条目与 bundle 条目（${PROFILE_MANIFEST}）`) }
+    else note('·', '清单里没有我们的条目，跳过')
+  } else {
+    note('·', `${PROFILE_MANIFEST} 不存在，跳过`)
+  }
+
+  // ③ 补丁：整段照抄地对上才摘
+  let patchNext = null
+  if (existsSync(PROFILE_PATCH)) {
+    const cur = readFileSync(PROFILE_PATCH, 'utf8')
+    if (!cur.includes(WIRE_MARK)) note('·', '补丁里没有我们那段，跳过')
+    else {
+      // 分两种「有」：① 顶层那一段是我们加的 → 照抄地对上才摘；
+      // ② 名字出现在**别处**（某个 preset 自己的 plugins 里挂的那一行）→ 那是谁的 preset 谁管，
+      //    不是我们写的，摘了反而拆了别人的智能体。
+      let ours = false
+      try { ours = patchHasWire(parsePatch(cur, 'profile 补丁')) } catch { ours = false }
+      if (!ours) {
+        note('留', `补丁里另有 ${WIRE_MARK} 的引用（像是某个 preset 自己的 plugins 里挂的）——那是它的配置，我们不碰`)
+      } else {
+        try { patchNext = stripDeclaration(cur); note('摘', `补丁里那段声明（${PROFILE_PATCH}）`) }
+        catch (e) { note('✗', `补丁摘不掉：${String(e?.message ?? e)}`) }
+      }
+    }
+  } else {
+    note('·', `${PROFILE_PATCH} 不存在，跳过`)
+  }
+
+  // ④ 记忆文件里的托管块
+  const memoryFiles = detectMemoryFiles(PRESET_ROOT, { names: DEFAULT_MEMORY_FILE_NAMES })
+  for (const f of memoryFiles) {
+    const text = readFileSync(f.path, 'utf8')
+    note(text.includes('<!-- BEGIN dsh-tag-memory notice -->') ? '摘' : '·',
+      `${f.agent}/${f.file} 里的说明块${text.includes('<!-- BEGIN dsh-tag-memory notice -->') ? '' : '（没有，跳过）'}`)
+  }
+  if (memoryFiles.length === 0) note('·', `${PRESET_ROOT} 下没有记忆文件，跳过`)
+
+  const blocked = plan.some((l) => l.startsWith('✗'))
+
+  if (!doIt) {
+    console.log(plan.join('\n'))
+    console.log(`\n以上是预演（一个字节没动）。加 --apply 才会真卸。`)
+    console.log('⚠ 记忆库（store/memory.csv 与字典）不在清单里——**卸插件不删记忆**。')
+    process.exit(blocked ? 1 : 0)
+  }
+  if (blocked) {
+    console.log(plan.join('\n'))
+    console.error('\n拒绝卸载：上面有摘不掉的项。一个字节没动——先把它处理掉再来。')
+    process.exit(1)
+  }
+
+  // 落盘：先备份，再写
+  if (unlinkLink) {
+    unlinkSync(LINK_PATH)
+    console.log(`✓ 已解链 ${LINK_PATH}`)
+  }
+  if (manifestNext !== null) {
+    const bak = `${PROFILE_MANIFEST}.bak-tag-memory-${Date.now()}`
+    copyFileSync(PROFILE_MANIFEST, bak)
+    writeFileSync(PROFILE_MANIFEST, manifestNext, 'utf8')
+    console.log(`✓ 已摘清单条目 → ${PROFILE_MANIFEST}（备份 ${bak}）`)
+  }
+  if (patchNext !== null) {
+    const bak = `${PROFILE_PATCH}.bak-tag-memory-${Date.now()}`
+    copyFileSync(PROFILE_PATCH, bak)
+    writeFileSync(PROFILE_PATCH, patchNext, 'utf8')
+    console.log(`✓ 已摘补丁里的声明 → ${PROFILE_PATCH}（备份 ${bak}）`)
+  }
+  let removed = 0
+  for (const f of memoryFiles) {
+    try {
+      const r = removeNotice(f.path)
+      if (r.changed) { removed++; console.log(`✓ 已摘说明块 → ${f.agent}/${f.file}（备份 ${r.backup}）`) }
+      else console.log(`· 说明块不在 → ${f.agent}/${f.file}`)
+    } catch (e) {
+      console.error(`✗ 说明块摘除失败 ${f.agent}/${f.file}：${String(e?.message ?? e)}`)
+    }
+  }
+  console.log(`\nUNINSTALL OK（摘说明块 ${removed} 个；记忆库一个字节没动）`)
+  console.log('\n⚠ 改动只在重启 DSH 后生效：宿主半与补丁层都只在进程启动时装载。')
+  process.exit(0)
+}
+
 // ── 目标 profile ────────────────────────────────────────
 
 check('profile manifest exists', existsSync(PROFILE_MANIFEST), PROFILE_MANIFEST)
 const before = existsSync(PROFILE_MANIFEST) ? JSON.parse(readFileSync(PROFILE_MANIFEST, 'utf8')) : {}
 const depSpec = before.dependencies?.[PACKAGE_NAME]
 check('profile dependency spec', depSpec === undefined || depSpec.startsWith('link:'), String(depSpec))
+
+// ── 本体放哪 ────────────────────────────────────────────
+// 链接指向哪儿，加载器就从哪儿读。指向**会话下载目录**（`downloads\` / `tmp\` 之类）是实的风险：
+// 那里被清理＝挂载本体凭空消失，界面与工具一起没了，而且不会报错，只是「本来有的东西不见了」。
+const SESSION_DIR = /(^|[\\/])(downloads|tmp|temp)([\\/]|$)/i
+if (BODY_DIR !== resolve(PACKAGE_DIR)) {
+  const there = join(BODY_DIR, 'package.json')
+  if (!existsSync(BODY_DIR) || readdirSync(BODY_DIR).length === 0) {
+    report.push(`PASS  本体将装到 ${BODY_DIR}（--dest；现在是空的，apply 时拷过去）`)
+  } else if (existsSync(there) && JSON.parse(readFileSync(there, 'utf8')).name === EXPECTED_NAME) {
+    report.push(`PASS  本体将装到 ${BODY_DIR}（--dest；已有一份同包，apply 时覆盖刷新）`)
+  } else {
+    check(`--dest 目录可用（${BODY_DIR}）`, false, '那里有东西且不是本包——换个空目录')
+  }
+} else if (DEST) {
+  report.push(`PASS  本体就在源码目录 ${BODY_DIR}（--dest 指的正是它，不拷）`)
+} else {
+  report.push(`PASS  本体就地：${PACKAGE_DIR}（没给 --dest）`)
+  if (SESSION_DIR.test(PACKAGE_DIR)) {
+    report.push(`WARN  本体现在在**会话目录**里（${PACKAGE_DIR}）——那里被清理＝挂载本体消失，`)
+    report.push('      界面上什么都不报，只是「本来有的东西不见了」。加 --dest <持久路径> 重装一次可解。')
+  }
+}
+
+// 已经装着的那条链接指向哪儿？与即将用的本体**不一致**就得说——否则「重装一次」看着成功，
+// 链接还指着老地方（比如已经被清理的下载目录），人以为迁完了其实没有。
+try {
+  if (lstatSync(LINK_PATH).isSymbolicLink()) {
+    const at = real(LINK_PATH)
+    // apply 且不一致时会被重指，这里只按 check 的口径报；一致就不吭声
+    if (at !== real(BODY_DIR)) {
+      report.push(`WARN  profile 里那条链接指向别处：${at}`)
+      report.push(isOurLink(LINK_PATH)
+        ? `      本次要用的本体是 ${BODY_DIR}——apply 会把它重指过去（解到的地方确实是本包）。`
+        : `      本次要用的本体是 ${BODY_DIR}——但解到的地方不是本包，apply 不会动它，请自己处理。`)
+    }
+  }
+} catch { /* 没有链接：还没装过，正常 */ }
+
+// ── 智能体半接没接上 ────────────────────────────────────
+// 宿主半（设置页 / 记忆文件托管）由本包的 bundle patch 自动接上；**字典段与两个工具**
+// 在 preset 半里，得靠 profile 补丁里的内联声明。没接上时界面照样能用，只是智能体
+// 永远看不到字典、也调不到那两个工具——所以这里必须报出来，不能静默。
+const patchText = existsSync(PROFILE_PATCH) ? readFileSync(PROFILE_PATCH, 'utf8') : ''
+// 「接上了」有三种情形，别混成一句：全局那段（我们加的）/ 只挂在某个 preset 里（用户自己挂的）/
+// 压根没有。前两种都能跑，但只有第一种对**以后新建的**智能体也生效。
+let wireState = 'none' // 'global' | 'scoped' | 'none'
+if (patchText.includes(WIRE_MARK)) {
+  try { wireState = patchHasWire(parsePatch(patchText, 'profile 补丁')) ? 'global' : 'scoped' }
+  catch { wireState = 'scoped' } // 解析不了就不乱断言
+}
+let wired = wireState === 'global' // apply 时会被 wire() 改写
+report.push(
+  wireState === 'global'
+    ? `PASS  智能体半已接线（profile 平面、全局）— ${PROFILE_PATCH}`
+    : wireState === 'scoped'
+      ? `PASS  智能体半已接线，但只挂在某个 preset 里 —— 换个智能体就没有；想人人有份加 --wire-presets（${PROFILE_PATCH}）`
+      : `WARN  智能体半未接线 —— 字典段与 memory_write / memory_recall 不会出现在任何智能体里；加 --wire-presets 接上（${PROFILE_PATCH}）`,
+)
 
 // ── 记忆文件探测（check 模式下预览，apply 模式下写入）───
 
@@ -155,6 +463,11 @@ if (mode === 'check') {
     console.log(`\n若加 --apply，会往上面 ${memoryFiles.length} 个记忆文件写「记忆系统在运行」说明块`)
     console.log('（只认标记、只追加/原位替换、块外不动、首次落笔留 .bak）。')
   }
+  if (!wired) {
+    console.log(`\n若加 --wire-presets，会往 ${PROFILE_PATCH} 追加一条内联声明，`)
+    console.log('把「字典段 + memory_write / memory_recall」在 profile 平面全局注册给所有智能体。')
+  }
+  console.log('\n⚠ 改完必须重启 DSH 才生效：宿主半与补丁层都只在进程启动时装载。')
   process.exit(fail.length === 0 ? 0 : 1)
 }
 
@@ -166,18 +479,48 @@ if (fail.length > 0) {
   process.exit(1)
 }
 
+// 0. （--dest）把本体拷到持久目录，再从那儿发链接
+if (BODY_DIR !== resolve(PACKAGE_DIR)) {
+  mkdirSync(BODY_DIR, { recursive: true })
+  const there = join(BODY_DIR, 'package.json')
+  if (existsSync(there)) {
+    const name = JSON.parse(readFileSync(there, 'utf8')).name
+    if (name !== EXPECTED_NAME) {
+      console.error(`拒绝安装：${BODY_DIR} 里已有一个包（${name}），不是空目录——换一个 --dest，或先自己清掉`)
+      process.exit(1)
+    }
+  }
+  // filter 收到的是逐层的源/目标路径：源路径就长在 PACKAGE_DIR 下面，切出来只看名字
+  cpSync(PACKAGE_DIR, BODY_DIR, {
+    recursive: true,
+    force: true,
+    filter: (src) => !destSkip(relative(PACKAGE_DIR, src).split(/[\\/]/)[0]),
+  })
+  console.log(`✓ 本体已拷到 ${BODY_DIR}（不带 .git / node_modules / privhub / store）`)
+} else if (DEST) {
+  console.log(`· --dest 就是源码目录本身，不拷`)
+}
+
 // 1. node_modules 链接（Windows 用 junction，无需提权）
 mkdirSync(join(PROFILE_DIR, 'node_modules'), { recursive: true })
 let existed = false
 try { existed = lstatSync(LINK_PATH).isDirectory() || lstatSync(LINK_PATH).isSymbolicLink() } catch { existed = false }
-if (existed) console.log(`已存在，跳过：${LINK_PATH}`)
-else { symlinkSync(PACKAGE_DIR, LINK_PATH, 'junction'); console.log(`已链接 ${LINK_PATH} -> ${PACKAGE_DIR}`) }
+if (!existed) { symlinkSync(BODY_DIR, LINK_PATH, 'junction'); console.log(`已链接 ${LINK_PATH} -> ${BODY_DIR}`) }
+else if (isOurLink(LINK_PATH) && real(LINK_PATH) !== real(BODY_DIR)) {
+  // 指着别处（我们自己的另一份）：重指到本次要用的本体。否则「重装一次」看着成功，
+  // 链接还指着老地方——比如那个随会话被清理的下载目录，人以为迁完了其实没有。
+  unlinkSync(LINK_PATH)
+  symlinkSync(BODY_DIR, LINK_PATH, 'junction')
+  console.log(`已重指 ${LINK_PATH} -> ${BODY_DIR}`)
+} else {
+  console.log(`已存在，跳过：${LINK_PATH}`)
+}
 
 // 1b. 本包自己的依赖锚点：junction 模块按真实路径解析，裸 import 需要能走到 profile 的 hoist 目录
 const HOIST_DIR = existsSync(join(PROFILE_DIR, '..', 'node_modules'))
   ? join(PROFILE_DIR, '..', 'node_modules')
   : join(PROFILE_DIR, 'node_modules')
-const SELF_MODULES = join(PACKAGE_DIR, 'node_modules')
+const SELF_MODULES = join(BODY_DIR, 'node_modules')
 let selfExisted = false
 try { selfExisted = lstatSync(SELF_MODULES).isDirectory() || lstatSync(SELF_MODULES).isSymbolicLink() } catch { selfExisted = false }
 if (selfExisted) console.log(`依赖锚点已存在：${SELF_MODULES}`)
@@ -190,7 +533,7 @@ if (existsSync(PROFILE_MANIFEST)) {
   console.log(`已备份 profile 清单 → ${bak}`)
 }
 const after = structuredClone(before)
-after.dependencies = { ...(after.dependencies ?? {}), [PACKAGE_NAME]: `link:${PACKAGE_DIR}` }
+after.dependencies = { ...(after.dependencies ?? {}), [PACKAGE_NAME]: `link:${BODY_DIR}` }
 after.dependencies = Object.fromEntries(Object.entries(after.dependencies).sort(([a], [b]) => a.localeCompare(b)))
 const bundles = [...(after.dsh?.profile?.bundles ?? [])]
 if (!bundles.includes(PACKAGE_NAME)) bundles.push(PACKAGE_NAME)
@@ -212,39 +555,44 @@ for (const f of memoryFiles) {
 }
 if (memoryFiles.length === 0) console.log(`· 没有记忆文件可写（${PRESET_ROOT}）`)
 
-// 4. （可选）接线：把 /preset 行加进各智能体的 agent.cordis.yml
-if (wirePresets) {
-  const PRESET_ROW = [
-    '',
-    '# ── 记忆：标签记忆（dsh-tag-memory）──────────────────────────────',
-    '# 字典每轮由插件注入；memory_write / memory_recall 两个工具。',
-    '# 数据在记忆库的 store/memory.csv。回滚：删掉下面三行。',
-    '- id: tag-memory',
-    "  name: 'dsh-tag-memory/preset'",
-    '  config:',
-    '    dir: !!js "process.getBuiltinModule(\'node:url\').fileURLToPath(new URL(\'.\', baseUrl))"',
-    '',
-  ].join('\n')
-  for (const dir of presetDirs()) {
-    const yml = join(dir, 'agent.cordis.yml')
-    if (!existsSync(yml)) continue
-    const text = readFileSync(yml, 'utf8')
-    if (text.includes('dsh-tag-memory/preset')) { console.log(`· preset 已接线 → ${dir}`); continue }
-    const bak = `${yml}.bak-tag-memory-${Date.now()}`
-    copyFileSync(yml, bak)
-    const next = text.replace(/\s*$/, '') + '\n' + PRESET_ROW
-    if (yaml) {
-      try {
-        yaml.load(next)
-      } catch (e) {
-        console.error(`✗ 接线会让 YAML 非法，已回滚 ${yml}：${e.message}`)
-        continue
-      }
-    }
-    writeFileSync(yml, next, 'utf8')
-    console.log(`✓ preset 已接线 → ${dir}（备份 ${bak}）`)
+// 4. （可选）接线：把智能体半挂进 profile 补丁
+//
+// 为什么是这里、而不是各智能体的 `agent.cordis.yml`：
+//   0.2.0 起 preset 是 **profile 补丁里的内联声明行**（`dsh-agent-preset`），
+//   `<DSH_HOME>/.agent-presets/*/agent.cordis.yml` 已不被任何代码读取——写进去等于没写。
+// 为什么挂全局、而不是逐个 preset：
+//   `dsh-tools` 与 `dsh-system-prompt` 在 0.2.0 都装在 **profile 平面**（`dsh-base`），
+//   全局注册
+//   对所有智能体可见（局部注册按名字遮蔽全局，反之不成立）。挂一行，人人有份，
+//   也不必去改别人已经写好的 preset 声明。
+
+/** 往 <profile>/cordis.patch.yml 追加一段内联声明；先备份、写完解析校验、失败不留痕。 */
+function wire() {
+  if (!existsSync(PROFILE_PATCH)) {
+    console.error(`✗ 接线跳过：没有 ${PROFILE_PATCH}`)
+    return
   }
+  const text = readFileSync(PROFILE_PATCH, 'utf8')
+  if (text.includes(WIRE_MARK)) {
+    console.log(`· 智能体半已接线 → ${PROFILE_PATCH}`)
+    return
+  }
+  const BAK = `${PROFILE_PATCH}.bak-tag-memory-${Date.now()}`
+  copyFileSync(PROFILE_PATCH, BAK)
+  let next
+  try {
+    next = appendDeclaration(text)
+  } catch (e) {
+    rmSync(BAK, { force: true }) // 一字未动就别留孤儿 .bak
+    console.error(`✗ 接线未落盘（原文件未改）：${String(e?.message ?? e)}`)
+    return
+  }
+  writeFileSync(PROFILE_PATCH, next, 'utf8')
+  wired = true
+  console.log(`✓ 智能体半已接线 → ${PROFILE_PATCH}（备份 ${BAK}）`)
 }
+
+if (wirePresets) wire()
 
 // ── 解析自检 ────────────────────────────────────────────
 
@@ -257,11 +605,7 @@ console.log(resolved === undefined
   ? 'RESOLVE FAILED — 加载器会找不到本包'
   : `加载器解析到：${resolved}`)
 console.log(resolved === undefined ? 'INSTALL INCOMPLETE' : `INSTALL OK（记忆块写入 ${wrote} 个）`)
-
-/** 枚举 <DSH_HOME>/.agent-presets 下的目录（智能体档案目录，不要求含记忆文件）。 */
-function presetDirs() {
-  if (!existsSync(PRESET_ROOT)) return []
-  return readdirSync(PRESET_ROOT, { withFileTypes: true })
-    .filter((e) => e.isDirectory())
-    .map((e) => join(PRESET_ROOT, e.name))
+if (resolved !== undefined) {
+  console.log('\n⚠ 改动只在重启 DSH 后生效：宿主半与补丁层都只在进程启动时装载。')
+  if (!wired) console.log('  （智能体半还没接线，见上面那条 WARN；加 --wire-presets 接上。）')
 }

@@ -16,7 +16,7 @@ import { constants as FS } from 'node:fs'
 import { basename, join, isAbsolute, resolve } from 'node:path'
 import {
   BACKUP_CFG_PATH, CSV_PATH, INDEX_PATH, LOCK_PATH, PRESET_ROOT, SKILL_DIR, STORE_DIR,
-  backupReady, getBackupCore, getCore, loadSchema, ready,
+  backupReady, coreStale, getBackupCore, getCore, loadSchema, ready, setLibraryDir,
 } from './lib/store.mjs'
 import { DEFAULT_MEMORY_FILE_NAMES, NOTICE_BEGIN, detectMemoryFiles, renderNotice, selfHeal } from './lib/notice.mjs'
 
@@ -31,6 +31,9 @@ const ROUTE = '/tag-memory-api'
 const HEAL_COOLDOWN_MS = 3000
 
 export function apply(ctx, config = {}) {
+  // 库目录：配置优先；没配就是原来的推断链（环境变量 → 默认），行为与旧版一模一样。
+  setLibraryDir(config.libraryDir)
+
   const presetRoot =
     typeof config.presetRoot === 'string' && config.presetRoot.trim() !== ''
       ? config.presetRoot.trim()
@@ -173,7 +176,9 @@ export function apply(ctx, config = {}) {
 
 function overview(notice) {
   // `header` 是库自己的列序——表格视图照它排，库长什么样就显示什么样。
-  const base = { ready: ready(), skillDir: SKILL_DIR, csvPath: CSV_PATH, notice, sorts: SORT_ORDER, header: [], dimensions: [], statusValues: [], total: 0, active: 0, byDimension: {} }
+  // skillDir = **实际在用**的库目录（config.libraryDir 指到哪就报哪）；coreStale = 换了目录
+  // 但这份 Node 不能同步重载核心——界面据此说「重启 DSH 才生效」，不装作已经换好了。
+  const base = { ready: ready(), skillDir: SKILL_DIR, csvPath: CSV_PATH, coreStale: coreStale(), notice, sorts: SORT_ORDER, header: [], dimensions: [], statusValues: [], total: 0, active: 0, byDimension: {} }
   if (!base.ready) return base
   const schema = loadSchema()
   const core = getCore()

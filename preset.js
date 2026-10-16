@@ -1,10 +1,15 @@
 // preset.js —— 每个智能体的那一半：字典注入 + 两个工具
 //
-// 挂载方式（在智能体自己的 preset 的 agent.cordis.yml 里）：
-//   - id: tag-memory
-//     name: 'dsh-tag-memory/preset'
-//     config:
-//       dir: !!js "…baseUrl…"   # 该智能体的档案目录（决定 `角色`）
+// 挂载方式（加进 profile 补丁那一层；`install.mjs --wire-presets` 会把这一段写好）：
+//   - insert:
+//       - id: tag-memory-preset
+//         name: 'dsh-tag-memory/preset'
+//         config:
+//           agent: '某某'        # 写进 `角色` 列；不填则依次取 preset 目录名、智能体 id
+//           libraryDir: '…'      # 记忆库在哪；不填则取环境变量 DSH_TAG_MEMORY_SKILL_DIR、再取默认位置
+//
+// 挂在 **profile 平面**（与 `dsh-tools` / `dsh-system-prompt` 平级）＝ 该 profile 下所有智能体
+// 都有字典段与那两个工具；挂在某个 preset 的 plugins 里＝只有那一个智能体有。
 //
 // 贡献两样，都绑定到**这一个**智能体：
 //   1. systemPrompt.section —— 「标签字典」段，**函数值，每轮重读**。这是两段式架构里
@@ -26,6 +31,7 @@ import {
   projectName,
   ready,
   resolveAgentId,
+  setLibraryDir,
   SKILL_DIR,
 } from './lib/store.mjs'
 
@@ -39,7 +45,7 @@ function degradedNotice() {
   return [
     '## 记忆库未就绪',
     `> 没找到记忆库目录（找的是 \`${SKILL_DIR}\`）。`,
-    '> 记忆写入 / 召回不可用；请把记忆库放到该位置，或用 `DSH_TAG_MEMORY_SKILL_DIR` 指定它的位置。',
+    '> 记忆写入 / 召回不可用；请把记忆库放到该位置，或用 config 的 `libraryDir`（或环境变量 `DSH_TAG_MEMORY_SKILL_DIR`）指定它的位置。',
   ].join('\n')
 }
 
@@ -92,6 +98,9 @@ function keywordSearch(schema, header, rows, kw) {
 // ── 挂载 ────────────────────────────────────────────────
 
 export function apply(ctx, config = {}) {
+  // 库目录：配置优先；没配就是原来的推断链（环境变量 → 默认），一个字节都不变。
+  setLibraryDir(config.libraryDir)
+
   const schema = (() => { try { return loadSchema() } catch { return null } })()
 
   // ① 字典段：函数值 → 每轮重读；内容恒定 → 缓存友好。

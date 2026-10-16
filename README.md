@@ -43,8 +43,8 @@ DSH 插件：让智能体**有一份自己的记忆库**——存成 CSV，稳�
 id 内容 时间 环境 原因 备注 稳定性 成熟度 距离 角色 项目 状态 关键词 工具 版本 依据
 ```
 
-加一份维度字典（schema）。默认放在 `<DSH_HOME>/skills/marsma101-tag-memory`，
-可用环境变量 `DSH_TAG_MEMORY_SKILL_DIR` 指到别处。
+加一份维度字典（schema）。默认放在 `<DSH_HOME>/skills/marsma101-tag-memory`；
+要放别处，用配置里的 `libraryDir`（或环境变量 `DSH_TAG_MEMORY_SKILL_DIR`）指过去。
 
 **只追加**：新记录追加到末尾，旧条目靠 `状态` 退场（`被取代` / `已归档`），**不删行**。
 所以库只有一个方向长——任何一版都能原样备份、原样回滚。
@@ -149,22 +149,49 @@ id 内容 时间 环境 原因 备注 稳定性 成熟度 距离 角色 项目 �
 ## 自检
 
 ```bash
-node scripts/selftest.mjs   # 127 项断言；全程沙箱（临时复制一份记忆库），不碰任何 live 数据
+node scripts/selftest.mjs   # 179 项断言；全程沙箱（临时复制一份记忆库），不碰任何 live 数据
 node scripts/install.mjs    # 只读校验：包结构 + profile 清单 + 预览会写哪些记忆文件
 ```
 
 交付/测试用命令：`selftest.mjs` 全过 + `install.mjs`（check）全 PASS 即可视为可安装。
+
+> 在**还没装记忆库**的机器上，`selftest.mjs` 会把 A–K 整节报成 `SKIP` 并说清缺哪几个文件
+> （`pass=1 fail=0 skip=11`，退出码 0）——那是「还没装」，不是「装坏了」，所以不报 FAIL。
 
 ## 安装
 
 ```bash
 node scripts/install.mjs                         # 只读校验 + 预览会写哪些记忆文件
 node scripts/install.mjs --apply                 # 安装（链接 + profile 清单 + 写记忆块）
-node scripts/install.mjs --apply --wire-presets  # 顺带把 /preset 行接进各智能体的 agent.cordis.yml
+node scripts/install.mjs --apply --wire-presets  # 顺带把「智能体半」接进 profile 补丁
+node scripts/install.mjs --uninstall             # 预览要摘掉哪些（只读，一个字节不动）
+node scripts/install.mjs --uninstall --apply     # 卸干净：四处逐一摘回原样
+node scripts/install.mjs --apply --dest <路径>   # 先把本体拷到 <路径>，再从那儿发链接
 node scripts/install.mjs --dsh-home <路径> --profile <名>   # 装到别的 DSH / 别的 profile
 ```
 
 装完需**重启 DSH** 才生效。所有被改的文件，脚本都会先留 `.bak-<时间戳>`。
+
+> **本体别留在会话目录里。** 链接默认直接指向源码目录。源码要是在 `downloads\` 这类
+> **会话目录**里，那里被清理＝挂载本体凭空消失——界面上什么都不报，只是「本来有的东西不见了」。
+> `--dest <路径>` 先把本体拷过去、再从那儿发链接；只在本机、不该跟着搬的东西
+> （`.git` / `node_modules` / 开发记录 / 运行时的库与备份）不拷。不填 `--dest` 则与从前完全一样。
+> check 会发现「本体在会话目录里」或「链接指着别处」，都会报出来；apply 时链接指着我们自己的
+> 另一份，会**重指**到本次要用的本体。
+
+> **半装与整装。** `--apply` 装的是**宿主半**（profile 平面的 `index.js`：设置页 API、
+> 记忆文件托管），它由本包自带的 bundle patch 自动接上。
+> 「字典段 + `memory_write` / `memory_recall`」在**智能体半**里，要 `--wire-presets`
+> 才往 `<profile>/cordis.patch.yml` 追加一条声明（先备份、写完解析校验、失败一字不落）。
+> 只装了宿主半时，界面照样能用，但**任何智能体都拿不到字典、也调不到那两个工具**。
+> `install.mjs` 的 check 输出会把这一项报成 `WARN`，不会静默。
+
+> **`--uninstall` 摘的是上面那四处**：`node_modules` 里的链接、profile 清单里的依赖与 bundle 条目、
+> profile 补丁里的那段声明、各智能体 `MEMORY.md` 里的说明块——摘回原样，逐条校验，
+> 有一项摘不干净就**整批不落盘**（宁可不卸，也不留半截）。
+> **记忆库（`store/memory.csv` 与字典）不在清单里：卸插件不删记忆。**
+> 链接只解「当初是我们拉的那一条」（`--dest` 装的话，认的是清单里记的那个落点）；
+> 别人写在别处的引用（比如某个 preset 自己的 `plugins` 里挂的那一行）是它的配置，我们不碰。
 
 > 客户端那半（`client.js`）DSH 会自己热更，改完刷新浏览器即可；
 > **宿主那半（`index.js`）只在进程启动时装载**，改了必须重启。
@@ -177,19 +204,27 @@ node scripts/install.mjs --dsh-home <路径> --profile <名>   # 装到别的 DS
 - id: tag-memory
   name: dsh-tag-memory
   config:
+    libraryDir: 'D:\skills\marsma101-tag-memory'  # 记忆库在哪；不填见下
     memoryFileNames: ['MEMORY.md']   # 探测哪些文件算「记忆文件」
     notice: true                     # 关掉则不写记忆块
     migrateLegacyDict: true          # 是否接管旧的手工字典块
+    presetRoot: 'D:\…\.agent-presets'  # 找不到记忆文件时才填
 ```
 
-`preset.js`（每个智能体）：
+`preset.js`（智能体半；这一段 `install.mjs --wire-presets` 会自动写好）：
 
 ```yaml
-- id: tag-memory
-  name: 'dsh-tag-memory/preset'
-  config:
-    dir: !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('.', baseUrl))"
+- insert:
+    - id: tag-memory-preset
+      name: 'dsh-tag-memory/preset'
+      config:
+        agent: '某某'                # 写进 `角色` 列；不填则依次取 preset 目录名、智能体 id
+        libraryDir: 'D:\skills\marsma101-tag-memory'   # 不填见下
 ```
+
+**记忆库在哪，按这个次序找**：`libraryDir` → 环境变量 `DSH_TAG_MEMORY_SKILL_DIR` →
+`<DSH_HOME>/skills/marsma101-tag-memory`。**不填就是后面两条**，与之前的行为逐字一致。
+两半都挂了时，谁先装载谁说了算——两处都写、且写成不一样，是配置错误。
 
 ## 许可证
 

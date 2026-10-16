@@ -16,12 +16,21 @@
  *   F. client —— 静态检查 + 槽位登记（真跑一遍 apply）
  *   G. 渲染冒烟 —— 最小 React 桩真渲一遍「记忆」页；含「主位通则」版式断言
  *   H. backup —— 备份核心的边角：不覆盖已有内容、轮转、CLI 是薄壳
+ *   I. 接装 —— 真跑一遍 install.mjs：接线产物是合法 YAML、失败不留痕
+ *   J. 卸载 —— 装 → 卸 → 逐字节回到原样，记忆库一个字没动
+ *   K. 库目录可配（libraryDir）
+ *   L. 本体落点（--dest）+ 空环境跳过
  *
- * 退出码：0 = 全过；1 = 有 FAIL。
+ * 没有记忆库的机器上：A…K **整节跳过**（说清缺什么），不报假 FAIL，退出码仍是 0。
+ *
+ * 退出码：0 = 全过（含「跳过」）；1 = 有 FAIL。
  */
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, copyFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, copyFileSync, existsSync, symlinkSync, cpSync, realpathSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -36,13 +45,43 @@ const ok = (label, cond, detail = '') => {
 }
 const skipped = (label, why) => { skip++; results.push(`SKIP  ${label} — ${why}`) }
 
-const sandbox = mkdtempSync(join(tmpdir(), 'tagmem-selftest-'))
-
-// ── 造沙箱技能：把真技能的 schema 与 core 复制过去，库换成自造小库 ──
+// ── 空环境闸：没有记忆库就**跳过**，不报假 FAIL ──────────────
+//     这套自检要读记忆库里的字典（tags.schema.json）与读写核心（scripts/lib/core.mjs）。
+//     在一台**还没装库**的机器上，这些文件本来就不在——那是「还没装」，不是「装坏了」。
+//     以前这里会当场 ENOENT 抛出去，报一条 `FAIL 未捕获异常`，看着像插件坏了。
+//     现在：把每一节都标明跳过、说清缺哪几个文件、怎么补，然后**以 0 退出**。
 const HOME = process.env.USERPROFILE ?? process.env.HOME ?? ''
 const DSH_HOME = process.env.DSH_HOME?.trim() || join(HOME, '.dsh')
 const realSkill = process.env.DSH_TAG_MEMORY_SKILL_DIR?.trim() || join(DSH_HOME, 'skills', 'marsma101-tag-memory')
 
+const NEEDED_LIB = [
+  'references/tags.schema.json',
+  'scripts/lib/core.mjs',
+  'scripts/lib/backup.mjs',
+  'store/memory.csv',
+]
+const missingLib = NEEDED_LIB.filter((f) => !existsSync(join(realSkill, f)))
+if (missingLib.length > 0) {
+  for (const s of [
+    'A. core（解析/校验/筛选）', 'B. notice（记忆文件托管）', 'C. store（定位库/载字典）',
+    'D. preset（字典段与两个工具）', 'E. index（只读端点 / 备份·恢复·合并）', 'F. client（槽位登记）',
+    'G. 渲染冒烟（「记忆」页）', 'H. backup（轮转·不覆盖）', 'I. 接装与接线',
+    'J. 卸载往返', 'K. 库目录可配',
+  ]) skipped(s, '记忆库不在，这一节读不到字典与读写核心')
+  results.push(`      记忆库路径：${realSkill}`)
+  results.push(`      缺：${missingLib.join('、')}`)
+  results.push('      —— 跳过不等于通过：装好记忆库再跑。插件自身的静态项随时可查：node scripts/install.mjs check')
+  const pkg0 = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
+  ok('package.json 导出 ./client 且声明 dsh.client（不看库也查得了）',
+    pkg0.exports['./client'] === './client.js' && pkg0.dsh?.client?.platform === 'web')
+  console.log(results.join('\n'))
+  console.log(`\nSELFTEST SKIPPED（这台机器上还没有记忆库）   pass=${pass} fail=${fail} skip=${skip}`)
+  process.exit(0)
+}
+
+const sandbox = mkdtempSync(join(tmpdir(), 'tagmem-selftest-'))
+
+// ── 造沙箱技能：把真技能的 schema 与 core 复制过去，库换成自造小库 ──
 const sandboxSkill = join(sandbox, 'skill')
 mkdirSync(join(sandboxSkill, 'references'), { recursive: true })
 mkdirSync(join(sandboxSkill, 'scripts', 'lib'), { recursive: true })
@@ -766,6 +805,326 @@ try {
     const cliSrc = readFileSync(join(realSkill, 'scripts', 'backup.mjs'), 'utf8')
     ok('CLI 是薄壳：逻辑都从 lib/backup.mjs 来（界面与命令行同一条路径）',
       cliSrc.includes("from './lib/backup.mjs'") && !cliSrc.includes('createHash'))
+  }
+
+  // ── I. 装/接线（install.mjs）—— 钉死那次「挂错了」的坑 ─────────────
+  //     `--wire-presets` 曾经往 `<DSH_HOME>/.agent-presets/*/agent.cordis.yml` 追加行，
+  //     那份文件 0.2.0 **一个字节都不读**：装的人以为接上了，实际谁都没有工具。
+  //     现在让它往 `<profile>/cordis.patch.yml` 追加一条内联声明（profile 平面全局注册）。
+  //     这一步全部在沙箱里跑真脚本，验的是**落盘产物**：合法 YAML、那行在、原有的一字不动、
+  //     失败一字不落、幂等、不再产出那个没人读的文件。
+  {
+    const yamlLib = createRequire(join(PKG, 'package.json'))('js-yaml')
+    const WIRE = 'dsh-tag-memory/preset'
+    const home = join(sandbox, 'dsh-home')
+    const profDir = join(home, 'profiles', 'web')
+    const patchFile = join(profDir, 'cordis.patch.yml')
+    // 先把链接位与 hoist 目录占上（照着 install 的产物做）：install.mjs 见到已存在就跳过，
+    // 不会再动真仓库那一侧；这条 junction 指回本仓库，只读。
+    // 沙箱是用 rmSync 清的——它**不会**顺着 junction 删过去（验过：目标里的金丝雀文件还在）。
+    mkdirSync(join(profDir, 'node_modules'), { recursive: true })
+    mkdirSync(join(home, 'profiles', 'node_modules'), { recursive: true })
+    symlinkSync(PKG, join(profDir, 'node_modules', 'dsh-tag-memory'), 'junction')
+    writeFileSync(join(profDir, 'package.json'),
+      JSON.stringify({ dependencies: {}, dsh: { profile: { bundles: [] } } }, null, 2), 'utf8')
+    // 摆一个智能体的 MEMORY.md：既验托管块，也验「不再产出 agent.cordis.yml」
+    const presetDir = join(home, '.agent-presets', '小助手')
+    mkdirSync(presetDir, { recursive: true })
+    const ownMemory = '# 我自己写的\n\n这段是用户手写的，一个字节都不许动。\n'
+    writeFileSync(join(presetDir, 'MEMORY.md'), ownMemory, 'utf8')
+
+    const install = (extra = []) => spawnSync(process.execPath,
+      [join(PKG, 'scripts', 'install.mjs'), '--dsh-home', home, '--profile', 'web', ...extra],
+      { env: { ...process.env, DSH_TAG_MEMORY_SKILL_DIR: sandboxSkill }, encoding: 'utf8' })
+    const bakCount = () => readdirSync(profDir).filter((f) => f.startsWith('cordis.patch.yml.bak-tag-memory-')).length
+    // 装载器读补丁用的就是这份默认 schema（我们那段里没有 !!js 之类自定义标签）
+    const rowsIn = (text) => {
+      let v
+      try { v = yamlLib.load(text) } catch (e) { return { err: String(e?.message ?? e) } }
+      if (!Array.isArray(v)) return { err: '顶层不是数组' }
+      return { rows: v.flatMap((e) => (Array.isArray(e?.insert) ? e.insert : [])) }
+    }
+
+    // 1) 空补丁模板（`[]`）· 未接线 → check 必须报 WARN，不许静默
+    writeFileSync(patchFile, '# 这个 profile 的补丁\n[]\n', 'utf8')
+    {
+      const r = install()
+      const line = r.stdout.split('\n').find((l) => l.includes('智能体半')) ?? ''
+      ok('未接线时 check 报 WARN（半装不许静默）',
+        line.startsWith('WARN') && line.includes('智能体半未接线'), line)
+      ok('check 收尾提醒「须重启 DSH」', r.stdout.includes('须重启 DSH 才生效'))
+    }
+
+    // 2) 接线：`[]` 要**被换掉**，不能接在数组后面（那样整份就不是合法 YAML 了）
+    {
+      const r = install(['--apply', '--wire-presets'])
+      const wired = readFileSync(patchFile, 'utf8')
+      const parsed = rowsIn(wired)
+      ok('接线产物是合法 YAML（装载器方言 load 得动）', Array.isArray(parsed.rows), parsed.err ?? r.stderr.trim())
+      ok('补丁里出现那条声明，id 与 name 都对',
+        parsed.rows?.some((x) => x?.name === WIRE && x?.id === 'tag-memory-preset') === true, JSON.stringify(parsed.rows))
+      ok('空模板的 `[]` 是被换掉的，不是接在数组后面', !/^[ \t]*\[[ \t]*\][ \t]*$/m.test(wired))
+      ok('模板里原有的注释留在原处', wired.includes('# 这个 profile 的补丁'))
+      ok('apply 收尾也提醒「重启 DSH 后才生效」',
+        r.stdout.includes('改动只在重启 DSH 后生效') && r.stdout.includes('INSTALL OK'))
+
+      // 托管块照旧落在智能体的 MEMORY.md 里，用户自己写的部分一字不动
+      const mem = readFileSync(join(presetDir, 'MEMORY.md'), 'utf8')
+      ok('记忆文件托管：说明块写进去了，用户手写的那段原样还在',
+        mem.includes('<!-- BEGIN dsh-tag-memory notice -->') && mem.includes('这段是用户手写的，一个字节都不许动。'))
+      const stray = []
+      const walk = (d) => {
+        for (const e of readdirSync(d, { withFileTypes: true })) {
+          const p = join(d, e.name)
+          if (e.isDirectory()) walk(p)
+          else if (e.name === 'agent.cordis.yml') stray.push(p)
+        }
+      }
+      walk(join(home, '.agent-presets'))
+      ok('接线不再产出 .agent-presets/*/agent.cordis.yml（那是 0.2.0 不读的文件）', stray.length === 0, stray.join('、'))
+    }
+
+    // 3) 幂等：再跑一次，补丁文件一个字节都不该变
+    {
+      const before = readFileSync(patchFile, 'utf8')
+      install(['--apply', '--wire-presets'])
+      ok('重复接线不改补丁（幂等）', readFileSync(patchFile, 'utf8') === before)
+      ok('接线后 check 报「已接线」', install().stdout.includes('智能体半已接线'))
+    }
+
+    // 4) 非空、注释多的补丁：只追加，原有条目一字不动
+    {
+      const RICH = [
+        '# ── 基础层 ──',
+        '- id: tools',
+        '  disabled: false',
+        '',
+        '# ── 别人家的插件 ──',
+        '- insert:',
+        '    - id: something-else',
+        "      name: 'other-plugin/thing'",
+        '',
+      ].join('\n')
+      writeFileSync(patchFile, RICH, 'utf8')
+      install(['--apply', '--wire-presets'])
+      const after = readFileSync(patchFile, 'utf8')
+      const parsed = rowsIn(after)
+      ok('非空补丁：原有内容一字不动，新行追加在末尾',
+        after.startsWith(RICH.replace(/\s*$/, '') + '\n') &&
+        parsed.rows?.some((x) => x?.name === 'other-plugin/thing') === true &&
+        parsed.rows?.some((x) => x?.name === WIRE) === true,
+        parsed.err ?? '')
+      const top = yamlLib.load(after)
+      ok('原有非 insert 条目（- id: tools）也还在',
+        Array.isArray(top) && top.some((e) => e?.id === 'tools' && e?.disabled === false))
+    }
+
+    // 5) 失败不留痕：补丁是坏 YAML → 原文件一字不动，且不留孤儿 .bak
+    {
+      const BROKEN = '# 坏补丁\n- insert:\n    - id: [没闭合\n'
+      writeFileSync(patchFile, BROKEN, 'utf8')
+      const bakBefore = bakCount()
+      const r = install(['--apply', '--wire-presets'])
+      ok('补丁是坏 YAML 时：原文件一字未动、不留孤儿 .bak',
+        readFileSync(patchFile, 'utf8') === BROKEN && bakCount() === bakBefore,
+        `bak ${bakBefore}→${bakCount()}；${r.stderr.split('\n').filter(Boolean).pop() ?? ''}`)
+      ok('失败时把话说清楚（接线未落盘、原文件未改）', r.stderr.includes('接线未落盘'))
+    }
+  }
+
+  // ── J. 卸载（install.mjs --uninstall）—— 装 → 卸 → 再装，逐字节回到原样 ────
+  //     卸载最容易出的事是「摘不干净」或「顺手多删」：留下的半截声明会让下一个装的人
+  //     看见一个坏掉的补丁，多删的则是记忆。这里把三样都钉死：受管的文件回到原样、
+  //     记忆库一个字没动、被人手改过的段落**宁可不摘也不猜着改**。
+  {
+    const WIRE = 'dsh-tag-memory/preset'
+    const home = join(sandbox, 'un-home')
+    const profDir = join(home, 'profiles', 'web')
+    const patchFile = join(profDir, 'cordis.patch.yml')
+    const pkgFile = join(profDir, 'package.json')
+    const memFile = join(home, '.agent-presets', '小助手', 'MEMORY.md')
+    mkdirSync(join(profDir, 'node_modules'), { recursive: true })
+    mkdirSync(join(home, 'profiles', 'node_modules'), { recursive: true })
+    mkdirSync(join(home, '.agent-presets', '小助手'), { recursive: true })
+    symlinkSync(PKG, join(profDir, 'node_modules', 'dsh-tag-memory'), 'junction')
+
+    const run = (extra = []) => spawnSync(process.execPath,
+      [join(PKG, 'scripts', 'install.mjs'), '--dsh-home', home, '--profile', 'web', ...extra],
+      { env: { ...process.env, DSH_TAG_MEMORY_SKILL_DIR: sandboxSkill }, encoding: 'utf8' })
+    const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex')
+    // 记忆库（沙箱那本）动没动：库 + 字典各取一份指纹
+    const libSha = () => [sha(csvPath), sha(join(sandboxSkill, 'references', 'tags.schema.json'))]
+
+    const cases = [
+      { name: '空补丁模板（`[]`）', patch: '# 这个 profile 的补丁\n[]\n' },
+      {
+        name: '非空补丁（别的插件 + 注释）',
+        patch: '# 基础\n- id: tools\n  disabled: false\n\n# 别人家的\n- insert:\n    - id: other\n      name: "other-plugin/thing"\n',
+        pkg: JSON.stringify({ name: 'web', dependencies: { 'other-plugin': 'link:D:/x' }, dsh: { profile: { bundles: ['other-plugin'] } } }, null, 2) + '\n',
+      },
+    ]
+
+    for (const c of cases) {
+      writeFileSync(patchFile, c.patch, 'utf8')
+      writeFileSync(pkgFile, c.pkg ?? JSON.stringify({ name: 'web' }, null, 2) + '\n', 'utf8')
+      writeFileSync(memFile, '# 我自己写的\n\n用户手写的内容。\n', 'utf8')
+      const want = { patch: sha(patchFile), pkg: sha(pkgFile), mem: sha(memFile) }
+      const lib0 = libSha()
+
+      const r1 = run(['--apply', '--wire-presets'])
+      const inst = r1.stdout.includes('INSTALL OK')
+      const r2 = run(['--uninstall', '--apply'])
+      ok(`装→卸（${c.name}）：两个命令都成，且受管文件逐字节回到原样`,
+        inst && r2.stdout.includes('UNINSTALL OK') &&
+        sha(patchFile) === want.patch && sha(pkgFile) === want.pkg && sha(memFile) === want.mem,
+        inst ? r2.stdout.slice(-240) + r2.stderr.slice(-240) : r1.stdout.slice(-240) + r1.stderr.slice(-240))
+      ok(`装→卸（${c.name}）：链接解掉了`, !existsSync(join(profDir, 'node_modules', 'dsh-tag-memory')))
+      ok(`装→卸（${c.name}）：记忆库与字典逐字节未变`,
+        libSha()[0] === lib0[0] && libSha()[1] === lib0[1])
+      ok(`装→卸（${c.name}）：卸完 check 没有 FAIL`,
+        !run().stdout.includes('FAIL'))
+    }
+
+    // 被人手改过那一段：报错、且**整批不落盘**（宁可不摘，也不猜着改别人的文件）
+    {
+      writeFileSync(patchFile, '# 基础\n- id: tools\n', 'utf8')
+      writeFileSync(pkgFile, JSON.stringify({ name: 'web' }, null, 2) + '\n', 'utf8')
+      run(['--apply', '--wire-presets'])
+      const edited = readFileSync(patchFile, 'utf8')
+        .replace(`      name: '${WIRE}'`, `      name: '${WIRE}'   # 我手改过`)
+      writeFileSync(patchFile, edited, 'utf8')
+      const pkgSha = sha(pkgFile)
+      const r = run(['--uninstall', '--apply'])
+      ok('手改过的段落：摘不掉就明说，且整批不落盘（补丁/清单都没动）',
+        r.status === 1 && r.stdout.includes('✗') &&
+        readFileSync(patchFile, 'utf8') === edited && sha(pkgFile) === pkgSha,
+        r.stdout.slice(-240))
+    }
+  }
+
+  // ── K. 库目录可配（`libraryDir` / P-6）──────────────────────────────
+  //     库路径以前只有环境变量一条通道（换库得改宿主启动环境）。现在配置里就能给。
+  //     钉两条：① **不配 = 与本版之前完全一致**（这条最要紧，绝大多数人走的是它）；
+  //     ② 配了 = 当场换过去，字典与读写全都走新库。
+  {
+    const lib2 = join(sandbox, 'lib2')
+    cpSync(sandboxSkill, lib2, { recursive: true })
+
+    // 另起一份 store 实例：这一步要动库目录，不能把前面用着的那份搅了
+    const store2 = await import(pathToFileURL(join(PKG, 'lib', 'store.mjs')).href + '?p6=' + Date.now())
+
+    ok('不配 libraryDir：落回原来的推断链（环境变量 → 默认），与本版之前一模一样',
+      store2.SKILL_DIR === sandboxSkill && store2.CSV_PATH === join(sandboxSkill, 'store', 'memory.csv'),
+      store2.SKILL_DIR)
+    ok('不配 libraryDir：setLibraryDir 什么都不做（幂等）', store2.setLibraryDir(undefined) === false)
+
+    ok('配了 libraryDir：当场换过去，一串路径全跟着走',
+      store2.setLibraryDir(lib2) === true && store2.SKILL_DIR === resolve(lib2) &&
+      store2.STORE_DIR === join(resolve(lib2), 'store') &&
+      store2.CSV_PATH === join(resolve(lib2), 'store', 'memory.csv'))
+    ok('换完：字典从新库读、核心也是从新库加载的（不是手上那份老库的）',
+      !!store2.loadSchema() && store2.ready() && store2.getCore() !== store.getCore())
+
+    // 读写确实落在新库上：往新库写一条，新库多一条、老库一条不多
+    {
+      const before1 = store2.getCore().readTable(readFileSync(store2.CSV_PATH, 'utf8')).rows.length
+      const before2 = store.getCore().readTable(readFileSync(csvPath, 'utf8')).rows.length
+      store2.getCore().appendEntry({ schema: store2.loadSchema(), csvPath: store2.CSV_PATH, lockPath: store2.LOCK_PATH, row: {
+        内容: 'K 节写进新库的一条', 环境: 'selftest 沙箱', 原因: '证明读写走的是新库',
+        类型: '记忆', 深度: '语义', 稳定性: '稳定', 距离: '按需', 角色: 'selftest', 项目: '通用', 依据: '推断',
+      } })
+      ok('读写确实落在新库上：新库 +1 条，老库一条不多',
+        store2.getCore().readTable(readFileSync(store2.CSV_PATH, 'utf8')).rows.length === before1 + 1 &&
+        store.getCore().readTable(readFileSync(csvPath, 'utf8')).rows.length === before2)
+    }
+
+    ok('设成同一个目录：什么都不做', store2.setLibraryDir(lib2) === false)
+    ok('指到不存在的目录：ready=false，路径照实报出来（不假装还是好的）',
+      store2.setLibraryDir(join(sandbox, '不存在的库')) === true &&
+      store2.ready() === false && store2.SKILL_DIR === resolve(join(sandbox, '不存在的库')))
+  }
+
+  // ── L. 本体落点（`--dest` / P-7）与空环境跳过（P-2）─────────────────
+  //     P-7：链接默认直接指着源码目录。源码要是在**会话下载目录**里，那里被清理＝挂载本体
+  //     凭空消失（界面什么都不报，只是「本来有的东西不见了」）。`--dest` 把本体拷到持久目录，
+  //     再从那儿发链接；只在本机、不该跟着搬的东西（.git / node_modules / privhub / store / 备份）不拷。
+  {
+    const home = join(sandbox, 'dest-home')
+    const profDir = join(home, 'profiles', 'web')
+    const linkPath = join(profDir, 'node_modules', 'dsh-tag-memory')
+    const pkgFile = join(profDir, 'package.json')
+    const dest = join(sandbox, '本体')
+    mkdirSync(join(profDir, 'node_modules'), { recursive: true })
+    mkdirSync(join(home, 'profiles', 'node_modules'), { recursive: true })
+    mkdirSync(join(home, '.agent-presets', '小助手'), { recursive: true })
+    writeFileSync(join(profDir, 'cordis.patch.yml'), '[]\n', 'utf8')
+    writeFileSync(pkgFile, JSON.stringify({ name: 'web' }, null, 2) + '\n', 'utf8')
+
+    // 造一份「源码」：照本仓库的样子带上那些**不该跟着搬**的东西
+    const src = join(sandbox, '源码')
+    cpSync(PKG, src, {
+      recursive: true,
+      filter: (s) => !/(^|[\\/])(node_modules|\.git|privhub|store)([\\/]|$)/.test(s),
+    })
+    for (const d of ['.git', 'privhub', 'store']) mkdirSync(join(src, d), { recursive: true })
+    writeFileSync(join(src, 'package.json.bak-20260101'), '{"x":1}\n', 'utf8')
+    writeFileSync(join(src, 'install.log'), 'log\n', 'utf8')
+
+    const run = (from, extra = []) => spawnSync(process.execPath,
+      [join(from, 'scripts', 'install.mjs'), '--dsh-home', home, '--profile', 'web', ...extra],
+      { env: { ...process.env, DSH_TAG_MEMORY_SKILL_DIR: sandboxSkill }, encoding: 'utf8' })
+    const linkTo = () => { try { return resolve(realpathSync(linkPath)) } catch { return '' } }
+
+    // 1) --dest：本体拷过去，链接指过去
+    const r1 = run(src, ['--apply', '--dest', dest])
+    ok('--dest：装成功，且明说了本体拷到哪',
+      r1.stdout.includes('INSTALL OK') && r1.stdout.includes('本体已拷到'), r1.stdout.slice(-200))
+    ok('--dest：本体确实落在 dest（清单与三半都在）',
+      existsSync(join(dest, 'package.json')) && existsSync(join(dest, 'index.js')) &&
+      existsSync(join(dest, 'preset.js')) && existsSync(join(dest, 'client.js')) &&
+      existsSync(join(dest, 'lib')) && existsSync(join(dest, 'scripts')))
+    ok('--dest：只在本机的东西没跟着搬（.git / privhub / store / 备份 / 日志）',
+      !existsSync(join(dest, '.git')) && !existsSync(join(dest, 'privhub')) &&
+      !existsSync(join(dest, 'store')) && !existsSync(join(dest, 'package.json.bak-20260101')) &&
+      !existsSync(join(dest, 'install.log')),
+      readdirSync(dest).join('、'))
+    ok('--dest：profile 的链接指到 dest，不是源码目录', linkTo() === resolve(dest), linkTo())
+    ok('--dest：清单里的依赖也记的是 dest（卸载据此认链）',
+      JSON.parse(readFileSync(pkgFile, 'utf8')).dependencies['dsh-tag-memory'] === `link:${resolve(dest)}`)
+    // dest 得是一份能自己跑起来的副本：拿它自己的 install.mjs 去 check
+    const rChk = run(dest, [])
+    ok('--dest：dest 是一份能独立跑的副本（用它自己的 install.mjs check 得动）',
+      rChk.status === 0 && rChk.stdout.includes('CHECK OK'), rChk.stdout.slice(-200))
+
+    // 2) 从**源码**侧卸载（不带 --dest）：照样认得那条链——靠清单里记的落点
+    const r2 = run(src, ['--uninstall', '--apply'])
+    ok('--dest 装的那份，从源码侧也能卸掉（认清单里记的落点，不是靠「必须等于源码目录」）',
+      r2.stdout.includes('UNINSTALL OK') && !existsSync(linkPath), r2.stdout.slice(-200))
+
+    // 3) 重装接回源码侧：链接该被**重指**过去，而不是「已存在，跳过」
+    run(src, ['--apply'])
+    ok('--dest 卸完不带走本体（dest 还在，下次还能指过去）', existsSync(join(dest, 'package.json')))
+    ok('重装（不给 --dest）把链接重指回源码目录', linkTo() === resolve(src), linkTo())
+
+    // 4) dest 里有别人的包：拒绝，且一个字节不动
+    const dest2 = join(sandbox, '别人的')
+    mkdirSync(dest2, { recursive: true })
+    writeFileSync(join(dest2, 'package.json'), JSON.stringify({ name: '别人的包' }, null, 2) + '\n', 'utf8')
+    const foreignBefore = readFileSync(join(dest2, 'package.json'), 'utf8')
+    const r4 = run(src, ['--apply', '--dest', dest2])
+    ok('--dest 指到一个装着别人的包的目录：拒绝安装，且一个字不动',
+      r4.status === 1 && r4.stdout.includes('FAIL') &&
+      readFileSync(join(dest2, 'package.json'), 'utf8') === foreignBefore &&
+      !existsSync(join(dest2, 'index.js')), r4.stdout.slice(-200))
+
+    // 5) 空环境：没有记忆库 → 整节跳过、fail=0、退出码 0
+    const r5 = spawnSync(process.execPath, [join(PKG, 'scripts', 'selftest.mjs')],
+      { env: { ...process.env, DSH_TAG_MEMORY_SKILL_DIR: join(sandbox, '这台机器上没有这个库') }, encoding: 'utf8' })
+    ok('独立空环境：记忆库不在 → 跳过而不是假 FAIL（fail=0，退出码 0）',
+      r5.status === 0 && /fail=0\b/.test(r5.stdout) && /skip=\d+/.test(r5.stdout),
+      `exit=${r5.status} ${r5.stdout.split('\n').filter(Boolean).pop() ?? ''}`)
+    ok('空环境的输出说清「缺的是库、装好再跑」，不装作测过了',
+      r5.stdout.includes('记忆库不在') && r5.stdout.includes('SELFTEST SKIPPED') && r5.stdout.includes('跳过不等于通过'))
   }
 
   const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
