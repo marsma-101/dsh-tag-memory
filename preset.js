@@ -7,13 +7,19 @@
 //         config:
 //           agent: '某某'        # 写进 `角色` 列；不填则依次取 preset 目录名、智能体 id
 //           libraryDir: '…'      # 记忆库在哪；不填则取环境变量 DSH_TAG_MEMORY_SKILL_DIR、再取默认位置
+//           snapshot:            # 每轮注入「记忆快照」的预算。提示词是硬成本，值都可调
+//             enabled: true      # 关掉就退回「只注入字典」
+//             maxPinned: 6       #   常驻条目最多放几条全文
+//             maxBodyChars: 4000 #   全部全文条目的字数上限（常驻优先占）
+//             maxIndexLines: 40  #   索引行上限
 //
 // 挂在 **profile 平面**（与 `dsh-tools` / `dsh-system-prompt` 平级）＝ 该 profile 下所有智能体
 // 都有字典段与那两个工具；挂在某个 preset 的 plugins 里＝只有那一个智能体有。
 //
 // 贡献两样，都绑定到**这一个**智能体：
-//   1. systemPrompt.section —— 「标签字典」段，**函数值，每轮重读**。这是两段式架构里
-//      「第一段：模型读字典、自己判断」的落地。内容字节恒定（省缓存）。
+//   1. systemPrompt.section —— 「标签字典 + 记忆快照」段，**函数值，每轮重读**。这是两段式架构里
+//      「第一段：模型读字典、自己判断」的落地；快照部分带上「这个项目现在能用上的条目」，
+//      让记忆**不用去查就在眼前**。
 //   2. 两个工具 —— 两段式架构里「第二段：程序执行」：
 //        memory_write  收字典名字段 → 四道门槛(模型侧) + 字典校验 + 文件锁取号 + 追加一行
 //        memory_recall 收结构化条件（与/或/非/留白/多值/区间）→ 执行筛选 → 先报总数，再取前 3
@@ -56,6 +62,158 @@ function dictText() {
   } catch (e) {
     return `## 记忆：字典渲染失败\n> ${String(e?.message ?? e)}`
   }
+}
+
+// ── 记忆快照（紧跟在字典后面，每次装配重读）──────────────
+//
+// 光有字典＝「桌上放着索引卡」：模型知道有本手册，但得**先想起去查**。快照把「现在能用上的
+// 条目」直接摆在眼前，作用等价于「备忘录贴在显示器边上」。
+//
+// 分档的判据是「能不能直接用」——不是按重要性排，是按**适用边界**排：
+//
+//   常驻（`距离=常驻`，状态=生效）              → 全文。标了常驻就是「每轮必读」
+//   通用 / 本项目（`项目=通用` 或 = 当前工作区名）→ 全文，受字数预算约束
+//   其余（别的项目的条目）                       → **只给一行索引**：正文不进上下文
+//   深藏（`距离=深藏`）                          → 同上，只给一行（`原文` 条一律是深藏）
+//   被取代 / 已归档                              → 不出现
+//
+// 「别的项目只给一行」是**结构性闸门**，不是提示词劝阻：看得到的东西一定会被顺手用，
+// 只给一行索引，等于把它降级成一条线索——想用就得先 `memory_recall` 取正文。
+//
+// 三档都是硬成本，全部可配（见文件头 `snapshot`）：超了按 `id` 倒序截断，并在段里**明说**
+// 截了多少——宁可让模型知道「还有没放进来的」，也不要让它以为库里就这么多。
+
+// 缺省取「保守档」：这是**每轮**都要付的 token 账。以一份约 150 条生效条目的库为例：
+//   6 / 4000 / 40 → 约 9.7k 字符（≈6k tokens）；10 / 6000 / 60 → 约 13k 字符（≈8.1k tokens）；
+//   5 / 2000 / 20 → 约 6.6k 字符（≈4.1k tokens）。嫌贵就往下调，嫌记不住就往上调。
+const SNAPSHOT_DEFAULTS = { enabled: true, maxPinned: 6, maxBodyChars: 4000, maxIndexLines: 40 }
+
+function snapshotConfig(config) {
+  const s = (config && typeof config.snapshot === 'object' && config.snapshot) || {}
+  const num = (v, d) => (Number.isFinite(v) && v >= 0 ? Math.floor(v) : d)
+  return {
+    enabled: s.enabled !== false,
+    maxPinned: num(s.maxPinned, SNAPSHOT_DEFAULTS.maxPinned),
+    maxBodyChars: num(s.maxBodyChars, SNAPSHOT_DEFAULTS.maxBodyChars),
+    maxIndexLines: num(s.maxIndexLines, SNAPSHOT_DEFAULTS.maxIndexLines),
+  }
+}
+
+/** 全文一条：首行带 id，续行缩进，末尾一行汇「环境 / 原因」。 */
+function snapshotFull(get, row) {
+  const body = String(get(row, '内容') ?? '').split('\n')
+  const lines = [`- [${get(row, 'id')}] ${body[0]}`]
+  for (const l of body.slice(1)) if (String(l).trim() !== '') lines.push('  ' + l)
+  const tail = []
+  if (get(row, '环境')) tail.push(`环境：${get(row, '环境')}`)
+  if (get(row, '原因')) tail.push(`原因：${get(row, '原因')}`)
+  if (tail.length) lines.push('  ' + tail.join('｜'))
+  return lines.join('\n')
+}
+
+/** 索引一行：够知道它存在，不够直接照做。 */
+function snapshotIndex(get, row) {
+  const where = get(row, '项目') || '未注明项目'
+  const first = String(get(row, '内容') ?? '').split('\n')[0]
+  return `- [${get(row, 'id')}] 在「${where}」：${first}`
+}
+
+/** 按 id 倒序（新写的在前）——库里 `id` 就带日期与序号，等价于写入次序。 */
+const byIdDesc = (a, b) => String(b.id ?? '').localeCompare(String(a.id ?? ''))
+
+/**
+ * 渲染记忆快照正文。读不到库、库为空 → 返回空串（只注入字典，不占预算）。
+ * `project` 是当前工作区文件夹名；拿不到（没有 cwd）时只有 常驻 / 通用 进全文档。
+ */
+function snapshotText(config, project) {
+  const cfg = snapshotConfig(config)
+  if (!cfg.enabled || !ready()) return ''
+
+  const core = getCore()
+  let schema, header, rows
+  try {
+    schema = loadSchema()
+    const t = core.readTable(readFileSync(CSV_PATH, 'utf8'))
+    header = t.header ?? []
+    rows = t.rows ?? []
+  } catch { return '' }
+
+  const resolve = core.makeResolver(schema, header)
+  const get = (row, name) => { const i = resolve(name); return i >= 0 ? String(row[i] ?? '') : '' }
+
+  const live = rows
+    .filter((r) => !['被取代', '已归档'].includes(get(r, '状态')))
+    .map((r) => ({ row: r, id: get(r, 'id') }))
+  if (live.length === 0) return ''
+
+  const isPinned = (e) => get(e.row, '距离') === '常驻'
+  const isHere = (e) => {
+    const p = get(e.row, '项目')
+    return p === '通用' || (project !== '' && p === project)
+  }
+  const pinned = live.filter(isPinned).sort(byIdDesc)
+  const local = live.filter((e) => !isPinned(e) && isHere(e)).sort(byIdDesc)
+  const rest = live.filter((e) => !isPinned(e) && !isHere(e)).sort(byIdDesc)
+
+  const pinnedCut = pinned.slice(cfg.maxPinned) // 超过条数上限 → 只留索引
+  const degraded = []                            // 字数预算内放不下 → 降级成索引
+  let bodyChars = 0
+
+  const renderFull = (list) => {
+    const kept = []
+    for (const e of list) {
+      const text = snapshotFull(get, e.row)
+      if (bodyChars + text.length > cfg.maxBodyChars) { degraded.push(e); continue }
+      kept.push(text)
+      bodyChars += text.length
+    }
+    return kept
+  }
+
+  // 常驻先占预算，剩下的给 本项目 / 通用。
+  const pinnedKept = renderFull(pinned.slice(0, cfg.maxPinned))
+  const localKept = renderFull(local)
+  const fullCount = pinnedKept.length + localKept.length
+
+  const indexAll = rest.concat(degraded, pinnedCut)
+  const indexTop = indexAll.slice(0, cfg.maxIndexLines)
+
+  const blocks = []
+  if (pinnedKept.length) blocks.push('### 常驻（每轮必读，直接沿用）', '', pinnedKept.join('\n'), '')
+  if (localKept.length) {
+    blocks.push(`### 本项目 / 通用（相关即可直接用${project ? '；当前项目：' + project : ''}）`, '', localKept.join('\n'), '')
+  }
+  if (indexTop.length) {
+    blocks.push(
+      '### 其他项目 / 深藏（**只给索引，正文不在上下文里**）',
+      '',
+      '这些做法不构成本项目的默认选择——要用先 `memory_recall` 取正文；跨项目沿用前先向用户说明。',
+      '',
+      indexTop.map((e) => snapshotIndex(get, e.row)).join('\n'),
+      '',
+    )
+  }
+
+  const notes = []
+  if (pinnedCut.length) notes.push(`常驻超过上限 ${cfg.maxPinned} 条，其中 ${pinnedCut.length} 条只留索引。`)
+  if (degraded.length) notes.push(`全文预算（${cfg.maxBodyChars} 字）放不下 ${degraded.length} 条，已降为索引。`)
+  if (indexAll.length > indexTop.length) notes.push(`索引还有 ${indexAll.length - indexTop.length} 条未列出，用 memory_recall 查。`)
+
+  const parts = [
+    '## 记忆快照（装配时重读；只放「能直接用」的，其余靠 memory_recall 查）',
+    `> 当前项目：${project || '（未识别）'}｜生效 ${live.length} 条：全文 ${fullCount} 条 / 只索引 ${indexAll.length} 条`,
+  ]
+  if (notes.length) parts.push('', ...notes.map((n) => `> ${n}`))
+  if (blocks.length) parts.push('', ...blocks)
+
+  return parts.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()
+}
+
+/** 注入给模型的整段：字典 + 记忆快照。快照为空时就是字典本身。 */
+function injectText(config, project) {
+  const dict = dictText()
+  const snap = snapshotText(config, project)
+  return snap === '' ? dict : dict + '\n\n---\n\n' + snap
 }
 
 // ── 召回结果渲染 ────────────────────────────────────────
@@ -103,11 +261,12 @@ export function apply(ctx, config = {}) {
 
   const schema = (() => { try { return loadSchema() } catch { return null } })()
 
-  // ① 字典段：函数值 → 每轮重读；内容恒定 → 缓存友好。
+  // ① 注入段：字典 + 记忆快照。函数值 → 每轮重读；库不变则字节不变 → 缓存友好。
+  //    快照按「当前工作区」切片，所以这里必须接 `context`（拿得到调用方智能体与会话）。
   ctx.systemPrompt.section({
     name: 'tag-memory:dict',
     order: ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_PREFIX') + 1,
-    text: () => dictText(),
+    text: (context) => injectText(config, projectName(cwdOf(context?.agent))),
   })
 
   // ② 写
@@ -182,7 +341,9 @@ export function apply(ctx, config = {}) {
     defineTool({
       name: 'memory_recall',
       description: [
-        '按多维标签召回记忆。先把条件写成 JSON 放进「条件」。',
+        '按多维标签召回记忆。**上下文里已经有的不要再来查**——每轮注入的「记忆快照」里能直接看到的，直接用。',
+        '这个工具是给「快照里没有的」用的：要展开只给了索引的条目、要按条件跨条筛、要翻本项目之外的历史。',
+        '先把条件写成 JSON 放进「条件」。',
         '【两段式】你只负责按字典把维度定下来、给程序去筛；不要自己心算结果。',
         '【条件语言】默认「与」；支持 {"或":[…]} / {"非":{…}} / {"深度":"留白"} / 多值 {"深度":["语义","程序"]} / 区间 {"时间":{"区间":["2026-10-01","2026-10-13"]}}。',
         '【白名单】某维取值「通用」的条目在任何条件下命中；【黑名单】留白默认不命中，只有显式筛「留白」才中。',

@@ -235,6 +235,16 @@ window.__ModuleLoader__.load({
 .tm-kv-row{display:grid;grid-template-columns:auto 1fr;gap:12px}
 .tm-kv-k{color:var(--dsw-alias-label-secondary);white-space:nowrap}
 .tm-kv-v{word-break:break-word}
+
+/* ── 标签字典（设置页那份只读展示）──
+   一个取值一行：左边是取值本身，右边是「它是什么意思、什么时候用它」。 */
+.tm-dict-lead{font-size:12px;line-height:1.6}
+.tm-dict-item{display:flex;gap:10px;align-items:baseline;padding:6px 0;font-size:12px;line-height:1.6}
+.tm-dict-item+.tm-dict-item{border-top:1px solid var(--dsw-alias-separator,rgba(127,127,127,.14))}
+.tm-dict-val{flex:none;font-weight:600;white-space:nowrap}
+.tm-dict-desc{flex:1 1 auto;color:var(--dsw-alias-label-secondary);word-break:break-word}
+.tm-dict-rule{flex:none;font:11px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color:var(--dsw-alias-label-secondary)}
 `
 
 		/** 样式表每个文档注入一次。 */
@@ -712,7 +722,7 @@ window.__ModuleLoader__.load({
 				try {
 					const r = await postJSON(`${API}/restore`, { stamp })
 					if (r.ok) {
-						setBkNote({ kind: 'ok', text: `已整体替换成 ${stamp} 那一版（${r.entryCount} 条）。替换前的那一版留档在 ${r.preBackup}。` })
+						setBkNote({ kind: 'ok', text: `已整体替换成 ${stamp} 那一版（${r.entryCount} 条）。替换前的那一版留档在 ${r.preBackup}。${r.schema === undefined || r.schema === null ? '' : `字典：${r.schema.note}`}` })
 						setRestoreOpen(false)
 						if (r.status) setBk(r.status)
 						await reloadEntries()
@@ -1380,7 +1390,10 @@ window.__ModuleLoader__.load({
 								React.createElement('span', null, row.at !== '' ? shortTime(row.at) : '—'),
 								React.createElement('span', null, row.count !== null ? `${row.count} 条` : ''),
 								row.label !== '' ? React.createElement('span', { className: 'tm-note' }, row.label) : null,
-								React.createElement('span', { className: 'tm-tag' }, row.complete ? humanBytes(row.bytes) : '不完整'),
+								// 「无字典」只标**加字典之前**的老备份（`hasSchema === false`）；旧宿主不报这一项，
+								// 那就是 `undefined`，什么都不标——不拿新规矩去猜旧数据。
+								React.createElement('span', { className: 'tm-tag' },
+									`${row.complete ? humanBytes(row.bytes) : '不完整'}${row.hasSchema === false ? ' · 无字典' : ''}`),
 								React.createElement(
 									'button',
 									{
@@ -1574,7 +1587,7 @@ window.__ModuleLoader__.load({
 											React.createElement('span', null, row.at !== '' ? shortTime(row.at) : '—'),
 											React.createElement('span', null, row.count !== null ? `${row.count} 条` : ''),
 											row.label !== '' ? React.createElement('span', { className: 'tm-note' }, row.label) : null,
-											React.createElement('span', { className: 'tm-tag' }, `${humanBytes(row.bytes)}${row.complete ? '' : ' · 不完整'}`),
+											React.createElement('span', { className: 'tm-tag' }, `${humanBytes(row.bytes)}${row.hasSchema === false ? ' · 无字典' : ''}${row.complete ? '' : ' · 不完整'}`),
 										)),
 							)
 						: null,
@@ -1603,6 +1616,11 @@ window.__ModuleLoader__.load({
 
 			const dims = overview !== null && Array.isArray(overview.dimensions) ? overview.dimensions : []
 			const counts = overview !== null ? overview.byDimension ?? {} : {}
+			// 格子数对不上的行：列按下标读，错位的那一行后面每格都串到别列上——
+			// 表格看着照常有值，值是错的。这件事**必须**在页面上说出来，不能让人对着串了位的表做判断。
+			const ragged = overview !== null && overview.health && Array.isArray(overview.health.ragged)
+				? overview.health.ragged
+				: []
 
 			const hits = items
 			const selectedCount = Object.keys(selected).length
@@ -1628,6 +1646,16 @@ window.__ModuleLoader__.load({
 				renderDirPane(),
 				renderRestorePane(),
 				renderMergePane(),
+
+				ragged.length > 0
+					? React.createElement(
+							'div',
+							{ className: 'tm-note tm-err' },
+							`库里有 ${ragged.length} 行字段数对不上：${ragged.slice(0, 5).map((r) => `第 ${r.row} 条（${r.id || '没有 id'}，${r.got} 格 / 应为 ${r.want} 格）`).join('、')}${ragged.length > 5 ? ' 等' : ''}。`,
+							React.createElement('br'),
+							'列是按位置读的，这些行往后每一格都可能串到别的字段上——表里显示的值不可信。修好之前写入会被拒绝：把那一行补齐到与表头同样多的格子，或者用「恢复」退回上一份备份。',
+						)
+					: null,
 
 				error !== null
 					? React.createElement('div', { className: 'tm-note tm-err' }, `读取失败：${error}`)
@@ -1821,9 +1849,226 @@ window.__ModuleLoader__.load({
 			)
 		}
 
-		/** 设置页那一栏：设置面板窄，一行放不下表格，默认给卡片。 */
-		function MemorySettingsPane(props) {
-			return React.createElement(MemorySection, { defaultView: 'cards', pickDir: props?.pickDir, listDir: props?.listDir })
+		/**
+		 * 设置页那一栏：**标签字典的只读展示**。
+		 *
+		 * 原来这里是把主区那套（条目表 + 筛选 + 备份 / 恢复 / 合并）原样搬过来一份，
+		 * 窄栏里挤成一堆，用户看到的是「同一个东西出现了两次」。现在两边**各司其职**：
+		 * 主区（侧边栏「记忆」）＝**库**（记了什么、怎么写新的）；这里＝**字典**（怎么判、按什么规则）。
+		 *
+		 * **只读是刻意的，不是没做完。** 字典是程序判定记忆的唯一依据：它每轮注入给这个 DSH 下的
+		 * 所有智能体，还同时是写入校验的判据与筛选语义的来源——改一处等于改全库的读写。
+		 * 所以这一版连一个可编辑控件都不放，只把字典**照实显示**出来。
+		 */
+		function MemoryDictPane() {
+			const [dict, setDict] = React.useState(null)
+			const [error, setError] = React.useState(null)
+
+			React.useEffect(() => {
+				let alive = true
+				loadJSON(`${API}/dict`)
+					.then((d) => { if (alive) setDict(d) })
+					.catch((e) => { if (alive) setError(String(e?.message ?? e)) })
+				return () => { alive = false }
+			}, [])
+
+			/** 一行取值：「取值本身」+「它是什么意思」。 */
+			const valueRow = (v, i) => React.createElement(
+				'div',
+				{ key: `${v.value}#${i}`, className: 'tm-dict-item' },
+				React.createElement('span', { className: 'tm-dict-val' }, v.value),
+				v.desc !== '' ? React.createElement('span', { className: 'tm-dict-desc' }, v.desc) : null,
+			)
+
+			/** 一行「名目：说法」。没写就不摆一行空壳。 */
+			const metaRow = (k, v) => (v === '' || v === null || v === undefined || v === false)
+				? null
+				: React.createElement(
+						'div',
+						{ className: 'tm-dict-item' },
+						React.createElement('span', { className: 'tm-dict-val' }, k),
+						React.createElement('span', { className: 'tm-dict-desc' }, String(v)),
+					)
+
+			/** 一个维度（或辅助列）一张卡：头顶标签，底下取值与判据。 */
+			const dimCard = (d, key) => {
+				const chips = []
+				if (d.role !== '') chips.push(d.role)
+				if (d.column === null) chips.push('未落列')
+				else if (d.column !== d.name) chips.push(`落列：${d.column}`)
+				if (d.required) chips.push('必填')
+				if (d.cap !== null) chips.push(`上限 ${d.cap}`)
+				if (d.status !== '') chips.push(d.status)
+				const meta = [
+					metaRow('何时判', d.when),
+					metaRow('怎么判', d.how),
+					metaRow('升降', d.lifts),
+					metaRow('受谁管', d.gate === null ? '' : `${d.gate.when} → 否则${d.gate.otherwise}`),
+					metaRow('留意', d.note),
+				].filter(Boolean)
+				return React.createElement(
+					'div',
+					{ key, className: 'tm-card' },
+					React.createElement(
+						'div',
+						{ className: 'tm-card-h' },
+						React.createElement('h2', { className: 'tm-card-t' }, d.name),
+						chips.map((t, i) => React.createElement('span', { key: `c${i}`, className: 'tm-mtag' }, t)),
+					),
+					d.question !== '' ? React.createElement('div', { className: 'tm-dict-lead' }, d.question) : null,
+					d.values.length > 0
+						? React.createElement('div', { style: { marginTop: '4px' } }, d.values.map(valueRow))
+						: null,
+					d.text !== '' ? React.createElement('div', { className: 'tm-note', style: { marginTop: '6px' } }, d.text) : null,
+					meta.length > 0 ? React.createElement('div', { style: { marginTop: '6px' } }, meta) : null,
+				)
+			}
+
+			const ready = dict !== null && dict.ready === true
+			const dims = ready && Array.isArray(dict.dimensions) ? dict.dimensions : []
+			const aux = ready && Array.isArray(dict.auxiliary) ? dict.auxiliary : []
+			const rules = ready && dict.rules !== null && typeof dict.rules === 'object' ? dict.rules : null
+			const routes = ready && dict.writeRoutes !== null && typeof dict.writeRoutes === 'object' ? dict.writeRoutes : null
+			const recall = ready && dict.recall !== null && typeof dict.recall === 'object' ? dict.recall : null
+
+			return React.createElement(
+				'div',
+				{ className: 'tm-root' },
+				React.createElement(
+					'div',
+					{ className: 'tm-headrow' },
+					React.createElement('h1', { className: 'tm-head' }, SECTION_LABEL),
+					React.createElement('span', { className: 'tm-mtag' }, '标签字典 · 只读'),
+				),
+				React.createElement(
+					'div',
+					{ className: 'tm-note' },
+					'字典＝程序判定记忆的规则书：一条输入该不该记、每一维取什么值、筛选按什么算。它每轮注入给这台 DSH 下的所有智能体——改一处等于改全库的读写，所以本页只读。',
+				),
+
+				error !== null
+					? React.createElement('div', { className: 'tm-note tm-err' }, `字典读取失败：${error}`)
+					: null,
+
+				dict === null
+					? React.createElement('div', { className: 'tm-note' }, '读取字典…')
+					: !ready
+						? React.createElement(
+								'div',
+								{ className: 'tm-card' },
+								React.createElement('div', { className: 'tm-note tm-err' }, dict.error ?? '字典读不出来。'),
+								React.createElement('div', { className: 'tm-note', style: { marginTop: '8px' } }, `字典位置：${dict.path}`),
+							)
+						: React.createElement(
+								React.Fragment,
+								null,
+								dict.stale === true
+									? React.createElement('div', { className: 'tm-note tm-warn' }, '⚠ 磁盘上的字典已经改过，宿主还在用启动时装载的那一份——重启 DSH 才会生效。')
+									: null,
+								React.createElement(
+									'div',
+									{ className: 'tm-sub' },
+									`来源：${dict.path}　·　改动时间 ${dict.mtime === null ? '（读不到）' : shortTime(dict.mtime)}${dict.version === '' ? '' : `　·　版本 ${dict.version}`}`,
+								),
+
+								React.createElement('h2', { className: 'tm-pane-t' }, '四个维度（写入时必判）'),
+								dims.map((d, i) => dimCard(d, `dim${i}`)),
+
+								aux.length > 0
+									? React.createElement(
+											'div',
+											{ className: 'tm-card' },
+											React.createElement(
+												'div',
+												{ className: 'tm-card-h' },
+												React.createElement('h2', { className: 'tm-card-t' }, '辅助列'),
+												React.createElement('span', { className: 'tm-mtag' }, '随条记，不单独当维度筛'),
+											),
+											aux.map((a, i) => React.createElement(
+												'div',
+												{ key: `aux${i}` },
+												React.createElement(
+													'div',
+													{ className: 'tm-dict-item' },
+													React.createElement('span', { className: 'tm-dict-val' }, `${a.name}${a.column === null ? '（未落列）' : ''}${a.required ? ' · 必填' : ''}`),
+													React.createElement('span', { className: 'tm-dict-desc' }, a.question),
+												),
+												a.values.length > 0
+													? React.createElement('div', { style: { paddingLeft: '10px' } }, a.values.map(valueRow))
+													: null,
+												a.text !== '' ? React.createElement('div', { className: 'tm-note', style: { paddingLeft: '10px' } }, a.text) : null,
+												a.note !== '' ? React.createElement('div', { className: 'tm-note', style: { paddingLeft: '10px' } }, a.note) : null,
+											)),
+										)
+									: null,
+
+								rules !== null
+									? React.createElement(
+											'div',
+											{ className: 'tm-card' },
+											React.createElement(
+												'div',
+												{ className: 'tm-card-h' },
+												React.createElement('h2', { className: 'tm-card-t' }, '通用规则'),
+											),
+											React.createElement(
+												'div',
+												null,
+												metaRow('必填', rules.required.join(' / ')),
+												metaRow('留白', rules.blank),
+												metaRow('白名单', rules.universalValue === '' ? rules.universal : `\`${rules.universalValue}\`：${rules.universal}`),
+												metaRow('筛选算子', rules.operators.join(' / ')),
+												metaRow('分工', rules.model),
+											),
+										)
+									: null,
+
+								routes !== null && routes.rules.length > 0
+									? React.createElement(
+											'div',
+											{ className: 'tm-card' },
+											React.createElement(
+												'div',
+												{ className: 'tm-card-h' },
+												React.createElement('h2', { className: 'tm-card-t' }, '写入路由（先判是哪一类输入，再决定写几条）'),
+											),
+											routes.rules.map((t, i) => React.createElement(
+												'div',
+												{ key: `wr${i}`, className: 'tm-dict-item' },
+												React.createElement('span', { className: 'tm-dict-rule' }, String(i + 1)),
+												React.createElement('span', { className: 'tm-dict-desc' }, t),
+											)),
+										)
+									: null,
+
+								recall !== null && (recall.order.length > 0 || recall.miss !== '')
+									? React.createElement(
+											'div',
+											{ className: 'tm-card' },
+											React.createElement(
+												'div',
+												{ className: 'tm-card-h' },
+												React.createElement('h2', { className: 'tm-card-t' }, '召回口径'),
+												recall.takeFirst === null ? null : React.createElement('span', { className: 'tm-mtag' }, `先报总数，再取前 ${recall.takeFirst} 条`),
+											),
+											recall.order.map((t, i) => React.createElement(
+												'div',
+												{ key: `rc${i}`, className: 'tm-dict-item' },
+												React.createElement('span', { className: 'tm-dict-rule' }, String(i + 1)),
+												React.createElement('span', { className: 'tm-dict-desc' }, t),
+											)),
+											metaRow('时间筛', recall.timeFilter),
+											metaRow('没命中', recall.miss),
+										)
+									: null,
+
+								React.createElement(
+									'div',
+									{ className: 'tm-note tm-warn' },
+									'改字典＝改规则，本页不开放编辑。要改就直接编辑上面那个文件（改前自己留一份），改完重启 DSH 才生效。条目浏览与备份 / 恢复 / 合并都在侧边栏的「记忆」页。',
+								),
+							),
+			)
 		}
 
 		exports.name = 'tag-memory'
@@ -1871,17 +2116,12 @@ window.__ModuleLoader__.load({
 				),
 			)
 
-			// ③ 设置里也留一栏（第二入口，同一个组件，只是默认给卡片视图）。
+			// ③ 设置里也留一栏：**标签字典的只读展示**（跟主区那份各司其职——那边是库，这边是规则）。
+			//    它不碰目录选择服务，所以**不注入 pickDir / listDir**（用不上的注入等于白担一份依赖）。
 			slots.inject('settings.section', () =>
 				slots.register(
-					{
-						name: 'settings.section',
-						id: SECTION_ID,
-						order: 60,
-						label: () => SECTION_LABEL,
-						inject: () => ({ pickDir, listDir }),
-					},
-					MemorySettingsPane,
+					{ name: 'settings.section', id: SECTION_ID, order: 60, label: () => SECTION_LABEL },
+					MemoryDictPane,
 				),
 			)
 		}

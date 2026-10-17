@@ -9,6 +9,7 @@
  *   node scripts/install.mjs --uninstall --apply   # 真卸（摘回原样；记忆库一个字不碰）
  *   node scripts/install.mjs --dsh-home <path>     # 换个 DSH_HOME（装到别的 DSH 时用）
  *   node scripts/install.mjs --apply --dest <path> # 把本体拷到 <path>，再从那儿发链接
+ *   node scripts/install.mjs --apply --seed        # 顺带给**空库**播初始记忆（库里已有条目就一条不写）
  *
  * 写入（仅 apply）：
  *   0. （--dest）<path>                                            （本体副本；不从会话下载目录发链接）
@@ -16,6 +17,7 @@
  *   2. <DSH_HOME>/profiles/<profile>/package.json                 （依赖 + bundle 条目）
  *   3. <DSH_HOME>/.agent-presets/<智能体>/MEMORY.md               （探测到才写；写的是受控说明块）
  *   4. （--wire-presets）<profile>/cordis.patch.yml               （接 /preset 行；先备份、装完校验）
+ *   5. （--seed）<DSH_HOME>/skills/…/store/memory.csv             （**只在该库 0 条时**写初始记忆）
  *
  * `--uninstall` 把上面四处**逐条摘回去**（先备份、逐条校验）。记忆库（`skills/…` 下的
  * memory.csv 与字典）**一个字都不碰**——卸插件不等于删记忆。
@@ -41,7 +43,7 @@ import {
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join, dirname, resolve, relative } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { DEFAULT_MEMORY_FILE_NAMES, detectMemoryFiles, renderNotice, removeNotice, upsertNotice } from '../lib/notice.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -51,6 +53,8 @@ const PACKAGE_DIR = resolve(HERE, '..')
 const argv = process.argv.slice(2)
 const mode = argv.includes('--apply') ? 'apply' : 'check'
 const wirePresets = argv.includes('--wire-presets')
+/** 给**空库**播初始记忆。显式开关：不带就一个字都不往库里写。 */
+const seedMemories = argv.includes('--seed')
 const getFlag = (name, dflt) => {
   const i = argv.indexOf(name)
   return i >= 0 && argv[i + 1] ? argv[i + 1] : dflt
@@ -133,7 +137,8 @@ const presetText = typeof presetPath === 'string' && existsSync(join(PACKAGE_DIR
   ? readFileSync(join(PACKAGE_DIR, presetPath), 'utf8')
   : ''
 check('preset entry exports apply()', /export\s+function\s+apply\s*\(/.test(presetText))
-check('preset registers a function-valued section', /systemPrompt\.section\(\{/.test(presetText) && /text:\s*\(\)\s*=>/.test(presetText))
+// 段必须是**函数值**（每轮重读）；参数可有可无——注入快照要拿 `context.agent` 切当前项目。
+check('preset registers a function-valued section', /systemPrompt\.section\(\{/.test(presetText) && /text:\s*\([^)]*\)\s*=>/.test(presetText))
 check('preset registers memory_write + memory_recall', /'memory_write'/.test(presetText) && /'memory_recall'/.test(presetText))
 
 // ── bundle patch ────────────────────────────────────────
@@ -454,6 +459,22 @@ if (skillMissing.includes('scripts/lib/backup.mjs')) {
   report.push('      修法：把插件仓库同版本的 scripts/lib/backup.mjs 拷进记忆库的 scripts/lib/ 下')
 }
 
+// ── 初始记忆（--seed）：只在**空库**上写 ────────────────
+// 出厂带两条「记什么 / 怎么算通用」（与机器无关），装机时再生成一条本机硬信息。
+// 库里已经有条目就**一条都不写**——重复安装、升级插件都不会塞回这些种子，
+// 也就不会有「更新一次多两条我没用过的记忆」这种事。
+const SEED_FILE = join(PACKAGE_DIR, 'seed', 'memory.seed.json')
+if (existsSync(SEED_FILE) && skillMissing.length === 0) {
+  try {
+    const lines = readFileSync(join(SKILL_DIR, 'store', 'memory.csv'), 'utf8').split('\n').filter((l) => l.trim() !== '')
+    report.push(lines.length <= 1
+      ? 'PASS  记忆库是空的 → 加 --seed 会写入 3 条初始记忆（记什么 / 怎么算通用 / 本机库在哪）'
+      : 'PASS  记忆库里已有条目 → --seed 不会写任何东西（重复安装不会塞回种子）')
+  } catch {
+    report.push('SKIP  初始记忆状态读不出来（库文件暂时不可读）')
+  }
+}
+
 // ── check 模式收尾 ──────────────────────────────────────
 
 if (mode === 'check') {
@@ -593,6 +614,78 @@ function wire() {
 }
 
 if (wirePresets) wire()
+
+// 5. （可选）--seed：给**空库**播初始记忆
+//
+// 为什么是「装机时写」而不是「出厂预置一份填好的 CSV」：
+//   ① `时间` 得是装机当天，写死一个日期很怪；
+//   ② 第三条是**本机硬信息**（库在哪、备份地址），出厂根本不知道；
+//   ③ 最要紧的一条——**只在 0 条时写**：重复安装、升级插件都不会塞回这些种子，
+//      不会出现「更新一次，库里多两条我没用过的记忆」。
+//
+// 写不进去**不算安装失败**（库不在、字典读不了、某条没过校验都只提示）：插件该装的照装，种子的账另算。
+async function seed() {
+  if (!existsSync(SEED_FILE)) {
+    console.log('· 初始记忆跳过：包里没有 seed/memory.seed.json')
+    return
+  }
+  const csv = join(SKILL_DIR, 'store', 'memory.csv')
+  const corePath = join(SKILL_DIR, 'scripts', 'lib', 'core.mjs')
+  if (!existsSync(csv) || !existsSync(corePath) || !existsSync(join(SKILL_DIR, 'references', 'tags.schema.json'))) {
+    console.log(`· 初始记忆跳过：记忆库还没就位（${SKILL_DIR}）——本包只装插件，不装库`)
+    return
+  }
+  let core, schema, seedDoc
+  try {
+    core = await import(pathToFileURL(corePath).href)
+    schema = JSON.parse(readFileSync(join(SKILL_DIR, 'references', 'tags.schema.json'), 'utf8'))
+    seedDoc = JSON.parse(readFileSync(SEED_FILE, 'utf8'))
+  } catch (e) {
+    console.log(`· 初始记忆跳过：读不了库里的字典/核心（${String(e?.message ?? e)}）`)
+    return
+  }
+  let rows
+  try { rows = core.readTable(readFileSync(csv, 'utf8')).rows } catch (e) {
+    console.log(`· 初始记忆跳过：库文件读不出来（${String(e?.message ?? e)}）`)
+    return
+  }
+  if (rows.length > 0) {
+    console.log(`· 初始记忆跳过：库里已经有 ${rows.length} 条——一条都不写（重复安装不会塞回种子）`)
+    return
+  }
+
+  // 第三条：本机硬信息，按实情生成（出厂文件里没有它）。
+  let backupDir = ''
+  try {
+    const cfg = JSON.parse(readFileSync(join(SKILL_DIR, 'store', 'backup.json'), 'utf8'))
+    if (typeof cfg?.backupDir === 'string') backupDir = cfg.backupDir
+  } catch { /* 没配就是没配 */ }
+  const localEntry = {
+    内容: `这台机器的标签记忆库在 ${SKILL_DIR}；备份地址${backupDir === '' ? '还没设置' : `是 ${backupDir}`}。`,
+    环境: '本机',
+    原因: '换机器 / 换目录时，「库到底在哪」是最先要问清楚的一件事',
+    类型: '固定',
+    稳定性: '易变',
+    距离: '按需',
+    项目: '通用',
+    依据: '推断',
+    关键词: '本机,记忆库',
+  }
+  const entries = [...(Array.isArray(seedDoc.entries) ? seedDoc.entries : []), localEntry]
+  let wrote = 0
+  for (const row of entries) {
+    try {
+      const id = core.appendEntry({ schema, csvPath: csv, lockPath: join(SKILL_DIR, 'store', '.append.lock'), row })
+      wrote++
+      console.log(`✓ 初始记忆 +${id}`)
+    } catch (e) {
+      console.log(`✗ 初始记忆没写进去：${String(e?.message ?? e)}`)
+    }
+  }
+  console.log(wrote === 0 ? '· 初始记忆：一条也没写' : `初始记忆写入 ${wrote} 条（以后库里已有条目时不会再写）`)
+}
+
+if (seedMemories) await seed()
 
 // ── 解析自检 ────────────────────────────────────────────
 

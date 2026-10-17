@@ -17,6 +17,7 @@
  *   G. 渲染冒烟 —— 最小 React 桩真渲一遍「记忆」页；含「主位通则」版式断言
  *   H. backup —— 备份核心的边角：不覆盖已有内容、轮转、CLI 是薄壳
  *   I. 接装 —— 真跑一遍 install.mjs：接线产物是合法 YAML、失败不留痕
+ *   I2. 初始记忆（--seed）—— 空库播 3 条且条条过校验；库里已有条目就**一条不写**
  *   J. 卸载 —— 装 → 卸 → 逐字节回到原样，记忆库一个字没动
  *   K. 库目录可配（libraryDir）
  *   L. 本体落点（--dest）+ 空环境跳过
@@ -137,6 +138,50 @@ try {
   } catch { threw = true }
   ok('core 拒绝 类型≠记忆 时填深度（激活规则）', threw)
 
+  // ── C-4：拒绝的话要说清「为什么」；同一句话写第二遍要拦住 ──
+  //   这两件事都在**库侧的 core.mjs** 里，所以先问一句这份库有没有那两个机制，没有就点名跳过。
+  const coreFeatures = core.CORE_FEATURES ?? {}
+  if (!coreFeatures.writeDedupe) {
+    skipped('C-4 写入去重 / 拒绝话术（库侧）', `当前用的这份记忆库的 core.mjs 还是旧版（${realSkill}）——先在库侧同步，再跑这节`)
+  } else {
+    // ① 话术：只丢一句「不能为空」，写的人（模型）只会随手填一个值糊过去。
+    let why = ''
+    try {
+      core.appendEntry({ schema, csvPath, lockPath, row: { 内容: 'x', 类型: '记忆', 稳定性: '错值', 距离: '按需', 角色: 't', 项目: '通用', 依据: '推断' } })
+    } catch (e) { why = String(e?.message ?? e) }
+    ok('C-4 拒绝的话带上「为什么」（不能只说「不能为空」）',
+      /必填项缺失/.test(why) && /误用|凭什么/.test(why), why.slice(0, 160))
+
+    // ② 去重：在一份**一次性副本**上试，不动沙箱种子（后面的计数断言都靠它）。
+    const ddHdr = core.readTable(readFileSync(csvPath, 'utf8')).header
+    const ddBase = {
+      内容: '去重甲', 时间: '2026-01-01', 环境: 'selftest 沙箱', 原因: '占位',
+      类型: '记忆', 深度: '语义', 稳定性: '稳定', 距离: '按需', 角色: 'selftest', 项目: '通用', 依据: '推断',
+    }
+    const ddCsv = join(sandbox, 'dedupe-check.csv')
+    const ddLock = join(sandbox, 'dedupe-check.lock')
+    writeFileSync(ddCsv, ddHdr.join(',') + '\n' + core.buildLine(schema, ddHdr, { ...ddBase, id: 'M-20260101-001' }), 'utf8')
+
+    let dupMsg = ''
+    try { core.appendEntry({ schema, csvPath: ddCsv, lockPath: ddLock, row: { ...ddBase } }) } catch (e) { dupMsg = String(e?.message ?? e) }
+    ok('C-4 同「内容 + 项目 + 类型」再写一条 → 拦住，并点出库里那一条、指向「被取代」',
+      /M-20260101-001/.test(dupMsg) && /被取代/.test(dupMsg), dupMsg.slice(0, 200))
+    ok('C-4 被拦住时**不落笔**（库里还是那一条）',
+      core.readTable(readFileSync(ddCsv, 'utf8')).rows.length === 1)
+
+    // 同一句话、不同项目＝两码事：同一个做法在两个项目下各自成立，不该拦。
+    const ddOk = core.appendEntry({ schema, csvPath: ddCsv, lockPath: ddLock, row: { ...ddBase, 项目: '别的项目' } })
+    ok('C-4 内容相同但「项目」不同 → 不算重复',
+      /^M-\d{8}-\d{3}$/.test(ddOk) && core.readTable(readFileSync(ddCsv, 'utf8')).rows.length === 2, String(ddOk))
+
+    // 旧的那条已经退场 → 不该再挡新的（「取代」是正路，写第二遍不是）。
+    const dd2Csv = join(sandbox, 'dedupe-check2.csv')
+    const dd2Lock = join(sandbox, 'dedupe-check2.lock')
+    writeFileSync(dd2Csv, ddHdr.join(',') + '\n' + core.buildLine(schema, ddHdr, { ...ddBase, id: 'M-20260101-009', 状态: '被取代' }), 'utf8')
+    const ddBack = core.appendEntry({ schema, csvPath: dd2Csv, lockPath: dd2Lock, row: { ...ddBase } })
+    ok('C-4 旧条目已是「被取代」→ 不挡新的（取代是正路）', /^M-\d{8}-\d{3}$/.test(ddBack), String(ddBack))
+  }
+
   const t0 = core.readTable(readFileSync(csvPath, 'utf8'))
   const cnt = (cond) => core.filterRows(schema, t0.header, t0.rows, cond).length
   // 种子：A(生效/常驻/语义)、B(已归档，默认排除)、C(新追加/按需/语义)。角色皆为 selftest。
@@ -172,6 +217,53 @@ try {
     ok('末尾没换行时追加，不会把新条目粘到上一行上',
       t2.rows.every((r) => r.length === hdr.length) && t2.rows.length === 3 && t2.rows.some((r) => r[0] === id2),
       `条数 ${t2.rows.length}、列数分布 ${JSON.stringify([...new Set(t2.rows.map((r) => r.length))])}（应为 3 条 / ${hdr.length} 列）`)
+  }
+
+  // ── D-1：格子数对不上，别静默错位 ──
+  //   列是按下标读的：一行少一格，它后面每一格都往前串一位——界面看着有值、值是错的，
+  //   判重拿它比的是错字段。这类错**不报错、不丢行**，所以最难发现，得专门盯。
+  //   处置分两头：**读**只点名（界面照实说、备份照读不误），**写**直接拦下。
+  if (core.CORE_FEATURES?.raggedGuard !== true) {
+    skipped('D-1 列数校验（库侧）', `当前用的这份记忆库的 core.mjs 还是旧版（${realSkill}）——先在库侧同步，再跑这节`)
+  } else {
+    const hdrR = core.readTable(readFileSync(csvPath, 'utf8')).header
+    const seedR = {
+      内容: '错位甲', 时间: '2026-01-01', 环境: 'selftest 沙箱', 原因: '占位',
+      类型: '记忆', 深度: '语义', 稳定性: '稳定', 距离: '按需', 角色: 'selftest', 项目: '通用', 依据: '推断',
+    }
+    const ragCsv = join(sandbox, 'ragged-check.csv')
+    const ragLock = join(sandbox, 'ragged-check.lock')
+    const brokenLine = 'M-20260101-003,少了几格,2026-01-01' // 故意只写 3 格（正常是 hdrR.length 格）
+    writeFileSync(ragCsv,
+      hdrR.join(',') + '\n'
+      + core.buildLine(schema, hdrR, { ...seedR, id: 'M-20260101-001' })
+      + core.buildLine(schema, hdrR, { ...seedR, id: 'M-20260101-002', 内容: '错位乙' })
+      + brokenLine + '\n',
+      'utf8')
+
+    const tR = core.readTable(readFileSync(ragCsv, 'utf8'))
+    ok('D-1 读的时候点名：哪一条、差几格（不改行、不抛错——带着这种行的旧备份也读得出来）',
+      tR.rows.length === 3 && Array.isArray(tR.ragged) && tR.ragged.length === 1 &&
+      tR.ragged[0].id === 'M-20260101-003' && tR.ragged[0].got === 3 && tR.ragged[0].want === hdrR.length,
+      `条数 ${tR.rows.length}、ragged=${JSON.stringify(tR.ragged)}`)
+
+    let ragMsg = ''
+    try { core.appendEntry({ schema, csvPath: ragCsv, lockPath: ragLock, row: { ...seedR, 内容: '错位丙' } }) }
+    catch (e) { ragMsg = String(e?.message ?? e) }
+    ok('D-1 库里有错位行时**拒写**：点名哪一条、差几格，并给出去路（含「用备份退回」这条）',
+      /M-20260101-003/.test(ragMsg) && /3 格 \/ 应为/.test(ragMsg) && /恢复|备份/.test(ragMsg),
+      ragMsg.slice(0, 220))
+    ok('D-1 被拦下时**不落笔**（库里还是那 3 条，最后一行一个字节没变）',
+      core.readTable(readFileSync(ragCsv, 'utf8')).rows.length === 3 &&
+      readFileSync(ragCsv, 'utf8').trimEnd().endsWith(brokenLine))
+
+    // 逃生口：把那行补齐（或拆成两行）之后，写入立刻恢复——不能一坏就把库锁死。
+    writeFileSync(ragCsv, readFileSync(ragCsv, 'utf8').replace(brokenLine + '\n',
+      core.buildLine(schema, hdrR, { ...seedR, id: 'M-20260101-003', 内容: '补好的丙' })), 'utf8')
+    const fixedId = core.appendEntry({ schema, csvPath: ragCsv, lockPath: ragLock, row: { ...seedR, 内容: '错位丁' } })
+    const tFixed = core.readTable(readFileSync(ragCsv, 'utf8'))
+    ok('D-1 把那一行修回整格后，写入立刻恢复（不是一坏就把库锁死）',
+      /^M-\d{8}-\d{3}$/.test(fixedId) && tFixed.rows.length === 4 && tFixed.ragged.length === 0, String(fixedId))
   }
 
   // ── B. notice ─────────────────────────────────────────
@@ -231,6 +323,41 @@ try {
       类型: '记忆', 深度: '程序', 稳定性: '稳定', 距离: '按需', 依据: '推断',
     }, exec)
     ok('preset.memory_write 端到端写入（角色=preset 目录名）', /已追加 M-/.test(wrote), wrote)
+
+    // ── D2. 记忆快照（注入模型：B-1 字典+快照 / B-2 常驻真落地 / B-3 跨项目只给索引）──
+    // 此时沙箱库里 3 条生效：A（常驻/通用）、C（按需/通用）、D（按需/本项目 proj）；B 已归档。
+    const here = sections[0].text({ agent: { id: 'selftest', session: { header: { cwd: 'X:\\proj' } } } })
+    ok('快照：字典之后还有条目正文（不再是「只有字典」）', /记忆快照/.test(here) && /## 记忆字典/.test(here), here.slice(0, 80))
+    ok('快照 B-2：距离=常驻 的条目给全文', /\[M-20260101-001\] 自检件A/.test(here) && /环境：selftest 沙箱/.test(here))
+    ok('快照：通用条目给全文', /\[M-\d{8}-\d{3}\] 自检件C/.test(here) && !/在「通用」：自检件C/.test(here))
+    ok('快照：本项目条目给全文', /\[M-\d{8}-\d{3}\] 自检件D/.test(here))
+    ok('快照：已归档 / 被取代 的条目不出现', !/自检件B/.test(here))
+    ok('快照：表头报出「全文 / 只索引」条数', /生效 3 条：全文 3 条 \/ 只索引 0 条/.test(here), here.split('\n')[1])
+
+    const away = sections[0].text({ agent: { id: 'selftest', session: { header: { cwd: 'Y:\\another' } } } })
+    ok('跨项目闸门 B-3：别的项目条目只给一行索引', /- \[M-\d{8}-\d{3}\] 在「proj」：自检件D/.test(away), away.split('\n').filter((l) => l.includes('自检件D')).join(' | '))
+    ok('跨项目闸门 B-3：索引行的正文不进上下文（环境那一行不给）', !/自检件D[\s\S]{0,60}环境：/.test(away))
+    ok('跨项目闸门：通用 / 常驻仍给全文', /\[M-20260101-001\] 自检件A/.test(away) && /\[M-\d{8}-\d{3}\] 自检件C/.test(away))
+    ok('快照随 cwd 变（换项目重切片）', here !== away)
+
+    // 预算闸：把常驻上限压到 0 → A 降级成索引，并**明说**截了几条。
+    {
+      const s2 = []
+      const ctx2 = { systemPrompt: { section: (s) => s2.push(s), getSectionOrder: () => 50 }, tools: { register: () => {} } }
+      preset.apply(ctx2, { dir: 'C:/x', snapshot: { maxPinned: 0 } })
+      const t2 = s2[0].text({ agent: { id: 'selftest', session: { header: { cwd: 'X:\\proj' } } } })
+      ok('预算闸 B-2：maxPinned=0 → 常驻不再给全文（降为索引）', !/\[M-20260101-001\] 自检件A\n/.test(t2) && /在「通用」：自检件A/.test(t2))
+      ok('预算闸 B-2：超上限时明说溢出', /常驻超过上限 0 条，其中 1 条只留索引/.test(t2), t2.split('\n').filter((l) => l.startsWith('> ')).join(' ｜ ').slice(0, 200))
+    }
+
+    // 退回档：关掉快照 → 与旧行为一致（只有字典）。
+    {
+      const s3 = []
+      const ctx3 = { systemPrompt: { section: (s) => s3.push(s), getSectionOrder: () => 50 }, tools: { register: () => {} } }
+      preset.apply(ctx3, { dir: 'C:/x', snapshot: { enabled: false } })
+      const t3 = s3[0].text({ agent: { id: 'selftest', session: { header: { cwd: 'X:\\proj' } } } })
+      ok('预算闸：snapshot.enabled=false → 退回「只注入字典」', /## 记忆字典/.test(t3) && !/记忆快照/.test(t3))
+    }
   } catch (e) {
     if (/dsh-tools|Cannot find package/.test(String(e?.message ?? e))) skipped('preset 半（需要 @deepseek-ai/dsh-tools 依赖锚点）', '依赖未解析；装到 profile 后即可测')
     else { fail++; results.push(`FAIL  preset 半 — ${String(e?.message ?? e)}`) }
@@ -258,6 +385,68 @@ try {
   const ov = await call('/overview')
   ok('index /overview ready 且含维度计数', ov.status === 200 && ov.json.ready === true && !!ov.json.byDimension?.距离, Object.keys(ov.json.byDimension ?? {}).join(','))
   ok('index /overview 记忆文件列 3 个', ov.json.notice?.files?.length === 3, String(ov.json.notice?.files?.length))
+
+  // 设置页那份「标签字典」只读展示（GET /dict）。字典是**库里的**文件，沙箱已把它整份拷进来，
+  // 所以这几条测的是真 shape（四维 / 列映射 / 上限 / 写入路由），不是造的样例。
+  {
+    const schemaPath = join(sandboxSkill, 'references', 'tags.schema.json')
+    const schemaBefore = readFileSync(schemaPath, 'utf8')
+    const di = await call('/dict')
+    const dim = (n) => (di.json.dimensions ?? []).find((d) => d.name === n)
+    ok('index /dict 就绪并报出四个维度（顺序照字典）',
+      di.status === 200 && di.json.ready === true &&
+      (di.json.dimensions ?? []).map((d) => d.name).join(',') === '类型,深度,稳定性,距离',
+      JSON.stringify((di.json.dimensions ?? []).map((d) => d.name)))
+    ok('index /dict 每维都带取值 + 说明（取值对象摊成数组）',
+      (di.json.dimensions ?? []).every((d) => d.values.length > 0 && d.values.every((v) => v.value !== '')) &&
+      (dim('类型')?.values ?? []).some((v) => v.value === '记忆' && String(v.desc).includes('提炼')),
+      JSON.stringify(dim('类型')?.values))
+    ok('index /dict 报出「列映射 / 上限 / 受谁管」这些真相',
+      dim('深度')?.column === '成熟度' && dim('距离')?.cap === 10 &&
+      String(dim('深度')?.gate?.when ?? '').includes('类型 = 记忆'),
+      JSON.stringify({ column: dim('深度')?.column, cap: dim('距离')?.cap, gate: dim('深度')?.gate }))
+    // `角色` / `项目` 那几个的 `values` 是**一句话**（不是枚举）——摊平这层方言是服务端的事，
+    // 别让浏览器去猜「这个字符串到底是取值还是说明」。
+    ok('index /dict 把「一句话取值」与枚举分开（角色：有 text、无 values）',
+      (di.json.auxiliary ?? []).some((a) => a.name === '角色' && a.values.length === 0 && a.text !== '') &&
+      (di.json.auxiliary ?? []).some((a) => a.name === '依据' && a.values.length === 3 && a.required === true),
+      JSON.stringify((di.json.auxiliary ?? []).map((a) => `${a.name}:${a.values.length}/${a.text === '' ? '-' : 'text'}`)))
+    ok('index /dict 带写入路由与召回口径',
+      (di.json.writeRoutes?.rules ?? []).length >= 5 && di.json.recall?.takeFirst === 3 && (di.json.recall?.order ?? []).length >= 3,
+      JSON.stringify({ routes: di.json.writeRoutes?.rules?.length, takeFirst: di.json.recall?.takeFirst }))
+    ok('index /dict 报出来源路径与改动时间，并带「改完没重启」判据（stale）',
+      typeof di.json.path === 'string' && di.json.path.endsWith('tags.schema.json') &&
+      typeof di.json.mtime === 'string' && di.json.stale === false,
+      JSON.stringify({ path: di.json.path, mtime: di.json.mtime, stale: di.json.stale }))
+    // 这一版是**只读**：看一遍字典，磁盘上一个字节都不该变。
+    ok('index /dict 只读（看完字典文件逐字节没变）', readFileSync(schemaPath, 'utf8') === schemaBefore)
+  }
+
+  // D-1 那件事得在**界面上看得见**：`/overview` 照实报出「哪几条格子数对不上」。
+  // 这一段要往沙箱库上临时加一行坏行，跑完**逐字节放回去**——后面的计数断言全靠这份库。
+  // 库侧没有 `raggedGuard`（老 core）时这里同样**点名跳过**：插件本身是诚实降级（报「没有」而不是
+  // 假报一条），但「能查出坏行」这件事只有新库做得到，测不了就说测不了。
+  if (core.CORE_FEATURES?.raggedGuard !== true) {
+    skipped('D-1 界面报出坏行（/overview 的 health.ragged）', `当前用的这份记忆库的 core.mjs 还是旧版（${realSkill}）——先在库侧同步，再跑这节`)
+  } else {
+    const csvSnap = readFileSync(store.CSV_PATH, 'utf8')
+    let bad
+    try {
+      writeFileSync(store.CSV_PATH, csvSnap.replace(/\n$/, '') + '\nM-20260101-999,错位行,2026-01-01\n', 'utf8')
+      bad = await call('/overview')
+    } finally {
+      writeFileSync(store.CSV_PATH, csvSnap, 'utf8')
+    }
+    ok('index /overview 报出「有行格子数对不上」，并点名是哪一条',
+      bad.json.health?.ok === false && bad.json.health?.ragged?.length === 1 &&
+      bad.json.health.ragged[0].id === 'M-20260101-999' && bad.json.health.ragged[0].want === ov.json.header.length,
+      JSON.stringify(bad.json.health))
+    const clean = await call('/overview')
+    ok('index /overview 库没毛病时 ok=true、ragged 空（而且库已逐字节放回原样）',
+      clean.json.health?.ok === true && clean.json.health.ragged.length === 0 &&
+      readFileSync(store.CSV_PATH, 'utf8') === csvSnap)
+  }
+
   const en = await call('/entries', 'GET', '?cond=' + encodeURIComponent('{"角色":"selftest"}'))
   ok('index /entries 命中 2（A/C；B 已归档排除）', en.json.total === 2, String(en.json.total))
   const enD = await call('/entries', 'GET', '?cond=' + encodeURIComponent('{"角色":"assistant"}'))
@@ -348,9 +537,12 @@ try {
     setDir.json.ok === true && setDir.json.created === true && setDir.json.status.dirSet === true && setDir.json.status.dir === bkDir)
 
   const beforeBackup = countRows()
+  // 校验的**条数**随备份清单长短走（库里加了「字典」那条就多一项），所以不去钉死总数，
+  // 钉两件真正要保证的事：每一条都过、并且**逐字节比过**那两个身份文件。
   const bk1 = await post('/backup', { label: '自检' })
-  ok('index POST /backup 四项校验（字节/sha/记录数/BOM）全过',
-    bk1.json.ok === true && bk1.json.result.checks.length === 4 && bk1.json.result.checks.every((c) => c.ok))
+  ok('index POST /backup 逐项校验（字节/sha/记录数/BOM）全过',
+    bk1.json.ok === true && bk1.json.result.checks.length >= 4 && bk1.json.result.checks.every((c) => c.ok),
+    JSON.stringify(bk1.json.result?.checks))
   ok('index POST /backup 水位记到「刚才那一条数」',
     bk1.json.status.lastCount === beforeBackup && bk1.json.status.dirSet === true)
   const stampA = bk1.json.result.stamp
@@ -363,6 +555,35 @@ try {
   const dirtyCount = countRows()
   ok('恢复前：库里已经多了一条（和备份对不上）', dirtyCount === beforeBackup + 1, `${beforeBackup} → ${dirtyCount}`)
 
+  // ── P-8：**字典**随库一起备；恢复时比对、换回、并明示 ──
+  //   「备」那半在本节测不了——它在**记忆库**的 backup.mjs 里（库侧），沙箱用的就是取来的那一份。
+  //   所以先问一句「这份库支不支持」，不支持就**点名跳过**，不假装通过。
+  const sandboxSchemaPath = join(sandboxSkill, 'references', 'tags.schema.json')
+  const schemaOrig = readFileSync(sandboxSchemaPath, 'utf8')
+  let schemaSupportsBackup = false
+  try {
+    const bkFiles = store.getBackupCore().BACKUP_FILES
+    schemaSupportsBackup = Array.isArray(bkFiles) && bkFiles.some((f) => f.src === 'tags.schema.json')
+  } catch { schemaSupportsBackup = false }
+  if (!schemaSupportsBackup) {
+    skipped('P-8 字典随备份 / 恢复时比对', `当前用的这份记忆库还不支持（${realSkill}）——先在库侧同步 backup.mjs，再跑这节`)
+  } else {
+    ok('P-8 备份目录里出现 schema-<戳>.json（字典跟库一起走）',
+      existsSync(join(bkDir, `schema-${stampA}.json`)) &&
+      readFileSync(join(bkDir, `schema-${stampA}.json`), 'utf8') === schemaOrig)
+    const stA = await call('/backup')
+    ok('P-8 备份状态报出「这一份带没带字典」与当前字典版本',
+      stA.json.recent?.[0]?.hasSchema === true && typeof stA.json.currentSchemaVersion === 'string' && stA.json.currentSchemaVersion !== '',
+      JSON.stringify({ has: stA.json.recent?.[0]?.hasSchema, v: stA.json.currentSchemaVersion }))
+    // 改了字典而备份里还是旧的那一份 —— 两套库就是因为这类偏差分叉过一次，状态里得自己说出来。
+    writeFileSync(sandboxSchemaPath, schemaOrig.replace(/"version":\s*"[^"]*"/, '"version": "2099-01-01"'), 'utf8')
+    const stB = await call('/backup')
+    ok('P-8 字典改过而备份还是旧的 → 状态里点名说出来（不是等出事才发现）',
+      stB.json.schemaChangedSinceBackup === true && stB.json.due === true &&
+      (stB.json.dueReason ?? []).some((r) => String(r).includes('标签字典')),
+      JSON.stringify({ changed: stB.json.schemaChangedSinceBackup, due: stB.json.dueReason }))
+  }
+
   const rst = await post('/restore', { stamp: stampA })
   ok('index POST /restore 整体替换成那一版（多出来的那条没了）',
     rst.json.ok === true && rst.json.entryCount === beforeBackup && countRows() === beforeBackup, JSON.stringify({ want: beforeBackup, got: rst.json.entryCount, file: countRows(), res: rst.json }))
@@ -370,6 +591,33 @@ try {
   ok('index POST /restore 恢复前的那一版档里，条数是弄脏后的数',
     readFileSync(join(bkDir, `memory-${rst.json.preBackup}.csv`), 'utf8') !== '' &&
     core.readTable(readFileSync(join(bkDir, `memory-${rst.json.preBackup}.csv`), 'utf8')).rows.length === dirtyCount)
+
+  if (schemaSupportsBackup) {
+    // 恢复是**整体替换**：库换回了那一版，说明书也得跟着换回来，不然库和字典就是两代人的东西。
+    ok('P-8 恢复时字典一起换回那一版（库和说明书不分家）',
+      rst.json.schema?.available === true && rst.json.schema.swapped === true &&
+      readFileSync(sandboxSchemaPath, 'utf8') === schemaOrig,
+      JSON.stringify(rst.json.schema))
+    ok('P-8 恢复结果里说清字典怎么处理了（不静默换）',
+      typeof rst.json.schema?.note === 'string' && /换回|一样|没有字典/.test(rst.json.schema.note) &&
+      readFileSync(sandboxSchemaPath, 'utf8') === schemaOrig)
+    // 「看着成功、其实没生效」的经典坑：字典文件换了，进程里那份缓存还是旧的，
+    // 于是界面显示新字典、注入用的还是老字典。这里就用 /dict 的 stale 戳穿它。
+    const dictAfter = await call('/dict')
+    ok('P-8 换完字典当场生效（进程里的缓存也丢了，不用重启）',
+      dictAfter.json.stale === false && dictAfter.json.version === JSON.parse(schemaOrig).version,
+      JSON.stringify({ stale: dictAfter.json.stale, version: dictAfter.json.version }))
+
+    // 老备份（还没有「字典随库走」那会儿留的）恢复时不能假装：字典保持不动，并且明说。
+    const oldStamp = '20980101-0000'
+    writeFileSync(join(bkDir, `memory-${oldStamp}.csv`), readFileSync(join(bkDir, `memory-${stampA}.csv`)))
+    writeFileSync(join(bkDir, `index-${oldStamp}.md`), readFileSync(join(bkDir, `index-${stampA}.md`)))
+    const oldRst = await post('/restore', { stamp: oldStamp })
+    ok('P-8 老备份（没有字典）→ 字典原地不动，并说清「是加字典之前的备份」',
+      oldRst.json.ok === true && oldRst.json.schema?.available === false && oldRst.json.schema.swapped === false &&
+      /没有字典/.test(String(oldRst.json.schema?.note)) && readFileSync(sandboxSchemaPath, 'utf8') === schemaOrig,
+      JSON.stringify(oldRst.json.schema))
+  }
 
   const badStamp = await post('/restore', { stamp: '20990101-0000' })
   ok('index POST /restore 不存在的备份 → 报错不落笔', badStamp.json.ok === false && countRows() === beforeBackup)
@@ -482,12 +730,14 @@ try {
       /\.tm-panel\s*\{[^}]*height:100%[^}]*overflow:auto/.test(clientSrc))
     ok('主区面板顶部让出窗口顶带变量', /\.tm-panel\s*\{[^}]*--dsh-frame-top-clearance/.test(clientSrc))
 
-    // 目录选择走宿主：注册时把 pickDir / listDir 注入给组件（两个入口都要）。
+    // 目录选择走宿主：注册时把 pickDir / listDir 注入给**主区那个组件**。
+    // 设置栏那份是「标签字典」的只读展示，不碰目录选择——用不上的注入等于白担一份依赖。
     const faceMain = bySlot.main?.opts?.inject?.()
-    const faceSet = bySlot['settings.section']?.opts?.inject?.()
-    ok('main / settings.section 都注入 pickDir + listDir',
-      typeof faceMain?.pickDir === 'function' && typeof faceMain?.listDir === 'function' &&
-      typeof faceSet?.pickDir === 'function' && typeof faceSet?.listDir === 'function')
+    ok('主区面板注入 pickDir + listDir',
+      typeof faceMain?.pickDir === 'function' && typeof faceMain?.listDir === 'function')
+    ok('设置栏那份是只读字典，不注入目录选择服务',
+      bySlot['settings.section']?.opts?.inject === undefined &&
+      /function MemoryDictPane\(/.test(clientSrc) && !/function MemorySettingsPane\(/.test(clientSrc))
     ok('目录选择用的是 DSH 自己的门（uiWorkspace.pickDirectory / listDirectory）',
       clientSrc.includes('pickDirectory()') && clientSrc.includes('listDirectory(') && clientSrc.includes("ctx.get?.('uiWorkspace')"))
     // cordis 的属性访问只顺着**本 fiber 的祖先链**找服务，兄弟 fiber 提供的读不到就**抛**
@@ -652,8 +902,52 @@ try {
       sortTexts(legacySort).length === 4 && !sortTexts(legacySort).some((t) => t.includes('最近加入')),
       sortTexts(legacySort).join(' | '))
 
-    const cards = render('settings.section', [ROW])
-    ok('设置页默认仍是卡片（没有 table）', !cards.tags.includes('table') && cards.classes.includes('tm-item'))
+    // ── 设置栏那一份：**标签字典的只读展示**（不再是主区那些内容的缩小版）──
+    //    hook 序号：0 = dict，1 = error（`render` 的预置里 1 是条目数组，得顶掉）。
+    const DICT = {
+      ready: true, path: 'S:/skill/references/tags.schema.json', mtime: '2026-10-15T09:30:00.000Z',
+      version: '2026-10-15', stale: false,
+      dimensions: [
+        { name: '类型', column: '类型', role: '主开关', question: '这是什么？', when: '写入时必判',
+          how: '按是不是原文分', lifts: '', note: '留白＝忽略这一维', values: [{ value: '原文', desc: '原话直接留存' }, { value: '记忆', desc: '提炼的结论' }],
+          text: '', required: false, cap: null, gate: null, status: '' },
+        { name: '深度', column: '成熟度', role: '维度', question: '能不能当规律用？', when: '仅 类型=记忆 时打',
+          how: '', lifts: '', note: '', values: [{ value: '情景', desc: '具体事件' }],
+          text: '', required: false, cap: 10, gate: { when: '类型 = 记忆', otherwise: '留白' }, status: '' },
+      ],
+      auxiliary: [{ name: '角色', column: '角色', question: '谁写入的？', note: '用户直接交代的仍写智能体名',
+        how: '', when: '', lifts: '', values: [], text: '智能体名；多设备时 名@机器', required: false, cap: null, gate: null, status: '' }],
+      rules: { model: '模型判断：该不该记、每维取什么值', blank: '留白 = 未判', universal: '任何取值下都成立',
+        universalValue: '通用', required: ['id', '内容', '环境'], operators: ['与', '或'] },
+      writeRoutes: { comment: '', rules: ['规矩 → 写 2 条', '闲聊 → 不记'] },
+      recall: { order: ['查映射表一次定完维度', '先报命中总数，再取前 3 条'], takeFirst: 3, reportTotalFirst: true,
+        miss: '直说没有这条', timeFilter: '仅指向某一次具体事件时' },
+    }
+    const dictPane = render('settings.section', [ROW], { 0: DICT, 1: null })
+    ok('设置页渲染成字典展示（不是条目表）',
+      !dictPane.tags.includes('table') && dictPane.classes.includes('tm-card') && dictPane.text.includes('标签字典 · 只读'))
+    ok('设置页摆出维度的取值与它们的说明',
+      dictPane.text.includes('类型') && dictPane.text.includes('原话直接留存') && dictPane.text.includes('能不能当规律用？'))
+    // 「显示标签的意义规则」是这张卡的正题——列映射、上限、受谁管都得看得见，
+    // 不然用户以为字典里这个名字就是 CSV 里的那个列名（`深度` ↔ `成熟度` 真踩过）。
+    ok('设置页摆出「落列 / 上限 / 受谁管」这些真相',
+      dictPane.text.includes('落列：成熟度') && dictPane.text.includes('上限 10') &&
+      dictPane.text.some((t) => String(t).includes('类型 = 记忆 → 否则留白')))
+    ok('设置页摆出写入路由与召回口径',
+      dictPane.text.some((t) => String(t).includes('写入路由')) && dictPane.text.some((t) => String(t).includes('先报总数，再取前 3 条')))
+    ok('设置页摆出来源路径 + 改动时间',
+      dictPane.text.some((t) => String(t).includes('tags.schema.json')) && dictPane.text.some((t) => String(t).includes('2026-10-15 09:30')))
+    ok('设置页尾注明说「改字典＝改规则，本页不开放」并指回主区',
+      dictPane.text.some((t) => String(t).includes('改字典＝改规则')) && dictPane.text.some((t) => String(t).includes('侧边栏')))
+    ok('设置页全是只读控件（没有一个 input / select / textarea）',
+      !dictPane.tags.includes('input') && !dictPane.tags.includes('select') && !dictPane.tags.includes('textarea'))
+    // 「改了文件没重启」是这套东西最怕的「看着成功、其实没生效」——页面必须自己说出来。
+    const dictStale = render('settings.section', [ROW], { 0: { ...DICT, stale: true }, 1: null })
+    ok('盘上字典改过而宿主还没重启时，页面明说「重启才生效」',
+      dictStale.text.some((t) => String(t).includes('重启 DSH 才会生效')))
+    ok('读不到字典时给出路径与原因，不是白屏',
+      render('settings.section', [ROW], { 0: { ready: false, path: 'S:/skill/references/tags.schema.json', error: '找不到标签字典' }, 1: null })
+        .text.some((t) => String(t).includes('找不到标签字典')))
 
     // ── 主位通则：要看的/要点的在前，说明与状态退到后面并默认收起 ──
     //    hook 序号：…20=bk 21=bkBusy 22=bkNote 23=dirOpen 24=dirValue 25=restoreOpen
@@ -930,6 +1224,93 @@ try {
         `bak ${bakBefore}→${bakCount()}；${r.stderr.split('\n').filter(Boolean).pop() ?? ''}`)
       ok('失败时把话说清楚（接线未落盘、原文件未改）', r.stderr.includes('接线未落盘'))
     }
+  }
+
+  // ── I2. 初始记忆（--seed）：只在**空库**上写 ────────────────
+  //     两件事必须钉死：① 空库播得下、每条都过校验；② **库里已有条目就一条都不写**——
+  //     重复安装 / 升级插件不许塞回种子。「更新一次，库里多两条我没用过的记忆」正是要防的。
+  //     另：不带 --seed 时（也就是老用法）库必须**一个字节都不动**。
+  {
+    const home2 = join(sandbox, 'seed-home')
+    const prof2 = join(home2, 'profiles', 'web')
+    mkdirSync(join(prof2, 'node_modules'), { recursive: true })
+    mkdirSync(join(home2, 'profiles', 'node_modules'), { recursive: true })
+    writeFileSync(join(prof2, 'package.json'), JSON.stringify({ dependencies: {}, dsh: { profile: { bundles: [] } } }, null, 2), 'utf8')
+    writeFileSync(join(prof2, 'cordis.patch.yml'), '[]\n', 'utf8')
+
+    // 一份**空库**：表头照真库，0 条数据；字典与核心从沙箱那份拷过来（同一版）。
+    const seedLib = join(sandbox, 'seed-skill')
+    mkdirSync(join(seedLib, 'references'), { recursive: true })
+    mkdirSync(join(seedLib, 'scripts', 'lib'), { recursive: true })
+    mkdirSync(join(seedLib, 'store'), { recursive: true })
+    for (const f of ['references/tags.schema.json', 'scripts/lib/core.mjs', 'scripts/lib/backup.mjs']) {
+      copyFileSync(join(sandboxSkill, f), join(seedLib, f))
+    }
+    const seedHeader = readFileSync(join(realSkill, 'store', 'memory.csv'), 'utf8').split('\n')[0]
+    const seedCsv = join(seedLib, 'store', 'memory.csv')
+    writeFileSync(seedCsv, seedHeader + '\n', 'utf8')
+
+    const runSeed = (extra = []) => spawnSync(process.execPath,
+      [join(PKG, 'scripts', 'install.mjs'), '--dsh-home', home2, '--profile', 'web', ...extra],
+      { env: { ...process.env, DSH_TAG_MEMORY_SKILL_DIR: seedLib }, encoding: 'utf8' })
+    const seedCore = await import(pathToFileURL(join(seedLib, 'scripts', 'lib', 'core.mjs')).href)
+    const seedSchema = JSON.parse(readFileSync(join(seedLib, 'references', 'tags.schema.json'), 'utf8'))
+    const rowsNow = () => seedCore.readTable(readFileSync(seedCsv, 'utf8')).rows
+    const asDict = (row) => {
+      const resolve = seedCore.makeResolver(seedSchema, seedHeader.split(','))
+      const o = {}
+      for (const name of Object.keys({ ...seedSchema.dimensions, ...seedSchema.auxiliary })) {
+        const i = resolve(name)
+        if (i >= 0) o[name] = row[i]
+      }
+      for (const col of ['id', '内容', '时间', '环境', '原因', '备注']) {
+        const i = seedHeader.split(',').indexOf(col)
+        if (i >= 0) o[col] = row[i]
+      }
+      return o
+    }
+
+    const checkOut = runSeed().stdout
+    ok('check 认出「库是空的」，并说清 --seed 会写什么',
+      checkOut.includes('记忆库是空的') && checkOut.includes('--seed 会写入 3 条'), checkOut.split('\n').find((l) => l.includes('记忆库是空的')) ?? '')
+
+    // 不带 --seed：就是老用法，库一个字节都不该动（新开关不能带坏老行为）
+    const csvBefore = readFileSync(seedCsv, 'utf8')
+    const outNoSeed = runSeed(['--apply']).stdout
+    ok('不带 --seed 装完，空库**一个字节没动**（老行为没被带坏）',
+      readFileSync(seedCsv, 'utf8') === csvBefore && !outNoSeed.includes('初始记忆 +'), outNoSeed.split('\n').filter((l) => l.includes('初始记忆')).join(' '))
+
+    // 带 --seed：空库播 3 条（2 条出厂 + 1 条本机硬信息）
+    const outSeed = runSeed(['--apply', '--seed']).stdout
+    const seeded = rowsNow()
+    ok('--seed 给空库播下 3 条，并逐条报出 id',
+      seeded.length === 3 && outSeed.includes('初始记忆写入 3 条') && /M-\d{8}-\d{3}/.test(outSeed), `条数 ${seeded.length}`)
+    // 播下去的每一条都得过库自己那套校验——种子不许是「塞进去的例外」
+    const bad = seeded.map(asDict).filter((o) => !seedCore.validateRow(seedSchema, o).ok)
+    ok('播下去的 3 条**每条都过 validateRow**（种子不是塞进去的例外）',
+      bad.length === 0, JSON.stringify(bad).slice(0, 200))
+    const dict3 = seeded.map(asDict)
+    ok('第 3 条是本机硬信息：`类型=固定`、`深度` 留白、内容里写着这份库的路径',
+      dict3[2]?.['类型'] === '固定' && String(dict3[2]?.['深度'] ?? '') === '' &&
+      String(dict3[2]?.['内容'] ?? '').includes(seedLib),
+      JSON.stringify({ 类型: dict3[2]?.['类型'], 深度: dict3[2]?.['深度'], 内容: String(dict3[2]?.['内容'] ?? '').slice(0, 60) }))
+    ok('出厂那 2 条是「通用 + 常驻」的规矩条（不是项目专属）',
+      dict3.slice(0, 2).every((o) => o['项目'] === '通用' && o['距离'] === '常驻' && o['类型'] === '记忆'),
+      JSON.stringify(dict3.slice(0, 2).map((o) => `${o['项目']}/${o['距离']}/${o['类型']}`)))
+
+    // 幂等：库里已经有条目 → 一条都不写（这条是「升级插件别给我塞记忆」的保证）
+    const seededText = readFileSync(seedCsv, 'utf8')
+    const outAgain = runSeed(['--apply', '--seed']).stdout
+    ok('库里已有条目 → 再跑 --seed **一条都不写**，库文件逐字节没变',
+      rowsNow().length === 3 && readFileSync(seedCsv, 'utf8') === seededText && outAgain.includes('条都不写'),
+      outAgain.split('\n').find((l) => l.includes('初始记忆跳过')) ?? '')
+    ok('这时 check 也照实说「已有条目 → --seed 不会写任何东西」',
+      runSeed().stdout.includes('--seed 不会写任何东西'))
+
+    // 出厂文件本身得是「干净」的：不许带本机路径、不许带开发叙述（它是要发出去的）
+    const seedDocText = readFileSync(join(PKG, 'seed', 'memory.seed.json'), 'utf8')
+    ok('出厂种子文件里不含本机路径 / 盘符 / 开发叙述（发布口径）',
+      !/[A-Za-z]:[\\/]/.test(seedDocText) && !/流程[AB]|克劳德|萧潇|DSH_HOME/.test(seedDocText))
   }
 
   // ── J. 卸载（install.mjs --uninstall）—— 装 → 卸 → 再装，逐字节回到原样 ────

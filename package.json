@@ -21,6 +21,7 @@
     "cordis.patch.yml",
     "scripts/install.mjs",
     "scripts/selftest.mjs",
+    "seed/memory.seed.json",
     "README.md"
   ],
   "repository": {

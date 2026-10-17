@@ -11,12 +11,12 @@
 //   ② 只追加 / 原位替换：有标记就替换块内，没有则追加末尾。
 //   ③ 首次落笔先留 .bak；每次挂载（及新智能体出现时）核对标记，不在就补回。
 
-import { readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync, accessSync, appendFileSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync, accessSync, appendFileSync, statSync } from 'node:fs'
 import { constants as FS } from 'node:fs'
 import { basename, join, isAbsolute, resolve } from 'node:path'
 import {
-  BACKUP_CFG_PATH, CSV_PATH, INDEX_PATH, LOCK_PATH, PRESET_ROOT, SKILL_DIR, STORE_DIR,
-  backupReady, coreStale, getBackupCore, getCore, loadSchema, ready, setLibraryDir,
+  BACKUP_CFG_PATH, CSV_PATH, INDEX_PATH, LOCK_PATH, PRESET_ROOT, SCHEMA_PATH, SKILL_DIR, STORE_DIR,
+  backupReady, coreStale, getBackupCore, getCore, loadSchema, ready, reloadSchema, setLibraryDir,
 } from './lib/store.mjs'
 import { DEFAULT_MEMORY_FILE_NAMES, NOTICE_BEGIN, detectMemoryFiles, renderNotice, selfHeal } from './lib/notice.mjs'
 
@@ -134,6 +134,7 @@ export function apply(ctx, config = {}) {
           const op = url.pathname.slice(ROUTE.length)
 
           if (op === '/overview' && req.method === 'GET') return send(res, 200, overview(noticeState()))
+          if (op === '/dict' && req.method === 'GET') return send(res, 200, dictFacts())
           if (op === '/entries' && req.method === 'GET') return send(res, 200, entries(url.searchParams))
           if (op === '/heal' && req.method === 'POST') return send(res, 200, { summary: healNow(), notice: noticeState() })
           if (op === '/picker' && req.method === 'GET') return send(res, 200, pickerFacts())
@@ -178,13 +179,19 @@ function overview(notice) {
   // `header` 是库自己的列序——表格视图照它排，库长什么样就显示什么样。
   // skillDir = **实际在用**的库目录（config.libraryDir 指到哪就报哪）；coreStale = 换了目录
   // 但这份 Node 不能同步重载核心——界面据此说「重启 DSH 才生效」，不装作已经换好了。
-  const base = { ready: ready(), skillDir: SKILL_DIR, csvPath: CSV_PATH, coreStale: coreStale(), notice, sorts: SORT_ORDER, header: [], dimensions: [], statusValues: [], total: 0, active: 0, byDimension: {} }
+  // `health.ragged` = 「格子数跟表头对不上」的那些行。列是按下标读的，一行错位，
+  // 它后面每一格都串到别列上——**界面照样有值、只是值是错的**。所以这里照实报出来，
+  // 由界面明说「这些行显示的值不可信」，而不是让人对着串了位的表继续做判断。
+  // 库老一点（readTable 不返回 ragged）时按「没有」处理——不装作查过了。
+  const base = { ready: ready(), skillDir: SKILL_DIR, csvPath: CSV_PATH, coreStale: coreStale(), notice, sorts: SORT_ORDER, header: [], dimensions: [], statusValues: [], total: 0, active: 0, byDimension: {}, health: { ok: true, ragged: [] } }
   if (!base.ready) return base
   const schema = loadSchema()
   const core = getCore()
-  const { header, rows } = core.readTable(readFileSync(CSV_PATH, 'utf8'))
+  const { header, rows, ragged } = core.readTable(readFileSync(CSV_PATH, 'utf8'))
   const resolve = core.makeResolver(schema, header)
   base.header = header
+  const raggedRows = Array.isArray(ragged) ? ragged : []
+  base.health = { ok: raggedRows.length === 0, ragged: raggedRows }
   base.total = rows.length
   base.active = core.filterRows(schema, header, rows, {}).length
   // 设置页的「含已归档」开关要拿全部状态取值（+ 留白）拼显式条件。
@@ -202,6 +209,107 @@ function overview(notice) {
     base.byDimension[dim.name] = counts
   }
   return base
+}
+
+// ── 标签字典（设置页的只读展示）─────────────────────────
+//
+// 把库里的 `references/tags.schema.json` **摊成界面好渲染的形状**。只做这一件事：
+// 读文件 + 拍平成数组。**不写任何文件、不改字典、不动那四个维度。**
+//
+// 为什么要在服务端摊：schema 里 `values` 有两副长相——多数地方是「取值 → 说明」的对象，
+// `角色` / `项目` / `关键词` 那几个则是一句话（不是枚举）。这层方言不该让浏览器去猜。
+//
+// ⚠️ 报的是**运行时装载的那一份**（`loadSchema()` 的缓存），不是磁盘上现读的。
+// 两份不一致时（有人改了文件还没重启）用 `stale` 说出来——**不能让人以为「我改了文件，
+// 界面就跟着变」**，那是这套东西最怕的那种「看着成功、其实没生效」。
+
+/** 维度 / 辅助列共有的那几个字符串字段。 */
+const DICT_SCALARS = ['role', 'question', 'note', 'how', 'when', 'lifts']
+
+/** 一个维度（或一个辅助列）→ 界面好渲染的形状。取值对象与取值说明串在这里分开。 */
+function dictNode(name, node) {
+  const src = node && typeof node === 'object' && !Array.isArray(node) ? node : {}
+  const out = { name, values: [], text: '', column: null, required: false, status: '', cap: null, gate: null }
+  for (const k of DICT_SCALARS) out[k] = typeof src[k] === 'string' ? src[k] : ''
+  out.column = src.column === undefined || src.column === null ? null : String(src.column)
+  out.required = src.required === true
+  out.status = typeof src.status === 'string' ? src.status : ''
+  out.cap = Number.isFinite(src.cap) ? src.cap : null
+  // `gated`：这个维度的值受别的维度管（`深度` 只在 `类型=记忆` 时才打，其余时候留白）。
+  out.gate = src.gated && typeof src.gated === 'object'
+    ? { when: String(src.gated.when ?? ''), otherwise: String(src.gated.else ?? '') }
+    : null
+
+  const v = src.values
+  if (typeof v === 'string') out.text = v
+  else if (Array.isArray(v)) out.values = v.map((x) => ({ value: String(x), desc: '' }))
+  else if (v && typeof v === 'object') {
+    out.values = Object.entries(v).map(([value, desc]) => ({ value, desc: typeof desc === 'string' ? desc : '' }))
+  }
+  return out
+}
+
+function dictFacts() {
+  const out = { ready: false, path: SCHEMA_PATH, mtime: null, stale: false, error: null }
+  if (!existsSync(SCHEMA_PATH)) {
+    out.error = `找不到标签字典：${SCHEMA_PATH}（记忆库还没就位？）`
+    return out
+  }
+  let raw
+  try { raw = JSON.parse(readFileSync(SCHEMA_PATH, 'utf8')) } catch (e) {
+    out.error = `字典读不出来：${String(e?.message ?? e)}`
+    return out
+  }
+  try { out.mtime = statSync(SCHEMA_PATH).mtime.toISOString() } catch { /* 拿不到时辰不算错 */ }
+
+  let live
+  try { live = loadSchema() } catch (e) { out.error = String(e?.message ?? e); return out }
+  // 盘上这份与装在进程里那份是不是同一版——**改完没重启**时它俩不一样。
+  try { out.stale = JSON.stringify(live) !== JSON.stringify(raw) } catch { out.stale = false }
+
+  const str = (v) => (typeof v === 'string' ? v : '')
+  out.ready = true
+  out.name = str(raw.name)
+  out.version = str(raw.version)
+  out.comment = str(raw.$comment)
+
+  const st = raw.storage && typeof raw.storage === 'object' ? raw.storage : {}
+  out.storage = {
+    file: str(st.file),
+    header: Array.isArray(st.header) ? st.header.map(String) : [],
+    appendOnly: st.appendOnly === true,
+    migration: st.migration && typeof st.migration === 'object'
+      ? { status: str(st.migration.status), pending: Array.isArray(st.migration.pending) ? st.migration.pending.map(String) : [], note: str(st.migration.note) }
+      : null,
+  }
+
+  const rl = raw.rules && typeof raw.rules === 'object' ? raw.rules : {}
+  out.rules = {
+    model: str(rl.model),
+    blank: str(rl.blank),
+    universal: str(rl.universal),
+    universalValue: str(rl.universalValue),
+    required: Array.isArray(rl.required) ? rl.required.map(String) : [],
+    operators: Array.isArray(rl.operators) ? rl.operators.map(String) : [],
+  }
+  out.dimensions = Object.entries(raw.dimensions ?? {}).map(([n, v]) => dictNode(n, v))
+  out.auxiliary = Object.entries(raw.auxiliary ?? {}).map(([n, v]) => dictNode(n, v))
+
+  const wr = raw.writeRoutes && typeof raw.writeRoutes === 'object' ? raw.writeRoutes : {}
+  out.writeRoutes = {
+    comment: str(wr.$comment),
+    rules: Array.isArray(wr.rules) ? wr.rules.map(String) : [],
+  }
+
+  const rc = raw.recall && typeof raw.recall === 'object' ? raw.recall : {}
+  out.recall = {
+    order: Array.isArray(rc.order) ? rc.order.map(String) : [],
+    takeFirst: Number.isFinite(rc.takeFirst) ? rc.takeFirst : null,
+    reportTotalFirst: rc.reportTotalFirst === true,
+    miss: str(rc.miss),
+    timeFilter: str(rc.timeFilter),
+  }
+  return out
 }
 
 function entries(params) {
@@ -320,7 +428,11 @@ function restoreFrom(body) {
   const st = bk.readBackupStatus(STORE_DIR, { recent: 50 })
   if (!st.dirSet) return { ok: false, code: 'NO_DIR', error: '还没有设置备份地址' }
 
-  const src = { csv: join(st.dir, `memory-${stamp}.csv`), md: join(st.dir, `index-${stamp}.md`) }
+  const src = {
+    csv: join(st.dir, `memory-${stamp}.csv`),
+    md: join(st.dir, `index-${stamp}.md`),
+    schema: join(st.dir, `schema-${stamp}.json`),
+  }
   if (!existsSync(src.csv)) return { ok: false, error: `这份备份不完整：缺 memory-${stamp}.csv` }
   if (!existsSync(src.md)) return { ok: false, error: `这份备份不完整：缺 index-${stamp}.md` }
 
@@ -329,12 +441,21 @@ function restoreFrom(body) {
   let expectCount = null
   let csvBytes = null
   let mdBytes = null
+  let schemaBytes = null
+  let schemaVersion = ''
   try {
     csvBytes = readFileSync(src.csv)
     mdBytes = readFileSync(src.md)
     const { header, rows } = core.readTable(csvBytes.toString('utf8'))
     if (header.indexOf('id') < 0) return { ok: false, error: '这份备份的表头里没有 id 列，不像是记忆库' }
     expectCount = rows.length
+    // 字典随库一起备（P-8）。老备份里没有它——那就**不动字典**，并在结果里说清楚，
+    // 别让人以为「换回来了整份」。（先在这里解析一遍：坏字典要在**留下任何东西之前**拦下。）
+    if (existsSync(src.schema)) {
+      schemaBytes = readFileSync(src.schema)
+      const parsed = JSON.parse(schemaBytes.toString('utf8'))
+      schemaVersion = typeof parsed?.version === 'string' ? parsed.version : ''
+    }
   } catch (e) {
     return { ok: false, error: `这份备份读不出来：${String(e?.message ?? e)}` }
   }
@@ -350,6 +471,29 @@ function restoreFrom(body) {
   // ② 整体替换（用上面读下来的那份字节，不用磁盘上现在这个名字——它可能刚被留档覆盖）
   writeFileSync(CSV_PATH, csvBytes)
   writeFileSync(INDEX_PATH, mdBytes)
+
+  // ②b 字典跟着一起换回去——「恢复 = 整体替换」的应有之义：库和**解释这份库的说明书**不能分家，
+  //     不然换回一份老库、字典还是新的，就会出现「表里有个值、字典里没这个词」的越界行。
+  //     老备份里没有字典（加这一条之前备的）就**不动它**，并明说——不装作整份都换回来了。
+  let curSchemaBytes = null
+  try { curSchemaBytes = readFileSync(SCHEMA_PATH) } catch { curSchemaBytes = null }
+  const schemaInfo = { available: schemaBytes !== null, version: schemaVersion, swapped: false, note: '' }
+  if (schemaBytes === null) {
+    schemaInfo.note = '这份备份里没有字典（是加字典之前的备份）——字典保持现在这一份，没动。'
+  } else if (curSchemaBytes !== null && curSchemaBytes.equals(schemaBytes)) {
+    schemaInfo.note = '备份里的字典和现在这份逐字节一样，没动。'
+  } else {
+    try {
+      writeFileSync(SCHEMA_PATH, schemaBytes)
+      // ⚠️ 必须丢缓存：`loadSchema()` 是**进程内**缓存的，不丢的话界面显示了新字典、
+      //    每轮注入给模型的还是老字典——又是一次「看着成功、其实没生效」。
+      reloadSchema()
+      schemaInfo.swapped = true
+      schemaInfo.note = `字典也换回这一版${schemaVersion === '' ? '' : `（${schemaVersion}）`}，当场生效，不必重启。`
+    } catch (e) {
+      schemaInfo.note = `字典没换成功：${String(e?.message ?? e)}（库已经换好了，字典还是现在这份）`
+    }
+  }
 
   // ③ 换完复核
   let afterCount = null
@@ -372,7 +516,7 @@ function restoreFrom(body) {
       `${new Date().toISOString().slice(0, 19)}  restore ${stamp}  条目=${afterCount}  恢复前留档=${pre.stamp}\n`, 'utf8')
   } catch { /* 非致命 */ }
 
-  return { ok: true, stamp, entryCount: afterCount, preBackup: pre.stamp, status: backupStatus() }
+  return { ok: true, stamp, entryCount: afterCount, preBackup: pre.stamp, schema: schemaInfo, status: backupStatus() }
 }
 
 // ── 合并 ────────────────────────────────────────────────
