@@ -19,8 +19,11 @@ import {
   backupReady, coreStale, getBackupCore, getCore, loadSchema, ready, reloadSchema, setLibraryDir,
 } from './lib/store.mjs'
 import { DEFAULT_MEMORY_FILE_NAMES, NOTICE_BEGIN, detectMemoryFiles, renderNotice, selfHeal } from './lib/notice.mjs'
+import { HostConfig } from './lib/config.mjs'
 
 export const name = 'tag-memory'
+/** Host 行配置 schema：加载期校验 + 设置页表单描述。 */
+export const Config = HostConfig
 
 /** 消费 webServer（挂 API 路由）；不发布服务，故无需 realm。 */
 export const inject = ['webServer']
@@ -123,13 +126,49 @@ export function apply(ctx, config = {}) {
   heal('挂载')
   const off = ctx.on('agent/created', () => heal('新智能体'))
 
+  /**
+   * 给 /tag-memory-api 做 request admission。
+   *
+   * 官方 WebServer 明确不做服务器级认证；`@deepseek-ai/dsh-client-connection`
+   * 提供的 `connection` 服务同时负责 Host/Origin fence 与浏览器认证。直接复用
+   * 它，才能和官方 `/api` 使用同一份信任判断（而不是自己拍一套 Host 检查）。
+   * 返回 null 表示放行；否则返回应回给浏览器的 HTTP 状态码。
+   */
+  function requestRejection(req) {
+    try {
+      const connection = ctx.get?.('connection')
+      if (connection !== null && connection !== undefined
+        && typeof connection.requestRejection === 'function') {
+        const rejection = connection.requestRejection(req)
+        return typeof rejection === 'number' ? rejection : null
+      }
+    } catch { /* 服务查询或认证异常都按失败关闭处理 */ }
+    return 503
+  }
+
   // ── 只读 API（设置页取数）──────────────────────────────
+  let offRoute = null
   try {
-    ctx.webServer.register({
+    offRoute = ctx.webServer.register({
       kind: 'prefix',
       path: ROUTE,
       async handler(req, res) {
         try {
+          // DSH 的 WebServer 本身不做认证；官方约定由路由 owner 自己执行
+          // Host/Origin 与浏览器会话校验。`connection` 是 web 组合里的
+          // client-connection 服务，requestRejection() 返回 401/403 或 undefined。
+          // 没有这个服务时 fail closed，不能让只读库或写接口裸奔。
+          const rejection = requestRejection(req)
+          if (rejection !== null) {
+            return send(res, rejection, {
+              error: rejection === 401
+                ? '未认证：请从 DSH 页面访问本接口'
+                : rejection === 403
+                  ? '请求来源被拒绝'
+                  : '这个 DSH 没有可用的连接认证服务，接口已关闭',
+            })
+          }
+
           const url = new URL(req.url ?? '/', 'http://localhost')
           const op = url.pathname.slice(ROUTE.length)
 
@@ -170,7 +209,10 @@ export function apply(ctx, config = {}) {
     log(`[tag-memory] API 路由未挂上：${String(e?.message ?? e)}`)
   }
 
-  return () => { try { off?.() } catch { /* 已释放 */ } }
+  return () => {
+    try { offRoute?.() } catch { /* 已释放 */ }
+    try { off?.() } catch { /* 已释放 */ }
+  }
 }
 
 // ── 取数实现 ────────────────────────────────────────────
@@ -508,12 +550,12 @@ function restoreFrom(body) {
 
   // ④ 水位：把「现在库里是什么」登记成刚恢复的这一版
   const cfg = readCfg()
-  cfg.lastBackupAt = new Date().toISOString().slice(0, 19) + '+08:00'
+  cfg.lastBackupAt = localIsoTimestamp()
   cfg.lastCount = afterCount
   try { writeFileSync(BACKUP_CFG_PATH, JSON.stringify(cfg, null, 2) + '\n', 'utf8') } catch { /* 非致命 */ }
   try {
     appendFileSync(join(st.dir, 'last-backup.log'),
-      `${new Date().toISOString().slice(0, 19)}  restore ${stamp}  条目=${afterCount}  恢复前留档=${pre.stamp}\n`, 'utf8')
+      `${localIsoTimestamp()}  restore ${stamp}  条目=${afterCount}  恢复前留档=${pre.stamp}\n`, 'utf8')
   } catch { /* 非致命 */ }
 
   return { ok: true, stamp, entryCount: afterCount, preBackup: pre.stamp, schema: schemaInfo, status: backupStatus() }
@@ -710,6 +752,17 @@ function natCompare(a, b) {
     } else if (x !== y) return x < y ? -1 : 1
   }
   return 0
+}
+
+/** 本地时间 ISO 串，保留真实时区偏移（不能拿 UTC 去硬贴 +08:00）。 */
+function localIsoTimestamp(date = new Date()) {
+  const p2 = (n) => String(n).padStart(2, '0')
+  const offset = -date.getTimezoneOffset()
+  const sign = offset >= 0 ? '+' : '-'
+  const abs = Math.abs(offset)
+  return `${date.getFullYear()}-${p2(date.getMonth() + 1)}-${p2(date.getDate())}`
+    + `T${p2(date.getHours())}:${p2(date.getMinutes())}:${p2(date.getSeconds())}`
+    + `${sign}${p2(Math.floor(abs / 60))}:${p2(abs % 60)}`
 }
 
 function send(res, status, obj) {

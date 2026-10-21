@@ -1,12 +1,13 @@
-# Bundle patch for dsh-tag-memory: 只插 profile 平面的一行。
+# Bundle patch for dsh-tag-memory.
 #
-# 为什么 profile 行不能省：它负责「记忆文件托管」——启动时探测 <DSH_HOME>/.agent-presets/*/MEMORY.md，
-# 把「记忆系统在运行」的说明块写进去（幂等、挂载自愈）。这件事要对**所有**智能体成立，
-# 包括那些还没在自身 preset 里挂 `/preset` 半的；所以放在 profile 平面。
-# 它不发布服务，因此不需要 realm —— 形状与 dsh-agent-bridge / dsh-mm-agent-memory 一致。
+# Root row: profile plane — memory-file hosting and the /tag-memory-api routes.
+# Preset row: profile plane as well — tag dictionary + memory snapshot injection,
+#             and the memory_write / memory_recall tools for every agent.
 #
-# 每个智能体自己的那一半（字典注入 + memory_write / memory_recall 两个工具）从该智能体的 preset
-# 里以 `dsh-tag-memory/preset` 挂载：那一半必须绑定到某一个智能体，才能注册进它的提示词与工具表。
+# Both halves live in the bundle patch so the official install path
+# (`dsh plugin add`) mounts a complete plugin instead of a half-installed one.
 - insert:
     - id: tag-memory
       name: dsh-tag-memory
+    - id: tag-memory-preset
+      name: dsh-tag-memory/preset

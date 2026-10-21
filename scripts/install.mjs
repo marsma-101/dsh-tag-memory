@@ -2,9 +2,9 @@
  * 把 dsh-tag-memory 装进一个 DSH profile，离线完成。
  *
  *   node scripts/install.mjs                       # 只读校验（profile: web），并预览会写哪些记忆文件
- *   node scripts/install.mjs --apply               # 真正安装
+ *   node scripts/install.mjs --apply               # 真正安装（Host + 智能体半都由 bundle patch 接线）
  *   node scripts/install.mjs --profile <name>      # 换个 profile
- *   node scripts/install.mjs --apply --wire-presets  # 顺带把 /preset 半接进 profile 补丁（全局注册）
+ *   node scripts/install.mjs --apply --wire-presets  # 兼容老版本：仅在 bundle 没自带接线时才改 profile 补丁
  *   node scripts/install.mjs --uninstall           # 预览要摘掉哪些东西（只读）
  *   node scripts/install.mjs --uninstall --apply   # 真卸（摘回原样；记忆库一个字不碰）
  *   node scripts/install.mjs --dsh-home <path>     # 换个 DSH_HOME（装到别的 DSH 时用）
@@ -16,15 +16,15 @@
  *   1. <DSH_HOME>/profiles/<profile>/node_modules/dsh-tag-memory  （junction → 本仓库 / --dest）
  *   2. <DSH_HOME>/profiles/<profile>/package.json                 （依赖 + bundle 条目）
  *   3. <DSH_HOME>/.agent-presets/<智能体>/MEMORY.md               （探测到才写；写的是受控说明块）
- *   4. （--wire-presets）<profile>/cordis.patch.yml               （接 /preset 行；先备份、装完校验）
+ *   4. （--wire-presets，仅兼容老 bundle）<profile>/cordis.patch.yml（接 /preset 行；先备份、装完校验）
  *   5. （--seed）<DSH_HOME>/skills/…/store/memory.csv             （**只在该库 0 条时**写初始记忆）
  *
- * `--uninstall` 把上面四处**逐条摘回去**（先备份、逐条校验）。记忆库（`skills/…` 下的
+ * `--uninstall` 把安装时动过的那几项**逐条摘回去**（先备份、逐条校验）。记忆库（`skills/…` 下的
  * memory.csv 与字典）**一个字都不碰**——卸插件不等于删记忆。
  *
- * 本包自带 bundle patch，加载器把它当一层应用，**宿主半**（index.js：设置页 API + 记忆文件
- * 托管）因此自动接上；**智能体半**（字典段 + memory_write / memory_recall）要另外挂，
- * 见 `--wire-presets`。
+ * 本包自带 bundle patch，加载器把它当一层应用。patch 同时插入 **Host 半**（index.js：
+ * 设置页 API + 记忆文件托管）和 **智能体半**（preset.js：字典段 + memory_write /
+ * memory_recall），所以官方安装路径一次装齐；`--wire-presets` 只用于老 bundle 兼容。
  * 记忆文件的写法规矩见 lib/notice.mjs —— 只认标记、只追加/原位替换、块外一字节不碰。
  */
 import {
@@ -66,6 +66,8 @@ const DSH_HOME = getFlag('--dsh-home', process.env.DSH_HOME?.trim() || join(HOME
 const PROFILE_DIR = join(DSH_HOME, 'profiles', PROFILE_NAME)
 const PROFILE_MANIFEST = join(PROFILE_DIR, 'package.json')
 const PROFILE_PATCH = join(PROFILE_DIR, 'cordis.patch.yml')
+/** 本包自带 bundle patch；智能体半是否已全局接线以它为准。 */
+const BUNDLE_PATCH = join(PACKAGE_DIR, 'cordis.patch.yml')
 const PRESET_ROOT = join(DSH_HOME, '.agent-presets')
 
 const EXPECTED_NAME = 'dsh-tag-memory'
@@ -121,6 +123,9 @@ const clientPath = typeof clientExport === 'string' ? clientExport : clientExpor
 check('exports ./client', typeof clientPath === 'string', String(clientPath))
 check('client half exists', typeof clientPath === 'string' && existsSync(join(PACKAGE_DIR, clientPath)), String(clientPath))
 check('declares dsh.client (web)', manifest.dsh?.client?.platform === 'web')
+check('declares engines.dsh', typeof manifest.engines?.dsh === 'string', String(manifest.engines?.dsh))
+check('declares @deepseek-ai/dsh-tools peer', typeof manifest.peerDependencies?.['@deepseek-ai/dsh-tools'] === 'string', String(manifest.peerDependencies?.['@deepseek-ai/dsh-tools']))
+check('exports locale + icon metadata', manifest.exports?.['./locale/*.json'] === './locale/*.json' && manifest.exports?.['./icon'] === './icon.svg')
 const clientText = typeof clientPath === 'string' && existsSync(join(PACKAGE_DIR, clientPath))
   ? readFileSync(join(PACKAGE_DIR, clientPath), 'utf8')
   : ''
@@ -129,6 +134,7 @@ check('client registers settings.section', clientText.includes("'settings.sectio
 
 const entryText = readFileSync(join(PACKAGE_DIR, manifest.main ?? 'index.js'), 'utf8')
 check('host entry exports apply()', /export\s+function\s+apply\s*\(/.test(entryText))
+check('host entry exports Config schema', /export\s+const\s+Config\s*=/.test(entryText))
 check('host entry runs notice self-heal', /selfHeal/.test(entryText))
 check('host entry cleans up its listener', /return\s*\(\)\s*=>/.test(entryText))
 check('host entry serves the settings API', /webServer\.register\(/.test(entryText) && /\/tag-memory-api/.test(entryText))
@@ -137,6 +143,7 @@ const presetText = typeof presetPath === 'string' && existsSync(join(PACKAGE_DIR
   ? readFileSync(join(PACKAGE_DIR, presetPath), 'utf8')
   : ''
 check('preset entry exports apply()', /export\s+function\s+apply\s*\(/.test(presetText))
+check('preset entry exports Config schema', /export\s+const\s+Config\s*=/.test(presetText))
 // 段必须是**函数值**（每轮重读）；参数可有可无——注入快照要拿 `context.agent` 切当前项目。
 check('preset registers a function-valued section', /systemPrompt\.section\(\{/.test(presetText) && /text:\s*\([^)]*\)\s*=>/.test(presetText))
 check('preset registers memory_write + memory_recall', /'memory_write'/.test(presetText) && /'memory_recall'/.test(presetText))
@@ -161,8 +168,12 @@ function loadYaml() {
 if (yaml) {
   const patch = yaml.load(readFileSync(join(PACKAGE_DIR, 'cordis.patch.yml'), 'utf8'))
   const rows = Array.isArray(patch) ? patch.flatMap((l) => l?.insert ?? []) : []
-  check('bundle patch is one plain insert', Array.isArray(patch) && patch.length === 1 && rows.length === 1)
-  check('bundle patch row names the package', rows[0]?.name === PACKAGE_NAME && rows[0]?.id === 'tag-memory', JSON.stringify(rows[0]))
+  check('bundle patch is one plain insert with host + preset rows',
+    Array.isArray(patch) && patch.length === 1 && rows.length === 2, JSON.stringify(rows))
+  check('bundle patch rows name the package and its preset export',
+    rows[0]?.name === PACKAGE_NAME && rows[0]?.id === 'tag-memory'
+      && rows[1]?.name === `${PACKAGE_NAME}/preset` && rows[1]?.id === 'tag-memory-preset',
+    JSON.stringify(rows))
 } else {
   report.push('SKIP  bundle patch yaml parse (js-yaml unavailable)')
 }
@@ -225,10 +236,10 @@ function stripDeclaration(text) {
 
 // ── 卸载（--uninstall）──────────────────────────────────
 //
-// 装的时候只动四处，卸就把这四处逐条摘回去：
+// 装的时候动过这几处，卸就把它们逐条摘回去：
 //   ① <profile>/node_modules/dsh-tag-memory  （junction；只解我们自己拉的那条）
 //   ② <profile>/package.json                 （依赖条目 + bundle 层条目）
-//   ③ <profile>/cordis.patch.yml             （上面那段声明）
+//   ③ <profile>/cordis.patch.yml             （仅老安装产物留下的那段声明）
 //   ④ 各智能体的 MEMORY.md                   （托管说明块；只认标记，块外不碰）
 // **记忆库（`skills/…` 下的 memory.csv 与字典）一个字都不碰。**
 // 规矩同装：先备份、写完校验、一项不通就**整批不落盘**（宁可不卸，也不留半截）。
@@ -417,20 +428,24 @@ try {
 // 在 preset 半里，得靠 profile 补丁里的内联声明。没接上时界面照样能用，只是智能体
 // 永远看不到字典、也调不到那两个工具——所以这里必须报出来，不能静默。
 const patchText = existsSync(PROFILE_PATCH) ? readFileSync(PROFILE_PATCH, 'utf8') : ''
-// 「接上了」有三种情形，别混成一句：全局那段（我们加的）/ 只挂在某个 preset 里（用户自己挂的）/
-// 压根没有。前两种都能跑，但只有第一种对**以后新建的**智能体也生效。
-let wireState = 'none' // 'global' | 'scoped' | 'none'
-if (patchText.includes(WIRE_MARK)) {
+const bundlePatchText = existsSync(BUNDLE_PATCH) ? readFileSync(BUNDLE_PATCH, 'utf8') : ''
+// 「接上了」有四种情形：bundle patch 自带（官方安装/新版推荐）/ profile 补丁里的全局声明
+// （老版安装脚本留下的）/ 只挂在某个 preset 里（用户自己挂的）/ 压根没有。
+let wireState = 'none' // 'bundle' | 'global' | 'scoped' | 'none'
+if (bundlePatchText.includes(WIRE_MARK)) wireState = 'bundle'
+else if (patchText.includes(WIRE_MARK)) {
   try { wireState = patchHasWire(parsePatch(patchText, 'profile 补丁')) ? 'global' : 'scoped' }
   catch { wireState = 'scoped' } // 解析不了就不乱断言
 }
-let wired = wireState === 'global' // apply 时会被 wire() 改写
+let wired = wireState === 'bundle' || wireState === 'global' // apply 时可能被 wire() 改写
 report.push(
-  wireState === 'global'
-    ? `PASS  智能体半已接线（profile 平面、全局）— ${PROFILE_PATCH}`
-    : wireState === 'scoped'
-      ? `PASS  智能体半已接线，但只挂在某个 preset 里 —— 换个智能体就没有；想人人有份加 --wire-presets（${PROFILE_PATCH}）`
-      : `WARN  智能体半未接线 —— 字典段与 memory_write / memory_recall 不会出现在任何智能体里；加 --wire-presets 接上（${PROFILE_PATCH}）`,
+  wireState === 'bundle'
+    ? `PASS  智能体半已接线（bundle patch、profile 平面全局）— ${BUNDLE_PATCH}`
+    : wireState === 'global'
+      ? `PASS  智能体半已接线（profile 平面、全局）— ${PROFILE_PATCH}`
+      : wireState === 'scoped'
+        ? `PASS  智能体半已接线，但只挂在某个 preset 里 —— 换个智能体就没有；新版 bundle patch 会全局接线（${PROFILE_PATCH}）`
+        : `WARN  智能体半未接线 —— 字典段与 memory_write / memory_recall 不会出现在任何智能体里（${PROFILE_PATCH}）`,
 )
 
 // ── 记忆文件探测（check 模式下预览，apply 模式下写入）───
@@ -487,6 +502,7 @@ if (mode === 'check') {
   if (!wired) {
     console.log(`\n若加 --wire-presets，会往 ${PROFILE_PATCH} 追加一条内联声明，`)
     console.log('把「字典段 + memory_write / memory_recall」在 profile 平面全局注册给所有智能体。')
+    console.log('新版 bundle patch 已自带这条接线；只有老安装产物才需要这个兼容开关。')
   }
   console.log('\n⚠ 改完必须重启 DSH 才生效：宿主半与补丁层都只在进程启动时装载。')
   process.exit(fail.length === 0 ? 0 : 1)
@@ -589,6 +605,10 @@ if (memoryFiles.length === 0) console.log(`· 没有记忆文件可写（${PRESE
 
 /** 往 <profile>/cordis.patch.yml 追加一段内联声明；先备份、写完解析校验、失败不留痕。 */
 function wire() {
+  if (existsSync(BUNDLE_PATCH) && readFileSync(BUNDLE_PATCH, 'utf8').includes(WIRE_MARK)) {
+    console.log(`· 智能体半已由 bundle patch 全局接线，无需改 ${PROFILE_PATCH}`)
+    return
+  }
   if (!existsSync(PROFILE_PATCH)) {
     console.error(`✗ 接线跳过：没有 ${PROFILE_PATCH}`)
     return
@@ -700,5 +720,5 @@ console.log(resolved === undefined
 console.log(resolved === undefined ? 'INSTALL INCOMPLETE' : `INSTALL OK（记忆块写入 ${wrote} 个）`)
 if (resolved !== undefined) {
   console.log('\n⚠ 改动只在重启 DSH 后生效：宿主半与补丁层都只在进程启动时装载。')
-  if (!wired) console.log('  （智能体半还没接线，见上面那条 WARN；加 --wire-presets 接上。）')
+  if (!wired) console.log('  （智能体半还没接线，见上面那条 WARN；新版 bundle patch 会随官方安装自动接线。）')
 }

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Tag Memory",
+    "description": "An append-only CSV memory library with a tag dictionary, agent memory tools, and a browsable memory page."
+  }
+}

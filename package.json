@@ -10,7 +10,9 @@
     "./preset": "./preset.js",
     "./client": "./client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
   },
   "files": [
     "index.js",
@@ -18,11 +20,15 @@
     "client.js",
     "lib/store.mjs",
     "lib/notice.mjs",
+    "lib/config.mjs",
     "cordis.patch.yml",
     "scripts/install.mjs",
     "scripts/selftest.mjs",
     "seed/memory.seed.json",
-    "README.md"
+    "README.md",
+    "locale/en.json",
+    "locale/zh.json",
+    "icon.svg"
   ],
   "repository": {
     "type": "git",
@@ -46,10 +52,18 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web",
-      "inject": [
-        "@deepseek-ai/dsh-client-ui-slots"
-      ]
+      "platform": "web"
     }
+  },
+  "engines": {
+    "dsh": ">=0.2.0 <0.3.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.2.0 <0.3.0",
+    "@deepseek-ai/schemastery": ">=3.18.0 <4"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.2.0 <0.3.0",
+    "@deepseek-ai/schemastery": ">=3.18.0 <4"
   }
 }

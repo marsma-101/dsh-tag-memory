@@ -230,16 +230,32 @@ node scripts/install.mjs    # 只读校验：包结构 + profile 清单 + 预览
 
 ## 安装
 
+官方 DSH 的 bundle 安装方式（推荐）：
+
+```bash
+dsh plugin --profile <profile> add <本仓库路径或 GitHub 地址>
+# 若本机 pnpm 报 ERR_PNPM_ADDING_TO_ROOT，按它提示加 -w：
+dsh plugin --profile <profile> add -w <本仓库路径或 GitHub 地址>
+```
+
+本包的 `cordis.patch.yml` 同时插入 **Host 半**（记忆文件托管 + 设置页 API）和
+**智能体半**（字典/快照注入 + `memory_write` / `memory_recall`），
+所以按官方 bundle 方式安装后两半都会挂上，不需要再手工改 profile 补丁。
+
+也保留了仓库内的离线安装脚本，便于冷启动、迁移和检查：
+
 ```bash
 node scripts/install.mjs                         # 只读校验 + 预览会写哪些记忆文件
 node scripts/install.mjs --apply                 # 安装（链接 + profile 清单 + 写记忆块）
-node scripts/install.mjs --apply --wire-presets  # 顺带把「智能体半」接进 profile 补丁
 node scripts/install.mjs --apply --seed          # 顺带播初始记忆（**只在该库 0 条时**）
 node scripts/install.mjs --uninstall             # 预览要摘掉哪些（只读，一个字节不动）
-node scripts/install.mjs --uninstall --apply     # 卸干净：四处逐一摘回原样
+node scripts/install.mjs --uninstall --apply     # 卸干净：逐项摘回原样
 node scripts/install.mjs --apply --dest <路径>   # 先把本体拷到 <路径>，再从那儿发链接
 node scripts/install.mjs --dsh-home <路径> --profile <名>   # 装到别的 DSH / 别的 profile
 ```
+
+`--wire-presets` 仍保留用于兼容老版安装产物；新版 bundle patch 已自带智能体半，
+正常情况下不需要再传。
 
 装完需**重启 DSH** 才生效。所有被改的文件，脚本都会先留 `.bak-<时间戳>`。
 
@@ -250,15 +266,13 @@ node scripts/install.mjs --dsh-home <路径> --profile <名>   # 装到别的 DS
 > check 会发现「本体在会话目录里」或「链接指着别处」，都会报出来；apply 时链接指着我们自己的
 > 另一份，会**重指**到本次要用的本体。
 
-> **半装与整装。** `--apply` 装的是**宿主半**（profile 平面的 `index.js`：设置页 API、
-> 记忆文件托管），它由本包自带的 bundle patch 自动接上。
-> 「字典段 + `memory_write` / `memory_recall`」在**智能体半**里，要 `--wire-presets`
-> 才往 `<profile>/cordis.patch.yml` 追加一条声明（先备份、写完解析校验、失败一字不落）。
-> 只装了宿主半时，界面照样能用，但**任何智能体都拿不到字典、也调不到那两个工具**。
-> `install.mjs` 的 check 输出会把这一项报成 `WARN`，不会静默。
+> **两半都在 bundle patch 里。** 宿主半（`index.js`：设置页 API、记忆文件托管）和
+> 智能体半（`preset.js`：字典/快照注入 + 两个工具）都由 `cordis.patch.yml`
+> 的 profile 平面声明接线。安装后应同时看到侧边栏「记忆」页和新会话里的
+> `memory_write` / `memory_recall`，不需要分别装两次。
 
-> **`--uninstall` 摘的是上面那四处**：`node_modules` 里的链接、profile 清单里的依赖与 bundle 条目、
-> profile 补丁里的那段声明、各智能体 `MEMORY.md` 里的说明块——摘回原样，逐条校验，
+> **`--uninstall` 摘的是安装时写下的那几处**：`node_modules` 里的链接、profile 清单里的依赖与
+> bundle 条目、老版本可能留下的 profile 补丁声明、各智能体 `MEMORY.md` 里的说明块——摘回原样，逐条校验，
 > 有一项摘不干净就**整批不落盘**（宁可不卸，也不留半截）。
 > **记忆库（`store/memory.csv` 与字典）不在清单里：卸插件不删记忆。**
 > 链接只解「当初是我们拉的那一条」（`--dest` 装的话，认的是清单里记的那个落点）；
@@ -294,12 +308,12 @@ node scripts/install.mjs --dsh-home <路径> --profile <名>   # 装到别的 DS
 2. **智能体半（字典注入 + 两个工具）**——**新开一个会话**再查（旧会话保留着装载那一刻的绑定，
    代表不了新会话）：工具清单里应有 `memory_write` / `memory_recall`，
    系统提示词里应有「记忆字典」段与「记忆快照」段。
-   只有界面能用、新会话里却没有这两样 → 多半是没接线，跑 `node scripts/install.mjs`
-   看那一行是不是 `WARN 智能体半未接线`（是的话加 `--wire-presets` 重装一次）。
+   只有界面能用、新会话里却没有这两样 → 跑 `node scripts/install.mjs` 看输出；
+   正常应显示 `PASS  智能体半已接线（bundle patch、profile 平面全局）`。
 3. **真写一条**——让智能体 `memory_write` 一条，回「记忆」页刷新，新条目应该在。
 
-> 三条里最容易漏第 2 条：**宿主半与智能体半是两码事**。只装了宿主半时，
-> 界面照样能用——看着像装好了，其实没有任何智能体拿得到字典。
+> 三条里最容易漏第 2 条：**宿主半与智能体半是两码事**。如果用了很老的安装产物或
+> 手工覆盖了 bundle 配置，可能只挂上宿主半——界面照样能用，但没有任何智能体拿得到字典。
 
 ### 卸载回滚
 
@@ -308,8 +322,8 @@ node scripts/install.mjs --uninstall           # 先看要摘什么（只读，�
 node scripts/install.mjs --uninstall --apply   # 真摘
 ```
 
-摘的是装的时候动的那四处——`node_modules` 里的链接、profile 清单里的依赖与 bundle 条目、
-profile 补丁里那段声明、各智能体 `MEMORY.md` 里的说明块。**逐条校验，有一项摘不干净就整批不落盘**
+摘的是装的时候动的那几处——`node_modules` 里的链接、profile 清单里的依赖与 bundle 条目、
+老版本可能留下的 profile 补丁声明、各智能体 `MEMORY.md` 里的说明块。**逐条校验，有一项摘不干净就整批不落盘**
 （宁可不卸，也不留半截）。每个文件动之前都留 `.bak-<时间戳>`，想回退就把 `.bak` 改回原名。
 
 **记忆库不在摘除清单里：卸插件不删记忆。** `store/memory.csv`、字典、备份目录一个字节都不碰；
@@ -332,7 +346,7 @@ profile 补丁里那段声明、各智能体 `MEMORY.md` 里的说明块。**逐
     presetRoot: 'D:\…\.agent-presets'  # 找不到记忆文件时才填
 ```
 
-`preset.js`（智能体半；这一段 `install.mjs --wire-presets` 会自动写好）：
+`preset.js`（智能体半；bundle patch 已默认挂好，下面只是配置项说明）：
 
 ```yaml
 - insert:

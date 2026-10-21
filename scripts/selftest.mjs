@@ -75,6 +75,12 @@ if (missingLib.length > 0) {
   const pkg0 = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
   ok('package.json 导出 ./client 且声明 dsh.client（不看库也查得了）',
     pkg0.exports['./client'] === './client.js' && pkg0.dsh?.client?.platform === 'web')
+  ok('package.json 声明 DSH engines 与运行时 peer（官方安装前提）',
+    typeof pkg0.engines?.dsh === 'string'
+      && typeof pkg0.peerDependencies?.['@deepseek-ai/dsh-tools'] === 'string'
+      && typeof pkg0.peerDependencies?.['@deepseek-ai/schemastery'] === 'string')
+  ok('package.json 导出 locale/icon 展示元数据',
+    pkg0.exports?.['./locale/*.json'] === './locale/*.json' && pkg0.exports?.['./icon'] === './icon.svg')
   console.log(results.join('\n'))
   console.log(`\nSELFTEST SKIPPED（这台机器上还没有记忆库）   pass=${pass} fail=${fail} skip=${skip}`)
   process.exit(0)
@@ -374,7 +380,17 @@ try {
   const indexMod = await import(pathToFileURL(join(PKG, 'index.js')).href)
   ok('index 声明 inject webServer', Array.isArray(indexMod.inject) && indexMod.inject.includes('webServer'))
   // presetRoot 指到沙箱——apply 会立即自愈，绝不能落进真 .agent-presets。
-  const fakeCtx = { logger: {}, on: () => () => {}, webServer: { register: (r) => routes.push(r) } }
+  // 路由现在复用 DSH `connection` 服务的准入判断；测试桩默认放行，另有一条
+  // 用例把它切成 401，验证未认证请求确实进不了 API。
+  let authRejection
+  const fakeCtx = {
+    logger: {},
+    on: () => () => {},
+    webServer: { register: (r) => routes.push(r) },
+    get: (name) => name === 'connection'
+      ? { requestRejection: () => authRejection }
+      : undefined,
+  }
   const dispose = indexMod.apply(fakeCtx, { presetRoot, notice: true })
   ok('index 挂上 /tag-memory-api（prefix）', routes.length === 1 && routes[0].path === '/tag-memory-api' && routes[0].kind === 'prefix')
   const call = async (op, method = 'GET', query = '') => {
@@ -382,6 +398,11 @@ try {
     await routes[0].handler({ url: `/tag-memory-api${op}${query}`, method }, res)
     return { status: res.statusCode, json: JSON.parse(res.body) }
   }
+  authRejection = 401
+  const denied = await call('/overview')
+  authRejection = undefined
+  ok('index API 未认证时返回 401（不在 WebServer 上裸奔）',
+    denied.status === 401 && denied.json.error !== undefined, JSON.stringify(denied))
   const ov = await call('/overview')
   ok('index /overview ready 且含维度计数', ov.status === 200 && ov.json.ready === true && !!ov.json.byDimension?.距离, Object.keys(ov.json.byDimension ?? {}).join(','))
   ok('index /overview 记忆文件列 3 个', ov.json.notice?.files?.length === 3, String(ov.json.notice?.files?.length))
@@ -1101,27 +1122,21 @@ try {
       cliSrc.includes("from './lib/backup.mjs'") && !cliSrc.includes('createHash'))
   }
 
-  // ── I. 装/接线（install.mjs）—— 钉死那次「挂错了」的坑 ─────────────
-  //     `--wire-presets` 曾经往 `<DSH_HOME>/.agent-presets/*/agent.cordis.yml` 追加行，
-  //     那份文件 0.2.0 **一个字节都不读**：装的人以为接上了，实际谁都没有工具。
-  //     现在让它往 `<profile>/cordis.patch.yml` 追加一条内联声明（profile 平面全局注册）。
-  //     这一步全部在沙箱里跑真脚本，验的是**落盘产物**：合法 YAML、那行在、原有的一字不动、
-  //     失败一字不落、幂等、不再产出那个没人读的文件。
+  // ── I. 装/接线（install.mjs）—— bundle patch 自带两半 ─────────────
+  //     新版 cordis.patch.yml 同时插入 Host 半和智能体半，官方安装不再需要
+  //     改 profile 补丁。这里钉住：check 能从 bundle 认出接线；--wire-presets
+  //     只作为兼容开关，不会重复写 profile；失败不碰任何文件。
   {
     const yamlLib = createRequire(join(PKG, 'package.json'))('js-yaml')
     const WIRE = 'dsh-tag-memory/preset'
     const home = join(sandbox, 'dsh-home')
     const profDir = join(home, 'profiles', 'web')
     const patchFile = join(profDir, 'cordis.patch.yml')
-    // 先把链接位与 hoist 目录占上（照着 install 的产物做）：install.mjs 见到已存在就跳过，
-    // 不会再动真仓库那一侧；这条 junction 指回本仓库，只读。
-    // 沙箱是用 rmSync 清的——它**不会**顺着 junction 删过去（验过：目标里的金丝雀文件还在）。
     mkdirSync(join(profDir, 'node_modules'), { recursive: true })
     mkdirSync(join(home, 'profiles', 'node_modules'), { recursive: true })
     symlinkSync(PKG, join(profDir, 'node_modules', 'dsh-tag-memory'), 'junction')
     writeFileSync(join(profDir, 'package.json'),
       JSON.stringify({ dependencies: {}, dsh: { profile: { bundles: [] } } }, null, 2), 'utf8')
-    // 摆一个智能体的 MEMORY.md：既验托管块，也验「不再产出 agent.cordis.yml」
     const presetDir = join(home, '.agent-presets', '小助手')
     mkdirSync(presetDir, { recursive: true })
     const ownMemory = '# 我自己写的\n\n这段是用户手写的，一个字节都不许动。\n'
@@ -1130,8 +1145,6 @@ try {
     const install = (extra = []) => spawnSync(process.execPath,
       [join(PKG, 'scripts', 'install.mjs'), '--dsh-home', home, '--profile', 'web', ...extra],
       { env: { ...process.env, DSH_TAG_MEMORY_SKILL_DIR: sandboxSkill }, encoding: 'utf8' })
-    const bakCount = () => readdirSync(profDir).filter((f) => f.startsWith('cordis.patch.yml.bak-tag-memory-')).length
-    // 装载器读补丁用的就是这份默认 schema（我们那段里没有 !!js 之类自定义标签）
     const rowsIn = (text) => {
       let v
       try { v = yamlLib.load(text) } catch (e) { return { err: String(e?.message ?? e) } }
@@ -1139,30 +1152,29 @@ try {
       return { rows: v.flatMap((e) => (Array.isArray(e?.insert) ? e.insert : [])) }
     }
 
-    // 1) 空补丁模板（`[]`）· 未接线 → check 必须报 WARN，不许静默
+    // 1) 空补丁模板（`[]`）· bundle 已带智能体半 → check 必须 PASS，不再 WARN
     writeFileSync(patchFile, '# 这个 profile 的补丁\n[]\n', 'utf8')
     {
       const r = install()
       const line = r.stdout.split('\n').find((l) => l.includes('智能体半')) ?? ''
-      ok('未接线时 check 报 WARN（半装不许静默）',
-        line.startsWith('WARN') && line.includes('智能体半未接线'), line)
+      ok('check 从 bundle patch 认出智能体半已全局接线',
+        line.startsWith('PASS') && line.includes('bundle patch'), line)
+      ok('check 不再把已接线误报成半装', !r.stdout.includes('WARN  智能体半未接线'))
       ok('check 收尾提醒「须重启 DSH」', r.stdout.includes('须重启 DSH 才生效'))
     }
 
-    // 2) 接线：`[]` 要**被换掉**，不能接在数组后面（那样整份就不是合法 YAML 了）
+    // 2) apply：bundle 已接线时 --wire-presets 不重复写 profile
     {
+      const before = readFileSync(patchFile, 'utf8')
       const r = install(['--apply', '--wire-presets'])
-      const wired = readFileSync(patchFile, 'utf8')
-      const parsed = rowsIn(wired)
-      ok('接线产物是合法 YAML（装载器方言 load 得动）', Array.isArray(parsed.rows), parsed.err ?? r.stderr.trim())
-      ok('补丁里出现那条声明，id 与 name 都对',
-        parsed.rows?.some((x) => x?.name === WIRE && x?.id === 'tag-memory-preset') === true, JSON.stringify(parsed.rows))
-      ok('空模板的 `[]` 是被换掉的，不是接在数组后面', !/^[ \t]*\[[ \t]*\][ \t]*$/m.test(wired))
-      ok('模板里原有的注释留在原处', wired.includes('# 这个 profile 的补丁'))
+      const after = readFileSync(patchFile, 'utf8')
+      const parsed = rowsIn(after)
+      ok('bundle 已含智能体半时，--wire-presets 不改 profile 补丁', after === before)
+      ok('apply 明说智能体半由 bundle patch 接线', r.stdout.includes('bundle patch 全局接线'))
+      ok('profile 补丁仍是合法 YAML（没有被重复接线破坏）', Array.isArray(parsed.rows), parsed.err ?? r.stderr.trim())
       ok('apply 收尾也提醒「重启 DSH 后才生效」',
         r.stdout.includes('改动只在重启 DSH 后生效') && r.stdout.includes('INSTALL OK'))
 
-      // 托管块照旧落在智能体的 MEMORY.md 里，用户自己写的部分一字不动
       const mem = readFileSync(join(presetDir, 'MEMORY.md'), 'utf8')
       ok('记忆文件托管：说明块写进去了，用户手写的那段原样还在',
         mem.includes('<!-- BEGIN dsh-tag-memory notice -->') && mem.includes('这段是用户手写的，一个字节都不许动。'))
@@ -1182,11 +1194,11 @@ try {
     {
       const before = readFileSync(patchFile, 'utf8')
       install(['--apply', '--wire-presets'])
-      ok('重复接线不改补丁（幂等）', readFileSync(patchFile, 'utf8') === before)
-      ok('接线后 check 报「已接线」', install().stdout.includes('智能体半已接线'))
+      ok('重复运行不改 profile 补丁（幂等）', readFileSync(patchFile, 'utf8') === before)
+      ok('check 仍报「智能体半已接线」', install().stdout.includes('智能体半已接线'))
     }
 
-    // 4) 非空、注释多的补丁：只追加，原有条目一字不动
+    // 4) 非空、注释多的 profile 补丁：bundle 接线时完全不动它
     {
       const RICH = [
         '# ── 基础层 ──',
@@ -1201,28 +1213,20 @@ try {
       ].join('\n')
       writeFileSync(patchFile, RICH, 'utf8')
       install(['--apply', '--wire-presets'])
-      const after = readFileSync(patchFile, 'utf8')
-      const parsed = rowsIn(after)
-      ok('非空补丁：原有内容一字不动，新行追加在末尾',
-        after.startsWith(RICH.replace(/\s*$/, '') + '\n') &&
-        parsed.rows?.some((x) => x?.name === 'other-plugin/thing') === true &&
-        parsed.rows?.some((x) => x?.name === WIRE) === true,
-        parsed.err ?? '')
-      const top = yamlLib.load(after)
+      ok('非空 profile 补丁在 bundle 接线时一字不动', readFileSync(patchFile, 'utf8') === RICH)
+      const top = yamlLib.load(readFileSync(patchFile, 'utf8'))
       ok('原有非 insert 条目（- id: tools）也还在',
         Array.isArray(top) && top.some((e) => e?.id === 'tools' && e?.disabled === false))
     }
 
-    // 5) 失败不留痕：补丁是坏 YAML → 原文件一字不动，且不留孤儿 .bak
+    // 5) 兼容开关不碰坏 YAML：bundle 已接线，profile 补丁坏也无需解析
     {
       const BROKEN = '# 坏补丁\n- insert:\n    - id: [没闭合\n'
       writeFileSync(patchFile, BROKEN, 'utf8')
-      const bakBefore = bakCount()
       const r = install(['--apply', '--wire-presets'])
-      ok('补丁是坏 YAML 时：原文件一字未动、不留孤儿 .bak',
-        readFileSync(patchFile, 'utf8') === BROKEN && bakCount() === bakBefore,
-        `bak ${bakBefore}→${bakCount()}；${r.stderr.split('\n').filter(Boolean).pop() ?? ''}`)
-      ok('失败时把话说清楚（接线未落盘、原文件未改）', r.stderr.includes('接线未落盘'))
+      ok('bundle 已接线时，profile 补丁坏 YAML 也不被改写',
+        readFileSync(patchFile, 'utf8') === BROKEN && r.stdout.includes('INSTALL OK'),
+        r.stdout.slice(-200))
     }
   }
 
@@ -1510,6 +1514,14 @@ try {
 
   const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
   ok('package.json 导出 ./client 且声明 dsh.client', pkg.exports['./client'] === './client.js' && pkg.dsh?.client?.platform === 'web')
+  ok('client manifest 不注入非客户端 package',
+    pkg.dsh?.client?.inject === undefined || !pkg.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-slots'))
+  ok('bundle patch 同时包含 Host 与智能体半',
+    readFileSync(join(PKG, 'cordis.patch.yml'), 'utf8').includes('name: dsh-tag-memory') &&
+    readFileSync(join(PKG, 'cordis.patch.yml'), 'utf8').includes("name: dsh-tag-memory/preset"))
+  ok('页面样式在 apply 中登记清理（不再只靠组件 useEffect 往 head 塞）',
+    readFileSync(join(PKG, 'client.js'), 'utf8').includes('const disposeStyles = ensureStyles()') &&
+    readFileSync(join(PKG, 'client.js'), 'utf8').includes('ctx.effect(() => disposeStyles)'))
 } catch (e) {
   fail++
   results.push(`FAIL  未捕获异常 — ${String(e?.stack ?? e)}`)

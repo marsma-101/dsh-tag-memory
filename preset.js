@@ -40,8 +40,11 @@ import {
   setLibraryDir,
   SKILL_DIR,
 } from './lib/store.mjs'
+import { PresetConfig } from './lib/config.mjs'
 
 export const name = 'tag-memory-preset'
+/** Preset 行配置 schema：加载期校验 + 设置页表单描述。 */
+export const Config = PresetConfig
 
 /** `systemPrompt` 供字典段，`tools` 供两个工具。 */
 export const inject = ['systemPrompt', 'tools']

@@ -2,6 +2,19 @@
 
 ## 未发布
 
+- **按 DSH 官方插件规范修了一轮安装与运行时问题。**
+  - **bundle patch 现在同时插入 Host 半和智能体半**：官方 `dsh plugin add` 安装后不再只有界面、
+    没有 `memory_write` / `memory_recall`；`install.mjs --wire-presets` 降级为老安装产物兼容开关。
+  - **补齐 DSH 兼容声明**：加入 `engines.dsh`，并把 `@deepseek-ai/dsh-tools`、`@deepseek-ai/schemastery`
+    同时写进 `peerDependencies` 与 `devDependencies`，修复官方安装后 preset 半 `ERR_MODULE_NOT_FOUND`。
+  - **两个入口都导出 `Config` schema**，配置在装载时校验并获得默认值，设置页也能读取配置结构。
+  - **修正 `/tag-memory-api` 的生命周期与访问控制**：路由 disposer 现在会随插件卸载释放；
+    接口复用 DSH `connection` 服务的 Host/Origin + 浏览器认证判断，无认证请求返回 401，缺少认证服务时 fail closed。
+  - **补官方展示元数据**：新增 `locale/en.json`、`locale/zh.json` 和原创 `icon.svg`，并更新导出与打包清单。
+  - **修正 client manifest**：移除指向非客户端 package 的 `dsh.client.inject`；页面样式改由 `apply` 注册、
+    effect 回收，不再从组件 effect 往 `document.head` 里塞且不清理。
+  - **修正备份时间戳**：不再把 UTC 时间硬贴 `+08:00`，写回本地真实时区偏移。
+
 - **空库可以在装机时播下 3 条初始记忆（`--seed`，默认不写）。** 全新装好、库里一条都没有时，
   智能体第一次面对的是一个空表格：它不知道这张库是干什么用的，也不知道该往里记什么；
   而没有「该记什么」的判法，最先被记进来的往往是流水账。

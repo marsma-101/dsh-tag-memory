@@ -247,13 +247,22 @@ window.__ModuleLoader__.load({
   color:var(--dsw-alias-label-secondary)}
 `
 
-		/** 样式表每个文档注入一次。 */
+		/**
+		 * 样式表在插件 apply 时注入一次，并把移除函数交给 ctx.effect 管理。
+		 * 不能从页面组件的 useEffect 里偷偷往 document.head 塞节点：设置页和主区
+		 * 可能先后挂载，而卸载/HMR 时又没人回收。apply 层统一负责生命周期。
+		 */
 		function ensureStyles() {
-			if (document.getElementById('dsh-tag-memory-css') !== null) return
-			const tag = document.createElement('style')
-			tag.id = 'dsh-tag-memory-css'
+			// Node 侧做槽位冒烟时没有 DOM；浏览器里才是真资源。
+			if (typeof document === 'undefined') return () => {}
+			let tag = document.getElementById('dsh-tag-memory-css')
+			if (tag === null || tag.tagName !== 'STYLE') {
+				tag = document.createElement('style')
+				tag.id = 'dsh-tag-memory-css'
+				document.head.appendChild(tag)
+			}
 			tag.textContent = CSS
-			document.head.appendChild(tag)
+			return () => { if (tag.parentNode !== null) tag.parentNode.removeChild(tag) }
 		}
 
 		/**
@@ -414,10 +423,6 @@ window.__ModuleLoader__.load({
 			/** 改号 → 重新取第一页（恢复 / 合并换过库之后要重读）。 */
 			const [reloadKey, setReloadKey] = React.useState(0)
 			const reloadEntries = () => setReloadKey((k) => k + 1)
-
-			React.useEffect(() => {
-				ensureStyles()
-			}, [])
 
 			// 概况（含维度取值与计数），只在挂载时取一次。
 			React.useEffect(() => {
@@ -2077,6 +2082,10 @@ window.__ModuleLoader__.load({
 		exports.apply = function apply(ctx) {
 			const slots = ctx.slots ?? ctx.get('slots')
 			if (slots === undefined || slots === null) return
+
+			// 页面样式属于插件资源：在 apply 里登记，卸载/HMR 时由 effect 回收。
+			const disposeStyles = ensureStyles()
+			if (typeof ctx.effect === 'function') ctx.effect(() => disposeStyles)
 
 			/**
 			 * 取 DSH 的目录选择服务（`uiWorkspace`）。
