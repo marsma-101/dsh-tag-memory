@@ -422,13 +422,35 @@ function backupStatus() {
   return { available: true, ...backupCore().readBackupStatus(STORE_DIR, { recent: 6 }) }
 }
 
-/** 只读备份配置（保留其它键）。缺文件 → 空对象。 */
+/**
+ * 只读备份配置（保留其它键）。缺文件 → 空对象。
+ *
+ * P2-5：**解析失败不能静默当 `{}`**。原实现 `catch { return {} }`，接着
+ * `setBackupDir` 只把 `backupDir` 写回去 —— 损坏文件里那些**水位**（`lastBackupAt` /
+ * `lastCount` / `keepCopies`）就被这一写抹掉了，而且用户毫无察觉。
+ * 现在返回 `{ broken: true, error }`，由调用方决定：**读的时候降级显示，
+ * 写的时候拒绝覆盖**。
+ */
 function readCfg() {
   if (!existsSync(BACKUP_CFG_PATH)) return {}
   try {
     const v = JSON.parse(readFileSync(BACKUP_CFG_PATH, 'utf8'))
-    return v && typeof v === 'object' ? v : {}
-  } catch { return {} }
+    return v && typeof v === 'object' ? v : { broken: true, error: '配置不是 JSON 对象' }
+  } catch (e) {
+    return { broken: true, error: String(e?.message ?? e) }
+  }
+}
+
+/** 原子写一个 JSON 文件（tmp + rename，同目录）。失败不留半截。 */
+function writeJsonAtomic(path, obj) {
+  const tmp = join(dirname(path), `.${basename(path)}.tmp-${randomBytes(6).toString('hex')}`)
+  try {
+    writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', 'utf8')
+    renameSync(tmp, path)
+  } catch (e) {
+    try { unlinkSync(tmp) } catch { /* 没写成或已 rename 掉 */ }
+    throw e
+  }
 }
 
 /**
@@ -474,9 +496,18 @@ function setBackupDir(body) {
     return { ok: false, error: `这个地址建不了或不可写：${String(e?.message ?? e)}` }
   }
   const cfg = readCfg()
+  // P2-5：配置损坏时**拒绝覆盖**——否则这一写会把水位（lastBackupAt/lastCount/keepCopies）抹掉。
+  if (cfg.broken) {
+    return {
+      ok: false,
+      code: 'CFG_BROKEN',
+      error: `备份配置读不出来（${cfg.error}），为免抹掉水位，这次没有写入。`
+        + `请先修好或删掉 ${BACKUP_CFG_PATH} 再设地址。`,
+    }
+  }
   cfg.backupDir = raw
   try {
-    writeFileSync(BACKUP_CFG_PATH, JSON.stringify(cfg, null, 2) + '\n', 'utf8')
+    writeJsonAtomic(BACKUP_CFG_PATH, cfg)
   } catch (e) {
     return { ok: false, error: `写不进备份配置：${String(e?.message ?? e)}` }
   }
@@ -626,10 +657,15 @@ function restoreFromLocked(stamp) {
   }
 
   // ④ 水位：把「现在库里是什么」登记成刚恢复的这一版
-  const cfg = readCfg()
+  // 水位写回：配置损坏时跳过（不拿 `{}` 去覆盖），并把这件事说出来。
+  if (cfg.broken) {
+    try { appendFileSync(join(st.dir, 'last-backup.log'),
+      `${localIsoTimestamp()}  restore ${stamp}  条目=${afterCount}  恢复前留档=${pre.stamp}  ⚠ 备份配置损坏，水位未更新\n`, 'utf8') } catch { /* 非致命 */ }
+    return { ok: true, stamp, entryCount: afterCount, preBackup: pre.stamp, schema: schemaInfo, status: backupStatus(), cfgWarning: `备份配置损坏（${cfg.error}），水位未更新` }
+  }
   cfg.lastBackupAt = localIsoTimestamp()
   cfg.lastCount = afterCount
-  try { writeFileSync(BACKUP_CFG_PATH, JSON.stringify(cfg, null, 2) + '\n', 'utf8') } catch { /* 非致命 */ }
+  try { writeJsonAtomic(BACKUP_CFG_PATH, cfg) } catch { /* 非致命 */ }
   try {
     appendFileSync(join(st.dir, 'last-backup.log'),
       `${localIsoTimestamp()}  restore ${stamp}  条目=${afterCount}  恢复前留档=${pre.stamp}\n`, 'utf8')
