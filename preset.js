@@ -6,7 +6,8 @@
 //         name: 'dsh-tag-memory/preset'
 //         config:
 //           agent: '某某'        # 写进 `角色` 列；不填则依次取 preset 目录名、智能体 id
-//           libraryDir: '…'      # 记忆库在哪；不填则取环境变量 DSH_TAG_MEMORY_SKILL_DIR、再取默认位置
+//           dataDir: '…'        # 数据目录（记忆库放哪）；不填则取环境变量 DSH_TAG_MEMORY_DATA_DIR、再取 <DSH_HOME>/tag-memory
+//                                # （旧字段名 libraryDir 仍认，等价）
 //           snapshot:            # 每轮注入「记忆快照」的预算。提示词是硬成本，值都可调
 //             enabled: true      # 关掉就退回「只注入字典」
 //             maxPinned: 6       #   常驻条目最多放几条全文
@@ -24,12 +25,14 @@
 //        memory_write  收字典名字段 → 四道门槛(模型侧) + 字典校验 + 文件锁取号 + 追加一行
 //        memory_recall 收结构化条件（与/或/非/留白/多值/区间）→ 执行筛选 → 先报总数，再取前 3
 //
-// 读写逻辑**不在这里**，全部 import 自技能那份 lib/core.mjs（一份逻辑，不分叉）。
+// 读写逻辑**不在这里**，全部 import 自插件内置的 `lib/engine/core.mjs`（一份逻辑，不分叉）。
+// 引擎随插件走（`lib/engine/`），数据在独立的数据目录里——插件升级不碰库。
 
 import { readFileSync } from 'node:fs'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
   CSV_PATH,
+  DATA_DIR,
   LOCK_PATH,
   cwdOf,
   getCore,
@@ -37,8 +40,7 @@ import {
   projectName,
   ready,
   resolveAgentId,
-  setLibraryDir,
-  SKILL_DIR,
+  setDataDir,
 } from './lib/store.mjs'
 import { PresetConfig } from './lib/config.mjs'
 
@@ -53,8 +55,9 @@ export const inject = ['systemPrompt', 'tools']
 function degradedNotice() {
   return [
     '## 记忆库未就绪',
-    `> 没找到记忆库目录（找的是 \`${SKILL_DIR}\`）。`,
-    '> 记忆写入 / 召回不可用；请把记忆库放到该位置，或用 config 的 `libraryDir`（或环境变量 `DSH_TAG_MEMORY_SKILL_DIR`）指定它的位置。',
+    `> 记忆库目录（找的是 \`${DATA_DIR}\`）里没有 \`store/memory.csv\`，插件没能自动建出来。`,
+    '> 记忆写入 / 召回不可用；可用 config 的 `dataDir`（或环境变量 `DSH_TAG_MEMORY_DATA_DIR`）指定位置，',
+    '> 或检查那个目录是否可写——首次启动会用插件自带的模板建库。',
   ].join('\n')
 }
 
@@ -259,8 +262,9 @@ function keywordSearch(schema, header, rows, kw) {
 // ── 挂载 ────────────────────────────────────────────────
 
 export function apply(ctx, config = {}) {
-  // 库目录：配置优先；没配就是原来的推断链（环境变量 → 默认），一个字节都不变。
-  setLibraryDir(config.libraryDir)
+  // 数据目录：配置优先（`dataDir`，兼容旧名 `libraryDir`）；没配就是推断链
+  // （环境变量 → 旧环境变量 → <DSH_HOME>/tag-memory）。空目录会当场按模板建库。
+  setDataDir(config.dataDir ?? config.libraryDir)
 
   const schema = (() => { try { return loadSchema() } catch { return null } })()
 
@@ -333,7 +337,11 @@ export function apply(ctx, config = {}) {
           const id = core.appendEntry({ schema: s, csvPath: CSV_PATH, lockPath: LOCK_PATH, row })
           return `✓ 已追加 ${id}（库：${CSV_PATH}）`
         } catch (e) {
-          return `✗ 未写入：${String(e?.message ?? e)}`
+          // **必须抛异常，不能 return 一句「✗ …」**：返回字符串意味着 `isError=false`，
+          // 模型与 PTCMode 都会当成「写成功了」——校验没过、去重被拦、拿不到锁，
+          // 在调用方看来全都是成功。官方 `docs/cookbook/adding-a-tool.zh.md` 写明
+          // 「基础设施故障请抛异常」；工具的 `render` 照样会把这句话呈现给人看。
+          throw new Error(`未写入：${String(e?.message ?? e)}`)
         }
       },
     }),

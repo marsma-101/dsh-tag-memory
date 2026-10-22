@@ -8,6 +8,7 @@
  *   node scripts/install.mjs --uninstall           # 预览要摘掉哪些东西（只读）
  *   node scripts/install.mjs --uninstall --apply   # 真卸（摘回原样；记忆库一个字不碰）
  *   node scripts/install.mjs --dsh-home <path>     # 换个 DSH_HOME（装到别的 DSH 时用）
+ *   node scripts/install.mjs --data-dir <path>     # 换个数据目录（记忆库放哪；默认 <DSH_HOME>/tag-memory）
  *   node scripts/install.mjs --apply --dest <path> # 把本体拷到 <path>，再从那儿发链接
  *   node scripts/install.mjs --apply --seed        # 顺带给**空库**播初始记忆（库里已有条目就一条不写）
  *
@@ -17,10 +18,13 @@
  *   2. <DSH_HOME>/profiles/<profile>/package.json                 （依赖 + bundle 条目）
  *   3. <DSH_HOME>/.agent-presets/<智能体>/MEMORY.md               （探测到才写；写的是受控说明块）
  *   4. （--wire-presets，仅兼容老 bundle）<profile>/cordis.patch.yml（接 /preset 行；先备份、装完校验）
- *   5. （--seed）<DSH_HOME>/skills/…/store/memory.csv             （**只在该库 0 条时**写初始记忆）
+ *   5. （--seed）<数据目录>/store/memory.csv                      （**只在该库 0 条时**写初始记忆）
  *
- * `--uninstall` 把安装时动过的那几项**逐条摘回去**（先备份、逐条校验）。记忆库（`skills/…` 下的
- * memory.csv 与字典）**一个字都不碰**——卸插件不等于删记忆。
+ * `--uninstall` 把安装时动过的那几项**逐条摘回去**（先备份、逐条校验）。**数据目录（记忆库与字典）
+ * 一个字都不碰**——卸插件不等于删记忆。
+ *
+ * **引擎随插件走**：读写核心 / 备份核心 / 字典样张 / 出厂模板全在 `lib/engine/`，不再依赖任何技能目录。
+ * **数据独立**：用户的库放 `<DSH_HOME>/tag-memory`（可配），插件升级 / 重装都不碰它。
  *
  * 本包自带 bundle patch，加载器把它当一层应用。patch 同时插入 **Host 半**（index.js：
  * 设置页 API + 记忆文件托管）和 **智能体半**（preset.js：字典段 + memory_write /
@@ -241,7 +245,7 @@ function stripDeclaration(text) {
 //   ② <profile>/package.json                 （依赖条目 + bundle 层条目）
 //   ③ <profile>/cordis.patch.yml             （仅老安装产物留下的那段声明）
 //   ④ 各智能体的 MEMORY.md                   （托管说明块；只认标记，块外不碰）
-// **记忆库（`skills/…` 下的 memory.csv 与字典）一个字都不碰。**
+// **数据目录（记忆库与字典）一个字都不碰。**
 // 规矩同装：先备份、写完校验、一项不通就**整批不落盘**（宁可不卸，也不留半截）。
 
 if (argv.includes('--uninstall')) {
@@ -457,21 +461,46 @@ if (memoryFiles.length === 0) {
   report.push(`PASS  记忆文件探测：命中 ${memoryFiles.length} 个 → ${memoryFiles.map((f) => f.agent + '/' + f.file).join('、')}`)
 }
 
-// ── 记忆库侧齐不齐 ──────────────────────────────────────
-// 读写的**一份逻辑**与字典都在记忆库里。库要是太旧——比如少了 scripts/lib/backup.mjs——
-// 插件装上了，「备份 / 恢复 / 合并」那排按钮也只会显示「不可用」。所以这道闸必须查。
-const SKILL_DIR = process.env.DSH_TAG_MEMORY_SKILL_DIR?.trim() || join(DSH_HOME, 'skills', 'marsma101-tag-memory')
-const SKILL_MUST_HAVE = [
-  'scripts/lib/core.mjs',
-  'scripts/lib/backup.mjs',
-  'references/tags.schema.json',
-  'store/memory.csv',
+// ── 引擎（插件内置）与数据（独立目录）齐不齐 ──────────────
+//
+// 这一版起，读写核心、备份核心、字典样张、出厂模板**都随插件走**（`lib/engine/`），
+// 不再去任何技能目录找。所以这道闸分两段查：
+//   ① 引擎：在**插件包内**（PACKAGE_DIR/lib/engine）——缺了是安装不完整，必须 FAIL；
+//   ② 数据：在**数据目录**（推断链与 lib/store.mjs 一致）——缺了会在首次启动时
+//      自动按模板建库，所以这里只提示，不算失败。
+const ENGINE_DIR = join(PACKAGE_DIR, 'lib', 'engine')
+const ENGINE_MUST_HAVE = [
+  'core.mjs',
+  'backup.mjs',
+  'tags.schema.json',
+  'templates/memory.csv',
+  'templates/index.md',
+  'templates/backup.json',
 ]
-const skillMissing = SKILL_MUST_HAVE.filter((f) => !existsSync(join(SKILL_DIR, f)))
-check(`记忆库侧文件齐（${SKILL_DIR}）`, skillMissing.length === 0,
-  skillMissing.length === 0 ? '' : `缺 ${skillMissing.join('、')} —— 缺 backup.mjs 的话备份/恢复/合并会显示「不可用」`)
-if (skillMissing.includes('scripts/lib/backup.mjs')) {
-  report.push('      修法：把插件仓库同版本的 scripts/lib/backup.mjs 拷进记忆库的 scripts/lib/ 下')
+const engineMissing = ENGINE_MUST_HAVE.filter((f) => !existsSync(join(ENGINE_DIR, f)))
+check(`插件内置引擎齐（${ENGINE_DIR}）`, engineMissing.length === 0,
+  engineMissing.length === 0 ? '' : `缺 ${engineMissing.join('、')} —— 插件装不完整，重装本包`)
+if (engineMissing.length > 0) {
+  report.push('      修法：引擎文件随插件发布，不该缺；请重装 / 重新解压本包，不要手工拼装')
+}
+
+/** 数据目录：`--data-dir` → `DSH_TAG_MEMORY_DATA_DIR` →（旧名）`DSH_TAG_MEMORY_SKILL_DIR` → `<DSH_HOME>/tag-memory`。 */
+const DATA_DIR = getFlag('--data-dir',
+  process.env.DSH_TAG_MEMORY_DATA_DIR?.trim()
+  || process.env.DSH_TAG_MEMORY_SKILL_DIR?.trim()
+  || join(DSH_HOME, 'tag-memory'))
+const DATA_CSV = join(DATA_DIR, 'store', 'memory.csv')
+const dataMissing = !existsSync(DATA_CSV)
+check(`数据目录可用（${DATA_DIR}）`, true,
+  dataMissing
+    ? '还没有库 —— 插件首次启动会按内置模板自动建库（也可用 --seed 播初始记忆）'
+    : '库已就位')
+// 旧库兼容：新位置没库、老位置还有一本时，只提示，不自动搬。
+const LEGACY_CSV = join(DSH_HOME, 'skills', 'marsma101-tag-memory', 'store', 'memory.csv')
+if (dataMissing && existsSync(LEGACY_CSV)) {
+  report.push(`WARN  检测到旧库：${LEGACY_CSV}`)
+  report.push(`      插件不会自动搬库。要沿用旧库，把 ${DATA_DIR} 指过去，`)
+  report.push(`      或把 ${join(DSH_HOME, 'skills', 'marsma101-tag-memory')} 整个拷到 ${DATA_DIR}（拷完重启 DSH）`)
 }
 
 // ── 初始记忆（--seed）：只在**空库**上写 ────────────────
@@ -479,14 +508,14 @@ if (skillMissing.includes('scripts/lib/backup.mjs')) {
 // 库里已经有条目就**一条都不写**——重复安装、升级插件都不会塞回这些种子，
 // 也就不会有「更新一次多两条我没用过的记忆」这种事。
 const SEED_FILE = join(PACKAGE_DIR, 'seed', 'memory.seed.json')
-if (existsSync(SEED_FILE) && skillMissing.length === 0) {
+if (existsSync(SEED_FILE) && engineMissing.length === 0) {
   try {
-    const lines = readFileSync(join(SKILL_DIR, 'store', 'memory.csv'), 'utf8').split('\n').filter((l) => l.trim() !== '')
+    const lines = readFileSync(DATA_CSV, 'utf8').split('\n').filter((l) => l.trim() !== '')
     report.push(lines.length <= 1
       ? 'PASS  记忆库是空的 → 加 --seed 会写入 3 条初始记忆（记什么 / 怎么算通用 / 本机库在哪）'
       : 'PASS  记忆库里已有条目 → --seed 不会写任何东西（重复安装不会塞回种子）')
   } catch {
-    report.push('SKIP  初始记忆状态读不出来（库文件暂时不可读）')
+    report.push('SKIP  初始记忆状态读不出来（库还没建出来，--seed 时会先建库再播）')
   }
 }
 
@@ -649,19 +678,49 @@ async function seed() {
     console.log('· 初始记忆跳过：包里没有 seed/memory.seed.json')
     return
   }
-  const csv = join(SKILL_DIR, 'store', 'memory.csv')
-  const corePath = join(SKILL_DIR, 'scripts', 'lib', 'core.mjs')
-  if (!existsSync(csv) || !existsSync(corePath) || !existsSync(join(SKILL_DIR, 'references', 'tags.schema.json'))) {
-    console.log(`· 初始记忆跳过：记忆库还没就位（${SKILL_DIR}）——本包只装插件，不装库`)
+  // 引擎从**插件内**取，数据从**数据目录**取——两边不再混在一起。
+  const corePath = join(ENGINE_DIR, 'core.mjs')
+  const engineSchema = join(ENGINE_DIR, 'tags.schema.json')
+  if (!existsSync(corePath) || !existsSync(engineSchema)) {
+    console.log(`· 初始记忆跳过：插件内置引擎不全（${ENGINE_DIR}）——重装本包`)
     return
   }
+  // 数据目录还没有库时，先按内置模板起一份（与插件首次启动同一条路）。
+  // 但**老位置还有一本时不建空库**——建了就等于让用户以为老记忆不见了。
+  const LEGACY_CSV_FOR_SEED = join(DSH_HOME, 'skills', 'marsma101-tag-memory', 'store', 'memory.csv')
+  if (!existsSync(DATA_CSV) && existsSync(LEGACY_CSV_FOR_SEED)) {
+    console.log(`· 初始记忆跳过：检测到旧库（${LEGACY_CSV_FOR_SEED}），而数据目录 ${DATA_DIR} 还是空的。`)
+    console.log('  插件不会自动搬库：请把旧库整个拷到数据目录，或用 --data-dir 指过去，再跑 --seed。')
+    return
+  }
+  if (!existsSync(DATA_CSV)) {
+    try {
+      mkdirSync(join(DATA_DIR, 'store'), { recursive: true })
+      mkdirSync(join(DATA_DIR, 'references'), { recursive: true })
+      for (const f of ['memory.csv', 'index.md', 'backup.json']) {
+        const src = join(ENGINE_DIR, 'templates', f)
+        const dst = join(DATA_DIR, 'store', f)
+        if (existsSync(src) && !existsSync(dst)) copyFileSync(src, dst)
+      }
+      const dstSchema = join(DATA_DIR, 'references', 'tags.schema.json')
+      if (!existsSync(dstSchema)) copyFileSync(engineSchema, dstSchema)
+      console.log(`· 数据目录还没有库，已按内置模板建出：${DATA_CSV}`)
+    } catch (e) {
+      console.log(`· 初始记忆跳过：建不出库（${String(e?.message ?? e)}）`)
+      return
+    }
+  }
+  const csv = DATA_CSV
+  const lockPath = join(DATA_DIR, 'store', '.append.lock')
+  const schemaPath = join(DATA_DIR, 'references', 'tags.schema.json')
   let core, schema, seedDoc
   try {
     core = await import(pathToFileURL(corePath).href)
-    schema = JSON.parse(readFileSync(join(SKILL_DIR, 'references', 'tags.schema.json'), 'utf8'))
+    // 盘上那份字典优先（恢复备份会换它）；没有就用引擎里的样张。
+    schema = JSON.parse(readFileSync(existsSync(schemaPath) ? schemaPath : engineSchema, 'utf8'))
     seedDoc = JSON.parse(readFileSync(SEED_FILE, 'utf8'))
   } catch (e) {
-    console.log(`· 初始记忆跳过：读不了库里的字典/核心（${String(e?.message ?? e)}）`)
+    console.log(`· 初始记忆跳过：读不了引擎/字典（${String(e?.message ?? e)}）`)
     return
   }
   let rows
@@ -677,11 +736,11 @@ async function seed() {
   // 第三条：本机硬信息，按实情生成（出厂文件里没有它）。
   let backupDir = ''
   try {
-    const cfg = JSON.parse(readFileSync(join(SKILL_DIR, 'store', 'backup.json'), 'utf8'))
+    const cfg = JSON.parse(readFileSync(join(DATA_DIR, 'store', 'backup.json'), 'utf8'))
     if (typeof cfg?.backupDir === 'string') backupDir = cfg.backupDir
   } catch { /* 没配就是没配 */ }
   const localEntry = {
-    内容: `这台机器的标签记忆库在 ${SKILL_DIR}；备份地址${backupDir === '' ? '还没设置' : `是 ${backupDir}`}。`,
+    内容: `这台机器的标签记忆库在 ${DATA_DIR}；备份地址${backupDir === '' ? '还没设置' : `是 ${backupDir}`}。`,
     环境: '本机',
     原因: '换机器 / 换目录时，「库到底在哪」是最先要问清楚的一件事',
     类型: '固定',
@@ -695,7 +754,7 @@ async function seed() {
   let wrote = 0
   for (const row of entries) {
     try {
-      const id = core.appendEntry({ schema, csvPath: csv, lockPath: join(SKILL_DIR, 'store', '.append.lock'), row })
+      const id = core.appendEntry({ schema, csvPath: csv, lockPath, row })
       wrote++
       console.log(`✓ 初始记忆 +${id}`)
     } catch (e) {

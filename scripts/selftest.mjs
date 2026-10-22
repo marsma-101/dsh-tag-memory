@@ -53,15 +53,20 @@ const skipped = (label, why) => { skip++; results.push(`SKIP  ${label} — ${why
 //     现在：把每一节都标明跳过、说清缺哪几个文件、怎么补，然后**以 0 退出**。
 const HOME = process.env.USERPROFILE ?? process.env.HOME ?? ''
 const DSH_HOME = process.env.DSH_HOME?.trim() || join(HOME, '.dsh')
-const realSkill = process.env.DSH_TAG_MEMORY_SKILL_DIR?.trim() || join(DSH_HOME, 'skills', 'marsma101-tag-memory')
+/** 数据目录（用户的记忆库）：推断链与 lib/store.mjs 一致。旧名 DSH_TAG_MEMORY_SKILL_DIR 仍认。 */
+const realData = process.env.DSH_TAG_MEMORY_DATA_DIR?.trim()
+  || process.env.DSH_TAG_MEMORY_SKILL_DIR?.trim()
+  || join(DSH_HOME, 'tag-memory')
+/** 引擎在**插件包内**，随插件走；沙箱只需要把数据目录换个地方。 */
+const ENGINE = join(PKG, 'lib', 'engine')
 
 const NEEDED_LIB = [
-  'references/tags.schema.json',
-  'scripts/lib/core.mjs',
-  'scripts/lib/backup.mjs',
-  'store/memory.csv',
+  join(ENGINE, 'core.mjs'),
+  join(ENGINE, 'backup.mjs'),
+  join(ENGINE, 'tags.schema.json'),
+  join(realData, 'store', 'memory.csv'),
 ]
-const missingLib = NEEDED_LIB.filter((f) => !existsSync(join(realSkill, f)))
+const missingLib = NEEDED_LIB.filter((f) => !existsSync(f))
 if (missingLib.length > 0) {
   for (const s of [
     'A. core（解析/校验/筛选）', 'B. notice（记忆文件托管）', 'C. store（定位库/载字典）',
@@ -69,7 +74,7 @@ if (missingLib.length > 0) {
     'G. 渲染冒烟（「记忆」页）', 'H. backup（轮转·不覆盖）', 'I. 接装与接线',
     'J. 卸载往返', 'K. 库目录可配',
   ]) skipped(s, '记忆库不在，这一节读不到字典与读写核心')
-  results.push(`      记忆库路径：${realSkill}`)
+  results.push(`      数据目录：${realData}`)
   results.push(`      缺：${missingLib.join('、')}`)
   results.push('      —— 跳过不等于通过：装好记忆库再跑。插件自身的静态项随时可查：node scripts/install.mjs check')
   const pkg0 = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
@@ -88,17 +93,14 @@ if (missingLib.length > 0) {
 
 const sandbox = mkdtempSync(join(tmpdir(), 'tagmem-selftest-'))
 
-// ── 造沙箱技能：把真技能的 schema 与 core 复制过去，库换成自造小库 ──
+// ── 造沙箱：引擎用插件内置那份，数据目录换成自造小库 ──
 const sandboxSkill = join(sandbox, 'skill')
 mkdirSync(join(sandboxSkill, 'references'), { recursive: true })
-mkdirSync(join(sandboxSkill, 'scripts', 'lib'), { recursive: true })
 mkdirSync(join(sandboxSkill, 'store'), { recursive: true })
-copyFileSync(join(realSkill, 'references', 'tags.schema.json'), join(sandboxSkill, 'references', 'tags.schema.json'))
-copyFileSync(join(realSkill, 'scripts', 'lib', 'core.mjs'), join(sandboxSkill, 'scripts', 'lib', 'core.mjs'))
-copyFileSync(join(realSkill, 'scripts', 'lib', 'backup.mjs'), join(sandboxSkill, 'scripts', 'lib', 'backup.mjs'))
+copyFileSync(join(ENGINE, 'tags.schema.json'), join(sandboxSkill, 'references', 'tags.schema.json'))
 
-// 表头照真库首行（保持列顺序一致）；数据自造两条（含一条 已归档 供默认排除用）
-const header = readFileSync(join(realSkill, 'store', 'memory.csv'), 'utf8').split('\n')[0]
+// 表头照插件内置模板（17 列）；数据自造两条（含一条 已归档 供默认排除用）
+const header = readFileSync(join(ENGINE, 'templates', 'memory.csv'), 'utf8').split('\n')[0]
 // 种子行**按列名定位**再照表头顺序拼——原先手写成定长字符串，表头一加列（如 `类型`）
 // 就整排错位；行尾少几个空列时，值还会往前挤一格。
 const HEAD = header.split(',')
@@ -112,7 +114,7 @@ writeFileSync(join(sandboxSkill, 'store', 'memory.csv'), header + '\n' + seed + 
 writeFileSync(join(sandboxSkill, 'store', 'index.md'), '# 索引\n\n自检沙箱索引。\n', 'utf8')
 
 // 把插件指向沙箱技能——必须在 import store.mjs 之前设好
-process.env.DSH_TAG_MEMORY_SKILL_DIR = sandboxSkill
+process.env.DSH_TAG_MEMORY_DATA_DIR = sandboxSkill
 
 try {
   // ── A. core ───────────────────────────────────────────
@@ -148,7 +150,7 @@ try {
   //   这两件事都在**库侧的 core.mjs** 里，所以先问一句这份库有没有那两个机制，没有就点名跳过。
   const coreFeatures = core.CORE_FEATURES ?? {}
   if (!coreFeatures.writeDedupe) {
-    skipped('C-4 写入去重 / 拒绝话术（库侧）', `当前用的这份记忆库的 core.mjs 还是旧版（${realSkill}）——先在库侧同步，再跑这节`)
+    skipped('C-4 写入去重 / 拒绝话术（库侧）', `当前用的这份记忆库的 core.mjs 还是旧版（插件内置引擎）——先重装本包，再跑这节`)
   } else {
     // ① 话术：只丢一句「不能为空」，写的人（模型）只会随手填一个值糊过去。
     let why = ''
@@ -230,7 +232,7 @@ try {
   //   判重拿它比的是错字段。这类错**不报错、不丢行**，所以最难发现，得专门盯。
   //   处置分两头：**读**只点名（界面照实说、备份照读不误），**写**直接拦下。
   if (core.CORE_FEATURES?.raggedGuard !== true) {
-    skipped('D-1 列数校验（库侧）', `当前用的这份记忆库的 core.mjs 还是旧版（${realSkill}）——先在库侧同步，再跑这节`)
+    skipped('D-1 列数校验（库侧）', `当前用的这份记忆库的 core.mjs 还是旧版（插件内置引擎）——先重装本包，再跑这节`)
   } else {
     const hdrR = core.readTable(readFileSync(csvPath, 'utf8')).header
     const seedR = {
@@ -448,7 +450,7 @@ try {
   // 库侧没有 `raggedGuard`（老 core）时这里同样**点名跳过**：插件本身是诚实降级（报「没有」而不是
   // 假报一条），但「能查出坏行」这件事只有新库做得到，测不了就说测不了。
   if (core.CORE_FEATURES?.raggedGuard !== true) {
-    skipped('D-1 界面报出坏行（/overview 的 health.ragged）', `当前用的这份记忆库的 core.mjs 还是旧版（${realSkill}）——先在库侧同步，再跑这节`)
+    skipped('D-1 界面报出坏行（/overview 的 health.ragged）', `当前用的这份记忆库的 core.mjs 还是旧版（插件内置引擎）——先重装本包，再跑这节`)
   } else {
     const csvSnap = readFileSync(store.CSV_PATH, 'utf8')
     let bad
@@ -587,7 +589,7 @@ try {
     schemaSupportsBackup = Array.isArray(bkFiles) && bkFiles.some((f) => f.src === 'tags.schema.json')
   } catch { schemaSupportsBackup = false }
   if (!schemaSupportsBackup) {
-    skipped('P-8 字典随备份 / 恢复时比对', `当前用的这份记忆库还不支持（${realSkill}）——先在库侧同步 backup.mjs，再跑这节`)
+    skipped('P-8 字典随备份 / 恢复时比对', `当前用的这份记忆库还不支持（插件内置引擎）——先重装本包，再跑这节`)
   } else {
     ok('P-8 备份目录里出现 schema-<戳>.json（字典跟库一起走）',
       existsSync(join(bkDir, `schema-${stampA}.json`)) &&
@@ -1117,9 +1119,16 @@ try {
     ok('轮转只留 keepCopies 份，且把配套的 index/backup 一起带走',
       keptCsv.length === 2 && keptMd.length === 2, `csv=${keptCsv.length} md=${keptMd.length}`)
 
-    const cliSrc = readFileSync(join(realSkill, 'scripts', 'backup.mjs'), 'utf8')
-    ok('CLI 是薄壳：逻辑都从 lib/backup.mjs 来（界面与命令行同一条路径）',
-      cliSrc.includes("from './lib/backup.mjs'") && !cliSrc.includes('createHash'))
+    // 引擎内置之后，插件不再附带 CLI 薄壳（备份只有一条路：界面 → 引擎）。
+    // 这里钉住的是「一份逻辑」这件事本身：备份与状态都由同一个引擎模块导出，
+    // 界面（index.js）不再自己实现一套拷贝 / 校验。
+    const bkSrc = readFileSync(join(ENGINE, 'backup.mjs'), 'utf8')
+    const hostSrc = readFileSync(join(PKG, 'index.js'), 'utf8')
+    ok('备份只有一份逻辑：引擎导出 runBackup / readBackupStatus，界面不自己实现',
+      /export function runBackup/.test(bkSrc) && /export function readBackupStatus/.test(bkSrc)
+      && /\.runBackup\(/.test(hostSrc) && !hostSrc.includes('createHash'))
+    ok('引擎的备份核心与读写核心同目录（backup.mjs 里 import ./core.mjs 才成立）',
+      bkSrc.includes("from './core.mjs'") && existsSync(join(ENGINE, 'core.mjs')))
   }
 
   // ── I. 装/接线（install.mjs）—— bundle patch 自带两半 ─────────────
@@ -1144,7 +1153,7 @@ try {
 
     const install = (extra = []) => spawnSync(process.execPath,
       [join(PKG, 'scripts', 'install.mjs'), '--dsh-home', home, '--profile', 'web', ...extra],
-      { env: { ...process.env, DSH_TAG_MEMORY_SKILL_DIR: sandboxSkill }, encoding: 'utf8' })
+      { env: { ...process.env, DSH_TAG_MEMORY_DATA_DIR: sandboxSkill }, encoding: 'utf8' })
     const rowsIn = (text) => {
       let v
       try { v = yamlLib.load(text) } catch (e) { return { err: String(e?.message ?? e) } }
@@ -1245,19 +1254,16 @@ try {
     // 一份**空库**：表头照真库，0 条数据；字典与核心从沙箱那份拷过来（同一版）。
     const seedLib = join(sandbox, 'seed-skill')
     mkdirSync(join(seedLib, 'references'), { recursive: true })
-    mkdirSync(join(seedLib, 'scripts', 'lib'), { recursive: true })
     mkdirSync(join(seedLib, 'store'), { recursive: true })
-    for (const f of ['references/tags.schema.json', 'scripts/lib/core.mjs', 'scripts/lib/backup.mjs']) {
-      copyFileSync(join(sandboxSkill, f), join(seedLib, f))
-    }
-    const seedHeader = readFileSync(join(realSkill, 'store', 'memory.csv'), 'utf8').split('\n')[0]
+    copyFileSync(join(ENGINE, 'tags.schema.json'), join(seedLib, 'references', 'tags.schema.json'))
+    const seedHeader = readFileSync(join(ENGINE, 'templates', 'memory.csv'), 'utf8').split('\n')[0]
     const seedCsv = join(seedLib, 'store', 'memory.csv')
     writeFileSync(seedCsv, seedHeader + '\n', 'utf8')
 
     const runSeed = (extra = []) => spawnSync(process.execPath,
       [join(PKG, 'scripts', 'install.mjs'), '--dsh-home', home2, '--profile', 'web', ...extra],
-      { env: { ...process.env, DSH_TAG_MEMORY_SKILL_DIR: seedLib }, encoding: 'utf8' })
-    const seedCore = await import(pathToFileURL(join(seedLib, 'scripts', 'lib', 'core.mjs')).href)
+      { env: { ...process.env, DSH_TAG_MEMORY_DATA_DIR: seedLib }, encoding: 'utf8' })
+    const seedCore = await import(pathToFileURL(join(ENGINE, 'core.mjs')).href)
     const seedSchema = JSON.parse(readFileSync(join(seedLib, 'references', 'tags.schema.json'), 'utf8'))
     const rowsNow = () => seedCore.readTable(readFileSync(seedCsv, 'utf8')).rows
     const asDict = (row) => {
@@ -1335,7 +1341,7 @@ try {
 
     const run = (extra = []) => spawnSync(process.execPath,
       [join(PKG, 'scripts', 'install.mjs'), '--dsh-home', home, '--profile', 'web', ...extra],
-      { env: { ...process.env, DSH_TAG_MEMORY_SKILL_DIR: sandboxSkill }, encoding: 'utf8' })
+      { env: { ...process.env, DSH_TAG_MEMORY_DATA_DIR: sandboxSkill }, encoding: 'utf8' })
     const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex')
     // 记忆库（沙箱那本）动没动：库 + 字典各取一份指纹
     const libSha = () => [sha(csvPath), sha(join(sandboxSkill, 'references', 'tags.schema.json'))]
@@ -1398,7 +1404,7 @@ try {
     // 另起一份 store 实例：这一步要动库目录，不能把前面用着的那份搅了
     const store2 = await import(pathToFileURL(join(PKG, 'lib', 'store.mjs')).href + '?p6=' + Date.now())
 
-    ok('不配 libraryDir：落回原来的推断链（环境变量 → 默认），与本版之前一模一样',
+    ok('不配 libraryDir：落回原来的推断链（环境变量 → 默认）',
       store2.SKILL_DIR === sandboxSkill && store2.CSV_PATH === join(sandboxSkill, 'store', 'memory.csv'),
       store2.SKILL_DIR)
     ok('不配 libraryDir：setLibraryDir 什么都不做（幂等）', store2.setLibraryDir(undefined) === false)
@@ -1407,8 +1413,11 @@ try {
       store2.setLibraryDir(lib2) === true && store2.SKILL_DIR === resolve(lib2) &&
       store2.STORE_DIR === join(resolve(lib2), 'store') &&
       store2.CSV_PATH === join(resolve(lib2), 'store', 'memory.csv'))
-    ok('换完：字典从新库读、核心也是从新库加载的（不是手上那份老库的）',
-      !!store2.loadSchema() && store2.ready() && store2.getCore() !== store.getCore())
+    // 引擎在**插件包内**：换数据目录不重载核心，也不该重载——它跟插件走，跟库无关。
+    ok('换完：字典从新库读（盘上那本），核心始终是插件内置那一份（不因换库而换）',
+      !!store2.loadSchema() && store2.ready() && store2.getCore() === store.getCore())
+    ok('换完：coreStale 恒为 false（核心随插件走，换数据目录不存在「重启才生效」）',
+      store2.coreStale() === false)
 
     // 读写确实落在新库上：往新库写一条，新库多一条、老库一条不多
     {
@@ -1457,7 +1466,7 @@ try {
 
     const run = (from, extra = []) => spawnSync(process.execPath,
       [join(from, 'scripts', 'install.mjs'), '--dsh-home', home, '--profile', 'web', ...extra],
-      { env: { ...process.env, DSH_TAG_MEMORY_SKILL_DIR: sandboxSkill }, encoding: 'utf8' })
+      { env: { ...process.env, DSH_TAG_MEMORY_DATA_DIR: sandboxSkill }, encoding: 'utf8' })
     const linkTo = () => { try { return resolve(realpathSync(linkPath)) } catch { return '' } }
 
     // 1) --dest：本体拷过去，链接指过去
@@ -1504,7 +1513,7 @@ try {
 
     // 5) 空环境：没有记忆库 → 整节跳过、fail=0、退出码 0
     const r5 = spawnSync(process.execPath, [join(PKG, 'scripts', 'selftest.mjs')],
-      { env: { ...process.env, DSH_TAG_MEMORY_SKILL_DIR: join(sandbox, '这台机器上没有这个库') }, encoding: 'utf8' })
+      { env: { ...process.env, DSH_TAG_MEMORY_DATA_DIR: join(sandbox, '这台机器上没有这个库') }, encoding: 'utf8' })
     ok('独立空环境：记忆库不在 → 跳过而不是假 FAIL（fail=0，退出码 0）',
       r5.status === 0 && /fail=0\b/.test(r5.stdout) && /skip=\d+/.test(r5.stdout),
       `exit=${r5.status} ${r5.stdout.split('\n').filter(Boolean).pop() ?? ''}`)

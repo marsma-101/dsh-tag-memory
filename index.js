@@ -11,12 +11,14 @@
 //   ② 只追加 / 原位替换：有标记就替换块内，没有则追加末尾。
 //   ③ 首次落笔先留 .bak；每次挂载（及新智能体出现时）核对标记，不在就补回。
 
-import { readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync, accessSync, appendFileSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync, accessSync, appendFileSync, statSync, renameSync, unlinkSync } from 'node:fs'
 import { constants as FS } from 'node:fs'
-import { basename, join, isAbsolute, resolve } from 'node:path'
+import { randomBytes } from 'node:crypto'
+import { basename, dirname, join, isAbsolute, resolve } from 'node:path'
 import {
-  BACKUP_CFG_PATH, CSV_PATH, INDEX_PATH, LOCK_PATH, PRESET_ROOT, SCHEMA_PATH, SKILL_DIR, STORE_DIR,
-  backupReady, coreStale, getBackupCore, getCore, loadSchema, ready, reloadSchema, setLibraryDir,
+  BACKUP_CFG_PATH, CSV_PATH, DATA_DIR, INDEX_PATH, LOCK_PATH, PRESET_ROOT, SCHEMA_PATH, STORE_DIR,
+  backupReady, coreStale, getBackupCore, getCore, initInfo, legacyInfo, loadSchema, ready, reloadSchema,
+  setDataDir,
 } from './lib/store.mjs'
 import { DEFAULT_MEMORY_FILE_NAMES, NOTICE_BEGIN, detectMemoryFiles, renderNotice, selfHeal } from './lib/notice.mjs'
 import { HostConfig } from './lib/config.mjs'
@@ -34,8 +36,9 @@ const ROUTE = '/tag-memory-api'
 const HEAL_COOLDOWN_MS = 3000
 
 export function apply(ctx, config = {}) {
-  // 库目录：配置优先；没配就是原来的推断链（环境变量 → 默认），行为与旧版一模一样。
-  setLibraryDir(config.libraryDir)
+  // 数据目录：配置优先（`dataDir`，兼容旧名 `libraryDir`）；没配就是推断链
+  // （环境变量 → 旧环境变量 → <DSH_HOME>/tag-memory）。空目录会当场按模板建库。
+  setDataDir(config.dataDir ?? config.libraryDir)
 
   const presetRoot =
     typeof config.presetRoot === 'string' && config.presetRoot.trim() !== ''
@@ -219,13 +222,21 @@ export function apply(ctx, config = {}) {
 
 function overview(notice) {
   // `header` 是库自己的列序——表格视图照它排，库长什么样就显示什么样。
-  // skillDir = **实际在用**的库目录（config.libraryDir 指到哪就报哪）；coreStale = 换了目录
-  // 但这份 Node 不能同步重载核心——界面据此说「重启 DSH 才生效」，不装作已经换好了。
+  // dataDir = **实际在用的数据目录**（config.dataDir 指到哪就报哪）；csvPath = 库文件。
+  // `skillDir` 是旧字段名（同值），留着给还没更新的客户端用，别让老页面报 undefined。
+  // `legacy` = 新数据目录里没库、但老位置（`<DSH_HOME>/skills/…`）还有一本时的**只读**报告：
+  // 插件不自动搬库，只在界面上提示「可迁移」。
   // `health.ragged` = 「格子数跟表头对不上」的那些行。列是按下标读的，一行错位，
   // 它后面每一格都串到别列上——**界面照样有值、只是值是错的**。所以这里照实报出来，
   // 由界面明说「这些行显示的值不可信」，而不是让人对着串了位的表继续做判断。
   // 库老一点（readTable 不返回 ragged）时按「没有」处理——不装作查过了。
-  const base = { ready: ready(), skillDir: SKILL_DIR, csvPath: CSV_PATH, coreStale: coreStale(), notice, sorts: SORT_ORDER, header: [], dimensions: [], statusValues: [], total: 0, active: 0, byDimension: {}, health: { ok: true, ragged: [] } }
+  const legacy = legacyInfo()
+  const base = {
+    ready: ready(), dataDir: DATA_DIR, skillDir: DATA_DIR, csvPath: CSV_PATH,
+    coreStale: coreStale(), legacy, init: initInfo(),
+    notice, sorts: SORT_ORDER, header: [], dimensions: [], statusValues: [], total: 0, active: 0,
+    byDimension: {}, health: { ok: true, ragged: [] },
+  }
   if (!base.ready) return base
   const schema = loadSchema()
   const core = getCore()
@@ -457,16 +468,54 @@ function setBackupDir(body) {
 }
 
 /**
+ * 原子替换一个文件：先写同目录临时文件，再 `renameSync` 盖过去。
+ *
+ * 为什么必须这样：`writeFileSync` 直接覆盖，**中途崩溃/断电就留下半截文件**——
+ * 恢复本来是为了救库，结果把库弄成半截，比恢复前更糟。同目录 rename 在同一分区上
+ * 是原子的：要么还是旧文件，要么已经是完整的新文件，没有「一半」这个状态。
+ *
+ * 临时文件必须落在**同一目录**（跨盘 rename 不是原子操作，会退化成复制）。
+ * 失败时把临时文件清掉，别在 store/ 里留垃圾——`readdirSync` 数条目的地方会把它数进去。
+ */
+function atomicReplace(targetPath, bytes) {
+  const tmpPath = join(dirname(targetPath), `.${basename(targetPath)}.tmp-${randomBytes(6).toString('hex')}`)
+  try {
+    writeFileSync(tmpPath, bytes)
+    renameSync(tmpPath, targetPath)
+  } catch (e) {
+    try { unlinkSync(tmpPath) } catch { /* 没写成或已 rename 掉 */ }
+    throw e
+  }
+}
+
+/**
  * 从某一份备份**整体替换**当前记忆库。
  * 语义是替换不是合并——目的就是「把搞乱的那一版换掉」。
  * 所以：① 先强制把现在这一版留档（用户要求「恢复之前需要提醒备份」）；
  *      ② backup.json 不还原（它装的是「备份地址/水位」这类设置，不是记忆内容）。
+ *
+ * 两处硬要求（审查报告 S3）：
+ *   · **整个恢复过程持写锁**——不加锁的话，恢复期间别的智能体正在 `appendEntry`，
+ *     它会往马上要被换掉的那份文件里写，写完连人带字一起没了。锁与写入用同一把
+ *     （`LOCK_PATH`），所以「判重—落笔」和「整体替换」不会擦肩而过。
+ *   · **落盘用 tmp + rename**——见 `atomicReplace()`。
+ * `withLock` 是同步的、本函数也是同步的，直接包住即可。
  */
 function restoreFrom(body) {
-  const bk = backupCore()
-  const core = getCore()
   const stamp = typeof body?.stamp === 'string' ? body.stamp.trim() : ''
   if (!/^\d{8}-\d{4,6}$/.test(stamp)) return { ok: false, error: '要指明用哪一份备份（形如 20261014-160101）' }
+  // 锁要早拿：验证备份、留档、替换、复核全在同一把锁里，中途没有缝。
+  try {
+    return getCore().withLock(LOCK_PATH, () => restoreFromLocked(stamp))
+  } catch (e) {
+    return { ok: false, code: 'LOCK', error: `拿不到写锁，本次没有恢复（库还是原样）：${String(e?.message ?? e)}` }
+  }
+}
+
+/** `restoreFrom` 的锁内主体（调用方已持 `LOCK_PATH`）。 */
+function restoreFromLocked(stamp) {
+  const bk = backupCore()
+  const core = getCore()
   const st = bk.readBackupStatus(STORE_DIR, { recent: 50 })
   if (!st.dirSet) return { ok: false, code: 'NO_DIR', error: '还没有设置备份地址' }
 
@@ -511,8 +560,20 @@ function restoreFrom(body) {
   }
 
   // ② 整体替换（用上面读下来的那份字节，不用磁盘上现在这个名字——它可能刚被留档覆盖）
-  writeFileSync(CSV_PATH, csvBytes)
-  writeFileSync(INDEX_PATH, mdBytes)
+  //    tmp + rename：要么还是旧库，要么已经是完整的新库，没有「半截」这个中间态。
+  //    两步之间要是崩了，memory.csv 与 index.md 可能一新一旧——所以下面 ③ 必须复核条数；
+  //    复核不过就如实报 VERIFY 并指向刚留的档，不装作成功。
+  try {
+    atomicReplace(CSV_PATH, csvBytes)
+    atomicReplace(INDEX_PATH, mdBytes)
+  } catch (e) {
+    return {
+      ok: false,
+      code: 'WRITE',
+      error: `替换文件时出错，请用刚留的档回退（${pre.stamp}）：${String(e?.message ?? e)}`,
+      preBackup: pre.stamp,
+    }
+  }
 
   // ②b 字典跟着一起换回去——「恢复 = 整体替换」的应有之义：库和**解释这份库的说明书**不能分家，
   //     不然换回一份老库、字典还是新的，就会出现「表里有个值、字典里没这个词」的越界行。
@@ -526,7 +587,7 @@ function restoreFrom(body) {
     schemaInfo.note = '备份里的字典和现在这份逐字节一样，没动。'
   } else {
     try {
-      writeFileSync(SCHEMA_PATH, schemaBytes)
+      atomicReplace(SCHEMA_PATH, schemaBytes)
       // ⚠️ 必须丢缓存：`loadSchema()` 是**进程内**缓存的，不丢的话界面显示了新字典、
       //    每轮注入给模型的还是老字典——又是一次「看着成功、其实没生效」。
       reloadSchema()

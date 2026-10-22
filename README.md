@@ -86,8 +86,60 @@ DSH 插件：让智能体**有一份自己的记忆库**——存成 CSV，稳�
 id 内容 时间 环境 原因 备注 稳定性 成熟度 距离 角色 项目 状态 关键词 工具 版本 依据 类型
 ```
 
-加一份维度字典（schema）。默认放在 `<DSH_HOME>/skills/marsma101-tag-memory`；
-要放别处，用配置里的 `libraryDir`（或环境变量 `DSH_TAG_MEMORY_SKILL_DIR`）指过去。
+### 引擎内置 + 数据独立
+
+这个插件**不依赖任何外部技能目录**，两样东西分开存放：
+
+| 什么 | 放哪 | 谁管 |
+|---|---|---|
+| **引擎**（读写核心 `core.mjs`、备份核心 `backup.mjs`、字典样张 `tags.schema.json`、出厂模板 `templates/*`） | **插件包内** `lib/engine/` | 随插件走、随插件升级。用户不用管，也**不该去改** |
+| **数据**（你的记忆库 `store/memory.csv`、索引、备份配置，以及这份库正在用的字典 `references/tags.schema.json`） | **独立数据目录**，默认 `<DSH_HOME>/tag-memory` | 你自己的。插件升级 / 重装 / 卸载都**不碰**它 |
+
+为什么要分开：库放插件目录里，插件一升级、一重装，记忆就跟着没了。所以库必须搬出去。
+引擎反过来必须跟着插件走——它要是留在技能目录，插件就没法独立安装。
+
+**数据目录怎么定**（从宽到窄）：
+
+1. 配置里的 `dataDir`（Host 行与 preset 行都认；旧字段名 `libraryDir` 仍然等价）
+2. 环境变量 `DSH_TAG_MEMORY_DATA_DIR`
+3. （兼容旧名）环境变量 `DSH_TAG_MEMORY_SKILL_DIR` —— 语义没变，当年指的就是「库在哪」
+4. `<DSH_HOME>/tag-memory`
+
+**首次启动自动建库**：数据目录不存在、或存在但是空库时，插件会用自带的模板建出
+`store/memory.csv`（表头）、`store/index.md`、`store/backup.json`，并把字典落一份到
+`references/tags.schema.json`。**已有库一个字节不动**——只有「新目录 + 空库」才会建。
+
+### 从旧版本迁移（0.1.x → 0.2.0）
+
+0.1.x 把库放在 `<DSH_HOME>/skills/marsma101-tag-memory`。0.2.0 起默认位置改成
+`<DSH_HOME>/tag-memory`。**插件不会自动搬库**——发现旧库时它只在界面上提示，不替你动文件。
+
+两条路，选一条：
+
+**甲：把旧库拷到新位置（推荐）**
+
+```powershell
+# 先备份一份，再拷（把旧目录整个搬过去，包含 store/ 与 references/）
+Copy-Item -Recurse "$env:USERPROFILE\.dsh\skills\marsma101-tag-memory\*" "$env:USERPROFILE\.dsh\tag-memory\"
+```
+
+拷完重启 DSH。旧目录可以留着当备份，确认新位置读写正常后再自己删。
+
+**乙：让插件继续用旧位置**
+
+在配置里把数据目录指过去（`dataDir`，或设环境变量 `DSH_TAG_MEMORY_DATA_DIR`）：
+
+```yaml
+# profile 补丁里，Host 行与 preset 行各写一次
+config:
+  dataDir: 'C:\Users\你\.dsh\skills\marsma101-tag-memory'
+```
+
+这样不用搬文件，但库仍然留在技能目录里——将来那个目录被清理，库就跟着没了。
+所以**只建议过渡期用**。
+
+> 装完可以用 `node scripts/install.mjs` 自查：它会把「插件内置引擎是否齐」「数据目录在哪、
+> 有没有库」「有没有检测到旧库」逐条报出来。
 
 **只追加**：新记录追加到末尾，旧条目靠 `状态` 退场（`被取代` / `已归档`），**不删行**。
 所以库只有一个方向长——任何一版都能原样备份、原样回滚。
@@ -326,7 +378,7 @@ node scripts/install.mjs --uninstall --apply   # 真摘
 老版本可能留下的 profile 补丁声明、各智能体 `MEMORY.md` 里的说明块。**逐条校验，有一项摘不干净就整批不落盘**
 （宁可不卸，也不留半截）。每个文件动之前都留 `.bak-<时间戳>`，想回退就把 `.bak` 改回原名。
 
-**记忆库不在摘除清单里：卸插件不删记忆。** `store/memory.csv`、字典、备份目录一个字节都不碰；
+**记忆库不在摘除清单里：卸插件不删记忆。** 数据目录里的 `store/memory.csv`、字典、备份目录一个字节都不碰；
 链接只解「当初是我们拉的那一条」，别人写在别处的引用（比如某个 preset 自己的 `plugins` 里挂的那行）不碰。
 
 摘完同样要**重启 DSH** 才生效。
@@ -339,7 +391,7 @@ node scripts/install.mjs --uninstall --apply   # 真摘
 - id: tag-memory
   name: dsh-tag-memory
   config:
-    libraryDir: 'D:\skills\marsma101-tag-memory'  # 记忆库在哪；不填见下
+    dataDir: 'D:\我的记忆库'          # 数据目录（库放哪）；不填见下。旧名 libraryDir 仍认
     memoryFileNames: ['MEMORY.md']   # 探测哪些文件算「记忆文件」
     notice: true                     # 关掉则不写记忆块
     migrateLegacyDict: true          # 是否接管旧的手工字典块
@@ -354,7 +406,7 @@ node scripts/install.mjs --uninstall --apply   # 真摘
       name: 'dsh-tag-memory/preset'
       config:
         agent: '某某'                # 写进 `角色` 列；不填则依次取 preset 目录名、智能体 id
-        libraryDir: 'D:\skills\marsma101-tag-memory'   # 不填见下
+        dataDir: 'D:\我的记忆库'      # 数据目录（库放哪）；不填见下。旧名 libraryDir 仍认
         snapshot:                    # 每轮注入「记忆快照」的预算；不填用缺省值
           enabled: true              # false = 退回「只注入字典」
           maxPinned: 6               # 常驻条目最多放几条全文
@@ -372,9 +424,10 @@ node scripts/install.mjs --uninstall --apply   # 真摘
 
 嫌贵往下调，嫌记不住往上调；`maxIndexLines: 0` 就是「只放常驻，其余全靠 `memory_recall`」。
 
-**记忆库在哪，按这个次序找**：`libraryDir` → 环境变量 `DSH_TAG_MEMORY_SKILL_DIR` →
-`<DSH_HOME>/skills/marsma101-tag-memory`。**不填就是后面两条**，与之前的行为逐字一致。
+**数据目录在哪，按这个次序找**：`dataDir`（旧名 `libraryDir` 等价）→ 环境变量 `DSH_TAG_MEMORY_DATA_DIR`
+→（兼容旧名）`DSH_TAG_MEMORY_SKILL_DIR` → `<DSH_HOME>/tag-memory`。
 两半都挂了时，谁先装载谁说了算——两处都写、且写成不一样，是配置错误。
+**引擎（`core.mjs` / `backup.mjs` / 字典样张 / 模板）不看这一串**：它永远在插件包内的 `lib/engine/`。
 
 ## 许可证
 

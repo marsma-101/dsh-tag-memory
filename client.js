@@ -1600,6 +1600,7 @@ window.__ModuleLoader__.load({
 			}
 
 			if (overview !== null && overview.ready === false) {
+				const legacy = overview.legacy ?? null
 				return React.createElement(
 					'div',
 					{ className: 'tm-root' },
@@ -1607,9 +1608,20 @@ window.__ModuleLoader__.load({
 					React.createElement(
 						'div',
 						{ className: 'tm-card' },
-						React.createElement('div', { className: 'tm-note tm-err' }, '记忆库未就绪：找不到记忆库目录或 store/memory.csv。'),
-						React.createElement('div', { className: 'tm-note', style: { marginTop: '8px' } }, `记忆库目录：${overview.skillDir}`),
+						legacy !== null && legacy.legacyDetected === true
+							? React.createElement(
+									'div',
+									{ className: 'tm-note tm-err' },
+									'检测到旧库（旧版放在技能目录下的那一本），当前数据目录里还没有库。',
+									React.createElement('br'),
+									'插件不会自动搬库。要沿用旧记忆：把旧库整个拷到下面的数据目录，或把配置里的 dataDir 指到旧库所在处，然后重启 DSH。',
+								)
+							: React.createElement('div', { className: 'tm-note tm-err' }, '记忆库未就绪：找不到数据目录里的 store/memory.csv（首次启动会自动建库；建不出来多半是目录不可写）。'),
+						React.createElement('div', { className: 'tm-note', style: { marginTop: '8px' } }, `数据目录：${overview.dataDir ?? overview.skillDir}`),
 						React.createElement('div', { className: 'tm-note' }, `库文件：${overview.csvPath}`),
+						legacy !== null && legacy.legacyDetected === true
+							? React.createElement('div', { className: 'tm-note' }, `旧库位置：${legacy.legacyCsvPath}`)
+							: null,
 					),
 				)
 			}

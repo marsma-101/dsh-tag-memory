@@ -1,6 +1,6 @@
 {
   "name": "dsh-tag-memory",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "DSH 插件：让智能体有一份自己的记忆库——一张只追加的 CSV，稳定读写，闲时能整理。每个智能体每轮自动拿到标签字典（systemPrompt.section，函数值），由模型判断该不该记、每维取什么值，并提供 memory_write / memory_recall 两个工具。界面上有条目表格、维度筛选、搜索导出，以及备份 / 恢复 / 合并。零依赖，全部落本地文件。安装时会探测各智能体的 MEMORY.md 并写入一段受控说明（标记块、幂等、块外一个字节不碰、挂载自愈）。",
   "type": "module",
@@ -21,11 +21,14 @@
     "lib/store.mjs",
     "lib/notice.mjs",
     "lib/config.mjs",
+    "lib/engine/**",
+    "docs/**",
     "cordis.patch.yml",
     "scripts/install.mjs",
     "scripts/selftest.mjs",
     "seed/memory.seed.json",
     "README.md",
+    "CHANGELOG.md",
     "locale/en.json",
     "locale/zh.json",
     "icon.svg"
