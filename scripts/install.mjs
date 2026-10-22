@@ -372,6 +372,13 @@ if (argv.includes('--uninstall')) {
     try {
       const r = removeNotice(f.path)
       if (r.changed) { removed++; console.log(`✓ 已摘说明块 → ${f.agent}/${f.file}（备份 ${r.backup}）`) }
+      else if (r.malformed || r.action === 'malformed') {
+        // 标记残缺（有 BEGIN 没 END）：**故意不动那个文件**——宁可块留着，
+        // 也不能为了「摘干净」把块外用户正文一起截掉。这里必须显式警告，
+        // 不能只说「说明块不在」：用户得知道这个文件需要自己看一眼。
+        console.log(`⚠ 标记不完整，未改动 → ${f.agent}/${f.file}`
+          + `（${r.error ?? '有 BEGIN 没有 END'}；块外正文一个字节没动，请手工检查该文件）`)
+      }
       else console.log(`· 说明块不在 → ${f.agent}/${f.file}`)
     } catch (e) {
       console.error(`✗ 说明块摘除失败 ${f.agent}/${f.file}：${String(e?.message ?? e)}`)
