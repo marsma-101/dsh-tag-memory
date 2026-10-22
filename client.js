@@ -1437,7 +1437,7 @@ window.__ModuleLoader__.load({
 						React.createElement('input', {
 							className: 'tm-input',
 							type: 'text',
-							placeholder: '例如 D:\\other\\skills\\marsma101-tag-memory\\store\\memory.csv',
+							placeholder: '例如 D:\\other\\tag-memory\\store\\memory.csv',
 							value: mergePath,
 							onChange: (event) => setMergePath(event.target.value),
 						}),
