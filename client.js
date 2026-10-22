@@ -1,4 +1,4 @@
-// client.js —— 浏览器端的一半：设置 →「记忆」页。
+﻿// client.js —— 浏览器端的一半：设置 →「记忆」页。
 //
 // 格式是 DSH 的客户端模块加载器契约：本文件执行时只登记一个 factory，
 // 真正的模块体（以及它注入的样式）要等模块被实例化才跑。React 来自平台
@@ -417,6 +417,18 @@ window.__ModuleLoader__.load({
 			const [restoreOpen, setRestoreOpen] = React.useState(false)
 			const [mergeOpen, setMergeOpen] = React.useState(false)
 			const [mergePath, setMergePath] = React.useState('')
+			/**
+			 * 「我确认这是可信来源」——后端 R-7 的准入闸。
+			 *
+			 * 来源路径不在备份目录/库目录之下时，后端会回 `SOURCE_OUTSIDE`。没有这个勾选框，
+			 * 界面就等于「永远拒绝」，那道闸反而成了坏功能。勾上后**预演与真合并都要带上**，
+			 * 否则预演放行、真合并又被拒一次，用户会以为合并坏了。
+			 *
+			 * 用 `useRef` 而不是 `useState`：勾选框的选中态由 DOM 自己持有，这里只需要在
+			 * 点击时读到「此刻勾没勾」。少一个 state 就少一个 hook 序号，也就不会把
+			 * 别的 state（以及自检里按序号预置的取值）整体挤位。
+			 */
+			const mergeConfirmedRef = React.useRef(false)
 			const [mergeReport, setMergeReport] = React.useState(null)
 			/** 维护区（托管状态 + 备份历史）默认收起——次位的东西不占主显示区。 */
 			const [maintOpen, setMaintOpen] = React.useState(false)
@@ -748,11 +760,25 @@ window.__ModuleLoader__.load({
 				setBkBusy('merge')
 				setBkNote(null)
 				try {
-					const r = await postJSON(`${API}/merge`, { path, apply: apply === true })
-					if (!r.ok) { setBkNote({ kind: 'bad', text: `合并没成：${r.error ?? r.code}` }); return }
+					// `confirmOutside` 两次都带：预演与真合并走同一道闸，不能一次放一次拒。
+					const r = await postJSON(`${API}/merge`, { path, apply: apply === true, confirmOutside: mergeConfirmedRef.current === true })
+					if (!r.ok) {
+						// 来源被闸门挡下时，把「怎么放行」直接说给用户，别只丢一个 code。
+						const hint = r.code === 'SOURCE_OUTSIDE'
+							? '　（不在备份目录里的话，勾上「我确认这是可信来源」再试）'
+							: ''
+						setBkNote({ kind: 'bad', text: `合并没成：${r.error ?? r.code}${hint}` })
+						return
+					}
 					setMergeReport(r)
 					if (r.dryRun === false) {
-						setBkNote({ kind: 'ok', text: `合并完成：新增 ${r.appended?.length ?? 0} 条，跳过重复 ${r.counts?.duplicate ?? 0} 条；合并前那一版留档在 ${r.preBackup}。` })
+						const other = r.counts?.duplicateOtherProject ?? 0
+						setBkNote({
+							kind: 'ok',
+							text: `合并完成：新增 ${r.appended?.length ?? 0} 条，跳过重复 ${r.counts?.duplicate ?? 0} 条`
+								+ (other > 0 ? `（另有 ${other} 条仅内容相同、项目不同，已按新增并入）` : '')
+								+ `；合并前那一版留档在 ${r.preBackup}。`,
+						})
 						if (r.status) setBk(r.status)
 						await reloadEntries()
 					}
@@ -1429,7 +1455,7 @@ window.__ModuleLoader__.load({
 					React.createElement(
 						'div',
 						{ className: 'tm-note', style: { marginBottom: '8px' } },
-						'填另一台机器／另一份库里 `store/memory.csv` 的绝对路径。规矩是：**先留档、只追加、不重写、不删任何条目**；id 撞号按「内容」判——内容一样就跳过，不一样就另给新号。来源里不合规的（内容空、必填缺项）**预演时就会挑出来**，不会等真合并才一条条失败。',
+						'填另一台机器／另一份库里 `store/memory.csv` 的绝对路径。规矩是：**先留档、只追加、不重写、不删任何条目**；判重看「内容 + 项目 + 类型」——三者都同才算重复跳过，仅内容相同但项目不同会**按新增并入**。来源里不合规的（内容空、必填缺项）**预演时就会挑出来**，不会等真合并才一条条失败。',
 					),
 					React.createElement(
 						'div',
@@ -1441,6 +1467,23 @@ window.__ModuleLoader__.load({
 							value: mergePath,
 							onChange: (event) => setMergePath(event.target.value),
 						}),
+					),
+					// R-7 的准入闸：路径不在备份目录/库目录之下时，必须显式确认。
+					// 这条不是「多此一举」——来源 CSV 会被注入记忆、再进每轮系统提示词，
+					// 任意路径都能合等于给记忆投毒开了门。
+					React.createElement(
+						'label',
+						{ className: 'tm-note', style: { display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px', cursor: 'pointer' } },
+						React.createElement('input', {
+							type: 'checkbox',
+							defaultChecked: false,
+							onChange: (event) => { mergeConfirmedRef.current = event.target.checked },
+						}),
+						'我确认这是可信来源（路径不在备份目录里时，勾上才会放行）',
+					),
+					React.createElement(
+						'div',
+						{ className: 'tm-field' },
 						React.createElement(
 							'button',
 							{ type: 'button', className: 'tm-btn', disabled: bkBusy !== '', onClick: () => doMerge(false) },
@@ -1464,7 +1507,8 @@ window.__ModuleLoader__.load({
 					['来源', r.source],
 					['带上来的条目', `${r.incomingTotal} 条（本地 ${r.localTotal} 条）`],
 					['新增', `${r.counts.new} 条`],
-					['重复跳过', `${r.counts.duplicate} 条`],
+					['重复跳过（内容+项目+类型都相同）', `${r.counts.duplicate} 条`],
+					['仅内容相同、项目不同（按新增并入）', `${r.counts.duplicateOtherProject ?? 0} 条`],
 					['id 撞号改新号', `${r.counts.idCollision} 条`],
 					['内容空 / 必填缺项（加不进去）', `${r.counts.invalid} 条`],
 					['同一条但标签不一样', `${r.counts.tagDiff} 条`],

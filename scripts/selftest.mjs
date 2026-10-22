@@ -1,4 +1,4 @@
-/**
+﻿/**
  * selftest.mjs —— 自检：一条命令验完插件的纯逻辑，**全程沙箱、不碰任何 live 数据**。
  *
  *   node scripts/selftest.mjs
