@@ -1,5 +1,49 @@
 # 变更记录
 
+## 0.2.2
+
+- **R-8（P1-2）托管根适配 DSH 0.2.x。**
+  `PRESET_ROOT` 原来写死 `<DSH_HOME>/.agent-presets`——那是老版本的位置，DSH 0.2.x 的智能体根是
+  `~/.agents`（官方 `dsh-home-paths` 的 `AGENTS_HOME_DIR_NAME`，可用 `DSH_AGENTS_HOME` 覆盖）。
+  写死的后果：`notice.files` 恒为空，界面显示 `0/0 记忆文件已托管`，`install --check` 还报 PASS。
+  - 现在的推断链：`DSH_AGENTS_HOME` → `~/.agents` → 老的 `.agent-presets`（回退）→ 都没有则报 `~/.agents`。
+  - `install --check` 探测不到记忆文件时**不再报 PASS**，改 `WARN` 并给修法。
+  - `/overview` 的 `notice` 增加 `none` 标记，界面可据此说「托管未生效」。
+
+- **R-5（P1-3）合并判重键对齐写入。**
+  原来 `mergeFrom` 只按 `内容` 判重，导致跨项目并库时「B 项目里已有的同句结论」会把 A 项目的条目
+  判成重复跳过；且已归档行也参与判重，与写入口径不一致。
+  - 判重键改为 **`内容 + 项目 + 类型`**，与 `core.mjs` 的 `DUP_KEYS` 一致。
+  - **已归档 / 被取代的行不参与判重**（与写入同口径）。
+  - 报告把「重复」拆成 `duplicateSameProject`（真重复，跳过）与 `duplicateOtherProject`
+    （仅内容相同、项目不同 → **判为新增**），老字段 `duplicate` 保留为「跳过的总数」。
+
+- **R-7（P1-5）合并来源限制与上限。**
+  原来接受任意绝对路径、无大小上限——可被当作文件探针、可注入带 `内容` 表头的任意 CSV（记忆投毒）、
+  大文件能拖垮进程。
+  - **拒绝目录**；只接受普通文件。
+  - **大小上限 10MB**、**行数上限 50000**，超限拒绝并说明实际大小。
+  - **路径准入**：必须在备份目录 / 数据目录之下；否则需显式 `confirmOutside: true`
+    （界面那颗「我确认这是可信来源」）。备份地址未设时，库目录之外的路径一律需要确认。
+  - 错误消息不回显文件内容。
+
+- **P2-1 / P2-2 维度计数口径。**
+  - 留白桶的 key 从 `（留白）` 改为核心认的 `留白`——原来界面选「留白」永远 0 命中。
+  - `byDimension` 改用 `filterRows(..., {})` 的生效集合计数，与「生效条目」一致（原来含已归档）。
+
+- **P2-4 请求体超限返回 413。**
+  `readBody` 超过 8MB 时不再静默变 `{}`（上层会报「参数不全」误导用户），改抛 `code: 'TOO_LARGE'`，
+  路由层翻成 `413` + 人话。
+
+- **P2-5 备份配置损坏不再被静默覆盖。**
+  `readCfg` 解析失败返回 `{ broken: true, error }`；`setBackupDir` 遇损坏配置拒绝写入
+  （`code: 'CFG_BROKEN'`），避免这一写把 `lastBackupAt` / `lastCount` / `keepCopies` 水位抹掉。
+  配置写入改用新增的 `writeJsonAtomic`（tmp + rename）。
+
+- **P2-6 `.bak` 同秒撞名。**
+  备份文件名从 `YYYYMMDD-HHMMSS` 加毫秒 + 4 位随机后缀；同秒多次写入不再互相覆盖；
+  每个文件最多保留 20 份 `.bak`，超出按最老的删。
+
 ## 0.2.1
 
 - **修 P0-1：`dataDir` 不再被另一侧 `apply()` 重置。**

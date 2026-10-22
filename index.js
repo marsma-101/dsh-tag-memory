@@ -11,10 +11,10 @@
 //   ② 只追加 / 原位替换：有标记就替换块内，没有则追加末尾。
 //   ③ 首次落笔先留 .bak；每次挂载（及新智能体出现时）核对标记，不在就补回。
 
-import { readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync, accessSync, appendFileSync, statSync, renameSync, unlinkSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync, accessSync, appendFileSync, statSync, realpathSync, renameSync, unlinkSync } from 'node:fs'
 import { constants as FS } from 'node:fs'
 import { randomBytes } from 'node:crypto'
-import { basename, dirname, join, isAbsolute, resolve } from 'node:path'
+import { basename, dirname, join, isAbsolute, relative, resolve } from 'node:path'
 import {
   BACKUP_CFG_PATH, CSV_PATH, DATA_DIR, INDEX_PATH, LOCK_PATH, PRESET_ROOT, SCHEMA_PATH, STORE_DIR,
   backupReady, coreStale, getBackupCore, getCore, initInfo, legacyInfo, loadSchema, ready, reloadSchema,
@@ -658,6 +658,7 @@ function restoreFromLocked(stamp) {
 
   // ④ 水位：把「现在库里是什么」登记成刚恢复的这一版
   // 水位写回：配置损坏时跳过（不拿 `{}` 去覆盖），并把这件事说出来。
+  const cfg = readCfg()
   if (cfg.broken) {
     try { appendFileSync(join(st.dir, 'last-backup.log'),
       `${localIsoTimestamp()}  restore ${stamp}  条目=${afterCount}  恢复前留档=${pre.stamp}  ⚠ 备份配置损坏，水位未更新\n`, 'utf8') } catch { /* 非致命 */ }
@@ -681,6 +682,78 @@ const normText = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
 const preview = (s, n = 42) => {
   const t = normText(s)
   return t.length > n ? t.slice(0, n) + '…' : t
+}
+
+// ── 合并来源的闸门（R-7）──────────────────────────────────
+//
+// 合并 = **把一份外来文件的内容灌进记忆库**，而记忆库会进每轮系统提示词。
+// 原先只做「绝对路径 + 存在 + 可读」三件事，等于开了两个口子：
+//   ① 任意路径存在性探针（拿报错文案就能问「这个文件在不在」）；
+//   ② 带 `内容` 表头的任意 CSV 都能进来 —— 记忆投毒；
+//   ③ 大文件能把进程拖垮。
+// 所以：只认「备份目录里的文件」/「库目录里的文件」，或调用方显式确认的可信来源；
+// 目录、超大、超行数一律在读之前拦下。报错只说路径，**不回显文件内容**。
+
+/** 单份来源的字节上限。10MB 的 CSV 已经够把几十万行记忆塞进来了。 */
+const MERGE_MAX_BYTES = 10 * 1024 * 1024
+/** 单份来源的数据行上限（判重是逐行比，行数不封顶就是给自己找卡死）。 */
+const MERGE_MAX_ROWS = 50000
+
+/** 字节数说成人话（错误消息里要同时给出上限与实际大小）。 */
+function fmtBytes(n) {
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)}MB`
+  if (n >= 1024) return `${(n / 1024).toFixed(1)}KB`
+  return `${n} 字节`
+}
+
+/** `child` 是否落在 `dir` 之内（含 `dir` 本身）。两边都先取真实路径，符号链接绕不出去。 */
+function insideDir(child, dir) {
+  const real = (p) => { try { return realpathSync(p) } catch { return resolve(p) } }
+  const rel = relative(real(dir), real(child))
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
+/**
+ * 合并来源的准入判断。返回 `{ error, code }` 或 `{ size, confirmed, inBackupDir }`。
+ *
+ * 允许的路径：
+ *   ① 在备份目录（`readCfg().backupDir`）之下；
+ *   ② 在库目录之下（`STORE_DIR` 的同级，即数据目录）；
+ *   ③ 调用方显式传 `body.confirmOutside === true`（界面上那颗「我确认这是可信来源」）。
+ * 备份目录**没设**时只有 ③ 这一条路——不能因为「没配」就默认放行任意路径。
+ */
+function mergeSourceVerdict(raw, body) {
+  if (!isAbsolute(raw)) return { code: 'SOURCE_NOT_ABSOLUTE', error: '来源要写绝对路径' }
+  if (!existsSync(raw)) return { code: 'SOURCE_MISSING', error: `找不到这个文件：${raw}` }
+  let st
+  try { st = statSync(raw) } catch (e) { return { code: 'SOURCE_UNREADABLE', error: `看不了这个路径：${String(e?.message ?? e)}` } }
+  // 目录要单独拦：读目录在部分平台上会抛 EISDIR，但那条消息对用户毫无意义。
+  if (st.isDirectory()) return { code: 'SOURCE_IS_DIR', error: `来源必须是文件，不能是目录：${raw}` }
+  if (!st.isFile()) return { code: 'SOURCE_NOT_FILE', error: `来源必须是普通文件：${raw}` }
+  if (st.size > MERGE_MAX_BYTES) {
+    return {
+      code: 'SOURCE_TOO_LARGE',
+      error: `这个文件有 ${fmtBytes(st.size)}，超过单份 ${fmtBytes(MERGE_MAX_BYTES)} 的上限，没有读它。`
+        + '请先在来源那边拆成小份，再一份一份合并。',
+    }
+  }
+
+  const confirmed = body?.confirmOutside === true
+  const cfg = readCfg()
+  const backupDir = typeof cfg.backupDir === 'string' ? cfg.backupDir.trim() : ''
+  const libDir = dirname(STORE_DIR) // STORE_DIR 的同级 = 数据目录（库本体就在 STORE_DIR 里）
+  const inBackupDir = backupDir !== '' && insideDir(raw, backupDir)
+  const inLibDir = insideDir(raw, libDir)
+  if (confirmed || inBackupDir || inLibDir) {
+    return { size: st.size, confirmed, inBackupDir, inLibDir }
+  }
+  return {
+    code: 'SOURCE_OUTSIDE',
+    error: '这个路径不在备份目录里。如果你确认要合并这个文件，请在界面上勾选「我确认这是可信来源」'
+      + (backupDir === ''
+        ? '（备份地址还没设，所以除了库目录里的文件，别的路径都得先确认）'
+        : `（备份目录：${backupDir}）`),
+  }
 }
 
 /** 把来源 CSV 的一行，按字段名摊成对象（未知列丢掉，缺的列留空）。 */
@@ -713,11 +786,18 @@ function mergeFrom(body) {
   const srcText = typeof body?.text === 'string' ? body.text : ''
   let incomingText = ''
   let sourceLabel = ''
+  let sourceInfo = null
   if (srcPath !== '') {
-    if (!isAbsolute(srcPath)) return { ok: false, error: '来源要写绝对路径' }
-    if (!existsSync(srcPath)) return { ok: false, error: `找不到这个文件：${srcPath}` }
+    const v = mergeSourceVerdict(srcPath, body)
+    if (v.error !== undefined) return { ok: false, code: v.code, error: v.error }
     try { incomingText = readFileSync(srcPath, 'utf8') } catch (e) { return { ok: false, error: `读不了：${String(e?.message ?? e)}` } }
     sourceLabel = srcPath
+    sourceInfo = {
+      bytes: v.size,
+      confirmedOutside: v.confirmed,
+      inBackupDir: v.inBackupDir,
+      inLibDir: v.inLibDir,
+    }
   } else if (srcText.trim() !== '') {
     incomingText = srcText
     sourceLabel = '（粘贴的 CSV）'
@@ -728,14 +808,45 @@ function mergeFrom(body) {
   let ih, irows
   try { ({ header: ih, rows: irows } = core.readTable(incomingText)) } catch (e) { return { ok: false, error: `这份 CSV 读不出来：${String(e?.message ?? e)}` } }
   if (ih.indexOf('内容') < 0) return { ok: false, error: '来源 CSV 的表头里没有「内容」列，不像是记忆库' }
+  // 行数闸门：解析之后才数得准（引号里可以有换行，数 `\n` 会数错）。
+  // 放在逐行判之前——50001 行逐行比对本身就是要命的开销。
+  if (irows.length > MERGE_MAX_ROWS) {
+    return {
+      ok: false,
+      code: 'SOURCE_TOO_MANY_ROWS',
+      error: `这份来源有 ${irows.length} 条数据行，超过单次 ${MERGE_MAX_ROWS} 行的上限，没有合并。`
+        + '请先在来源那边分拆成几份，再一份一份合并。',
+    }
+  }
 
   const { header, rows } = core.readTable(readFileSync(CSV_PATH, 'utf8'))
-  const localByIdx = header.indexOf('内容')
-  const localNorm = new Map()
-  for (const r of rows) {
-    const k = normText(r[localByIdx])
-    if (k !== '') localNorm.set(k, r)
+
+  // 判重键**对齐写入**（core.mjs 的 DUP_KEYS = 内容 + 项目 + 类型）：
+  //   · 只按内容判，会把「A 项目的规矩并进 B 项目」整条误丢——报告只说「重复」，
+  //     用户以为本来就有，实际漏并了；
+  //   · `已归档` / `被取代` 的行不参与判重，与写入同一条口径（它们本来就该被新的一条顶掉）。
+  // 老库缺列时**不装作判过**：`null` 表示这一维比不了，按「不同」处理（宁多一条，不静默丢）。
+  const localKeyIdx = ['内容', '项目', '类型'].map((k) => header.indexOf(core.fieldToColumn(schema, k) ?? k))
+  // 三列缺一列就**判不了**：写入那边（core.mjs 的 findDuplicate）遇到缺列也是「不判」。
+  // 这里不装作判过——缺列时一律按「不同」处理，宁可多并一条，也不静默丢一条。
+  const canJudge = localKeyIdx.every((i) => i >= 0)
+  const localStatusIdx = header.indexOf('状态')
+  const localByContent = new Map() // 内容 → 该内容在库里出现过的生效行（已归档/被取代不进索引）
+  if (canJudge) {
+    for (const r of rows) {
+      const k = normText(r[localKeyIdx[0]])
+      if (k === '') continue
+      const st = localStatusIdx < 0 ? '' : normText(r[localStatusIdx])
+      if (st === '被取代' || st === '已归档') continue // 退场的条目不算「库里已经有」
+      const list = localByContent.get(k)
+      if (list === undefined) localByContent.set(k, [r])
+      else list.push(r)
+    }
   }
+  const sameKey = (localRow, key, project, type) =>
+    normText(localRow[localKeyIdx[0]]) === key
+    && normText(localRow[localKeyIdx[1]]) === project
+    && normText(localRow[localKeyIdx[2]]) === type
   const localIds = new Set(rows.map((r) => r[0]).filter(Boolean))
   const missingColumns = header.filter((c) => !ih.includes(c))
 
@@ -751,7 +862,17 @@ function mergeFrom(body) {
     if (!ih.includes(core.fieldToColumn(schema, '类型') ?? '类型') && !fields.类型) fields.类型 = '记忆'
     const key = normText(fields.内容)
     if (key === '') { items.push({ kind: 'invalid', id: fields.id ?? '', why: '「内容」是空的', preview: '' }); continue }
-    if (localNorm.has(key)) { items.push({ kind: 'duplicate', id: fields.id ?? '', fields, local: localNorm.get(key) }); continue }
+    const inProject = normText(fields.项目)
+    const inType = normText(fields.类型)
+    const hits = canJudge ? (localByContent.get(key) ?? []) : []
+    const same = hits.find((lr) => sameKey(lr, key, inProject, inType))
+    if (same !== undefined) {
+      // 真重复：同项目同类型同内容 —— 跳过（§6.5 的标签差异照旧报出来）
+      items.push({ kind: 'duplicate', id: fields.id ?? '', fields, local: same })
+      continue
+    }
+    // 仅内容相同、项目/类型不同 → **不是重复**，是新增（这正是跨项目并库的常态）
+    const other = hits[0]
     // 预演就得说实话：必填缺项 / 取值不合规的行**现在**标出来，别等真合并才一条条失败——
     // 否则预演说「要加 3 条」、真合并只进去 2 条，用户会以为合并吞了一条。
     const vres = core.validateRow(schema, fields)
@@ -761,7 +882,17 @@ function mergeFrom(body) {
       continue
     }
     const why = localIds.has(String(fields.id ?? '')) ? `id ${fields.id} 已被库里另一条占用，会另给新号` : ''
-    items.push({ kind: 'new', id: fields.id ?? '', fields, why })
+    items.push({
+      kind: 'new',
+      id: fields.id ?? '',
+      fields,
+      why,
+      otherProject: other === undefined ? null : {
+        id: other[0] ?? '',
+        项目: localKeyIdx[1] < 0 ? '' : normText(other[localKeyIdx[1]]),
+        类型: localKeyIdx[2] < 0 ? '' : normText(other[localKeyIdx[2]]),
+      },
+    })
   }
 
   // ③ 标签差异：内容一样但标签不一样 —— §6.5 不删，报出来让人决定
@@ -781,22 +912,44 @@ function mergeFrom(body) {
   }
 
   const newItems = items.filter((i) => i.kind === 'new')
+  const dupSameProject = items.filter((i) => i.kind === 'duplicate')
+  // 同内容、别项目/别类型的那批：它们**已经算在 `new` 里**（要并进去），
+  // 单列一个计数只是为了让报告说清「这几条不是重复，只是别处也有同句」。
+  const dupOtherProject = newItems.filter((i) => i.otherProject !== null)
   const report = {
     ok: true,
     dryRun: body?.apply !== true,
     source: sourceLabel,
+    ...(sourceInfo === null ? {} : { sourceInfo }),
     incomingTotal: irows.length,
     localTotal: rows.length,
     headerMismatch: ih.join(',') !== header.join(','),
     missingColumns,
     counts: {
       new: newItems.length,
-      duplicate: items.filter((i) => i.kind === 'duplicate').length,
+      // `duplicate` 保留为「跳过」的总数（= 同项目真重复），老客户端/自检照旧读得懂；
+      // 新客户端改读下面两项细分。
+      duplicate: dupSameProject.length,
+      duplicateSameProject: dupSameProject.length,
+      duplicateOtherProject: dupOtherProject.length,
       idCollision: newItems.filter((i) => i.why !== '').length,
       invalid: items.filter((i) => i.kind === 'invalid').length,
       tagDiff: tagDiffs.length,
     },
-    newList: newItems.slice(0, 50).map((i) => ({ id: i.id, preview: preview(i.fields.内容), why: i.why, 时间: i.fields.时间 ?? '' })),
+    newList: newItems.slice(0, 50).map((i) => ({
+      id: i.id,
+      preview: preview(i.fields.内容),
+      why: i.why,
+      时间: i.fields.时间 ?? '',
+      ...(i.otherProject === null ? {} : { otherProject: i.otherProject }),
+    })),
+    duplicateOtherProjectList: dupOtherProject.slice(0, 50).map((i) => ({
+      id: i.id,
+      preview: preview(i.fields.内容),
+      项目: i.fields.项目 ?? '',
+      类型: i.fields.类型 ?? '',
+      local: i.otherProject,
+    })),
     invalidList: items.filter((i) => i.kind === 'invalid').slice(0, 50).map((i) => ({ id: i.id, why: i.why, preview: i.preview ?? '' })),
     tagDiffs: tagDiffs.slice(0, 50),
   }

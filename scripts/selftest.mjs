@@ -650,16 +650,29 @@ try {
   const contentIdx = local.header.indexOf('内容')
   const dupContent = local.rows[0][contentIdx]
   const foreign = join(sandbox, 'foreign-memory.csv')
+  // 外来行按**当前模板表头**逐列拼，别手写定长字面量：
+  // 模板加了 `类型` 列（17 列）以后，手写的 16 列会整体错位一格——
+  // 「项目」那格会落到「角色」上，判重按列名取就取不到。
+  const fRow = (o) => HEAD.map((c) => o[c] ?? '').join(',')
   writeFileSync(foreign, [
     header,
-    `M-20260101-001,${dupContent},2026-01-01,别处,重复用,备注,稳定,语义,常驻,selftest,通用,生效,,,,推断`,
-    'M-20260101-001,外来件甲（跟本地某条撞 id）,2026-01-02,别处,撞号用,备注,稳定,语义,常驻,别的机器,通用,生效,,,,推断',
-    'M-20990101-001,外来件乙,2026-01-03,别处,真新增,备注,稳定,语义,常驻,别的机器,通用,生效,,,,推断',
-    'M-20990101-002,外来件丙（必填缺项，不该进）,2026-01-04,,,,稳定,语义,常驻,别的机器,通用,生效,,,,',
+    // 与本地首条「内容 + 项目 + 类型」完全一致 → 真重复
+    fRow({ id: 'M-20260101-001', 内容: dupContent, 时间: '2026-01-01', 环境: '别处', 原因: '重复用', 备注: '备注', 稳定性: '稳定', 成熟度: '语义', 距离: '常驻', 角色: 'selftest', 项目: '通用', 状态: '生效', 依据: '推断', 类型: '记忆' }),
+    fRow({ id: 'M-20260101-001', 内容: '外来件甲（跟本地某条撞 id）', 时间: '2026-01-02', 环境: '别处', 原因: '撞号用', 备注: '备注', 稳定性: '稳定', 成熟度: '语义', 距离: '常驻', 角色: '别的机器', 项目: '通用', 状态: '生效', 依据: '推断', 类型: '记忆' }),
+    fRow({ id: 'M-20990101-001', 内容: '外来件乙', 时间: '2026-01-03', 环境: '别处', 原因: '真新增', 备注: '备注', 稳定性: '稳定', 成熟度: '语义', 距离: '常驻', 角色: '别的机器', 项目: '通用', 状态: '生效', 依据: '推断', 类型: '记忆' }),
+    fRow({ id: 'M-20990101-002', 内容: '外来件丙（必填缺项，不该进）', 时间: '2026-01-04', 稳定性: '稳定', 成熟度: '语义', 距离: '常驻', 角色: '别的机器', 项目: '通用', 状态: '生效', 类型: '记忆' }),
     '',
   ].join('\n'), 'utf8')
 
-  const dry = await post('/merge', { path: foreign })
+  // R-7：来源路径准入。`foreign` 建在沙箱根下、**不在备份目录里**，
+  // 所以不带 `confirmOutside` 时必须被拒——这是「记忆投毒」的那道闸。
+  const deniedOutside = await post('/merge', { path: foreign })
+  ok('R-7 合并来源不在备份目录 → 拒绝，且给出人话',
+    deniedOutside.json.ok === false && deniedOutside.json.code === 'SOURCE_OUTSIDE' &&
+    /备份目录/.test(String(deniedOutside.json.error)),
+    JSON.stringify(deniedOutside.json).slice(0, 200))
+
+  const dry = await post('/merge', { path: foreign, confirmOutside: true })
   ok('index POST /merge 预演：新增 2 / 重复跳过 1 / 撞号 1',
     dry.json.ok === true && dry.json.dryRun === true && dry.json.counts.new === 2 && dry.json.counts.duplicate === 1 && dry.json.counts.idCollision === 1,
     JSON.stringify(dry.json.counts))
@@ -670,7 +683,7 @@ try {
     JSON.stringify(dry.json.invalidList))
   ok('index POST /merge 预演不动库（一个字节都没写）', countRows() === beforeBackup)
 
-  const applied = await post('/merge', { path: foreign, apply: true })
+  const applied = await post('/merge', { path: foreign, apply: true, confirmOutside: true })
   ok('index POST /merge 真合并：追加 2 条 + 合并前留档 + 只追加不重写',
     applied.json.ok === true && applied.json.appended.length === 2 && applied.json.appended.every((a) => /^M-\d{8}-\d{3}$/.test(a.id)) && countRows() === beforeBackup + 2 && typeof applied.json.preBackup === 'string',
     JSON.stringify(applied.json.failed ?? applied.json))
@@ -678,7 +691,7 @@ try {
   ok('index POST /merge 没动原有行（前 N 行逐字节不变）',
     afterMerge.rows.slice(0, beforeBackup).every((r, i) => r.join('') === local.rows[i].join('')))
 
-  const merged = await post('/merge', { path: foreign })
+  const merged = await post('/merge', { path: foreign, confirmOutside: true })
   ok('index POST /merge 再合一次：全成重复，新增 0', merged.json.counts.new === 0 && merged.json.counts.duplicate === 3, JSON.stringify(merged.json.counts))
 
   dispose()
