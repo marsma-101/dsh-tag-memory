@@ -38,7 +38,16 @@ const HEAL_COOLDOWN_MS = 3000
 export function apply(ctx, config = {}) {
   // 数据目录：配置优先（`dataDir`，兼容旧名 `libraryDir`）；没配就是推断链
   // （环境变量 → 旧环境变量 → <DSH_HOME>/tag-memory）。空目录会当场按模板建库。
-  setDataDir(config.dataDir ?? config.libraryDir)
+  //
+  // **「没配」不再覆盖已配好的目录**（P0-1）：preset 行没配时，它 `apply()` 不再把
+  // 这里配好的目录重置回默认。两半配了不同的值 → `setDataDir` 当场抛，这里只**记一笔再抛**，
+  // 绝不吞掉：宁可装载期报错，也不要静默读写到另一本库上。
+  try {
+    setDataDir(config.dataDir ?? config.libraryDir, 'host 行')
+  } catch (e) {
+    try { ctx.logger?.error?.(`[tag-memory] ${String(e?.message ?? e)}`) } catch { /* logger 不可用则忽略 */ }
+    throw e
+  }
 
   const presetRoot =
     typeof config.presetRoot === 'string' && config.presetRoot.trim() !== ''
