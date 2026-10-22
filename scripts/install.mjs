@@ -463,7 +463,11 @@ report.push(
 
 const memoryFiles = detectMemoryFiles(PRESET_ROOT, { names: DEFAULT_MEMORY_FILE_NAMES })
 if (memoryFiles.length === 0) {
-  report.push(`PASS  记忆文件探测：${PRESET_ROOT} 下没有 ${DEFAULT_MEMORY_FILE_NAMES.join('/')}（没有就不管）`)
+  // **不能报 PASS**（问题单 P1-2）：一个都没探测到时，「托管」这个功能等于没跑。
+  // 报 PASS 会让人以为它正常，界面也会显示 `0/0 记忆文件已托管`。
+  report.push(`WARN  记忆文件探测：${PRESET_ROOT} 下没有 ${DEFAULT_MEMORY_FILE_NAMES.join('/')} —— 托管功能未生效`)
+  report.push('      修法：确认 DSH 的智能体根目录（0.2.x 默认 `~/.agents`，可用 DSH_AGENTS_HOME 覆盖），'
+    + '或在该目录下建一个智能体档案并在其中放 MEMORY.md；也可以 config.presetRoot 显式指定。')
 } else {
   report.push(`PASS  记忆文件探测：命中 ${memoryFiles.length} 个 → ${memoryFiles.map((f) => f.agent + '/' + f.file).join('、')}`)
 }

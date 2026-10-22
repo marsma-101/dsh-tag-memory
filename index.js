@@ -78,7 +78,8 @@ export function apply(ctx, config = {}) {
       try { backups = readdirSync(f.dir).filter((n) => n.startsWith(`${basename(f.file)}.bak-`)).length } catch { /* ignore */ }
       return { agent: f.agent, file: f.file, hasNotice, backups }
     })
-    return { enabled: noticeEnabled, presetRoot, names, files }
+    // 一个文件都没探测到时，界面要能说清「托管未生效」，而不是显示 0/0 装作正常。
+    return { enabled: noticeEnabled, presetRoot, names, files, none: files.length === 0 }
   }
 
   /**
@@ -213,6 +214,8 @@ export function apply(ctx, config = {}) {
         } catch (error) {
           const message = error?.message ? String(error.message) : String(error)
           ctx.logger?.warn?.(`tag-memory: ${message}`)
+          // 请求体超限 → 413（P2-4）。让客户端能显示「文件太大」，而不是「参数不全」。
+          if (error?.code === 'TOO_LARGE') return send(res, 413, { error: message, code: 'TOO_LARGE' })
           return send(res, 500, { error: message })
         }
       },
@@ -267,7 +270,11 @@ function overview(notice) {
   for (const dim of base.dimensions) {
     const i = resolve(dim.name)
     const counts = {}
-    if (i >= 0) for (const r of rows) { const v = r[i] || '（留白）'; counts[v] = (counts[v] || 0) + 1 }
+    // P2-1：留白的桶 key 必须用核心认的 `留白`（`matchKey` 里 `s === '留白'` 才判空值）。
+    // 原来写成 `（留白）`，界面上选它永远 0 命中——桶名和条件值不是一回事。
+    // P2-2：计数用 `filterRows(..., {})` 的口径（排除 被取代/已归档），与「生效条目」一致。
+    const liveRows = core.filterRows(schema, header, rows, {})
+    if (i >= 0) for (const r of liveRows) { const v = r[i] || '留白'; counts[v] = (counts[v] || 0) + 1 }
     base.byDimension[dim.name] = counts
   }
   return base
@@ -845,15 +852,32 @@ function send(res, status, obj) {
   } catch { /* 客户端已经走了 */ }
 }
 
-/** 读 POST 的 JSON 体。体坏了 / 超大 → 给个空对象，让上层按「参数不全」报错。 */
+/**
+ * 读 POST 的 JSON 体。
+ *
+ * P2-4：超大时**不能再静默变成 `{}`**——上层拿到空对象只会报「参数不全」，
+ * 用户看到的是「你填的东西没生效」，而不是「文件太大」。这里抛一个带
+ * `code: 'TOO_LARGE'` 的错误，由路由层翻成 413 + 人话。
+ * 体坏了仍给 `{}`（那是「参数不全」，语义正确）。
+ */
+const MAX_BODY_BYTES = 8 * 1024 * 1024
 function readBody(req) {
-  return new Promise((done) => {
+  return new Promise((done, fail) => {
     let raw = ''
+    let tooLarge = false
     req.on('data', (chunk) => {
+      if (tooLarge) return
       raw += chunk
-      if (raw.length > 8 * 1024 * 1024) { raw = ''; try { req.destroy() } catch { /* 已断 */ } }
+      if (raw.length > MAX_BODY_BYTES) {
+        tooLarge = true
+        raw = ''
+        const err = new Error(`请求体超过 ${Math.round(MAX_BODY_BYTES / 1024 / 1024)}MB 上限`)
+        err.code = 'TOO_LARGE'
+        fail(err)
+        try { req.destroy() } catch { /* 已断 */ }
+      }
     })
-    req.on('end', () => { try { done(raw.trim() === '' ? {} : JSON.parse(raw)) } catch { done({}) } })
-    req.on('error', () => done({}))
+    req.on('end', () => { if (!tooLarge) { try { done(raw.trim() === '' ? {} : JSON.parse(raw)) } catch { done({}) } } })
+    req.on('error', () => { if (!tooLarge) done({}) })
   })
 }
