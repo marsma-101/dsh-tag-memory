@@ -676,87 +676,16 @@ export function apply(ctx, config = {}) {
 }
 
 /**
- * 盘点四张清单（只读）。
+ * 盘点（薄壳）：判据全在 `core.reviewInventory`，这里只负责「读库 + 拿日志 + 调它」。
  *
- * 四张的判据：
- *   · 衰减候选：现算强度 < 0.1（**只是候选**，不自动归档）
- *   · 晋升候选：独立项目数 ≥ 3（**只是候选**，人工点头才升）
- *   · 原文-总结未配对：同项目同时间窗里，只有总结没有配套原文（备注里没有「配套：」也没被引用）
- *   · 缺口未补：`备注` 或 `关键词` 带「缺口」标记、且仍是生效状态的条目
+ * **不要**在这里另写一套判据——界面 `/review` 用的是同一个函数。
+ * 两份判据分叉的后果是「界面说该整理、工具说不用整理」，最难查。
  */
 function reviewInventory({ core, schema }) {
   const { header, rows } = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(schema))
-  const resolve = core.makeResolver(schema, header)
   const logMap = core.readReinforceLog(REINFORCE_LOG_PATH)
-  const now = new Date()
-  const live = core.filterRows(schema, header, rows, {})
-
-  const pick = (row, name) => { const i = resolve(name); return i >= 0 ? String(row[i] ?? '') : '' }
-  const fieldOf = (row) => {
-    const o = {}
-    for (const name of Object.keys({ ...schema.dimensions, ...schema.auxiliary })) o[name] = pick(row, name)
-    for (const col of ['内容', '时间', '环境', '原因', '备注']) o[col] = pick(row, col)
-    return o
-  }
-
-  const decay = []
-  const promote = []
-  const gaps = []
-  const brief = (o) => ({ id: o.id, 内容: String(o.内容 ?? '').split('\n')[0].slice(0, 42), 项目: o.项目, 时间: o.时间 })
-
-  for (const row of live) {
-    const f = fieldOf(row)
-    const merged = core.applyReinforceLog(f, (x, n) => x[n] ?? '', logMap.get(String(f.id ?? '').trim()))
-    const strength = core.currentStrength(merged, now)
-    if (strength < core.ARCHIVE_THRESHOLD) {
-      decay.push({ ...brief(f), 强度: Number(strength.toFixed(3)), 深度: f.深度, 距离: f.距离, 最后强化: merged.最后强化 })
-    }
-    if (core.isPromotionCandidate({ 已验证项目: merged.已验证项目 })) {
-      promote.push({ ...brief(f), 已验证项目: merged.已验证项目, 项目数: core.verifiedProjects({ 已验证项目: merged.已验证项目 }).length })
-    }
-    const note = String(f.备注 ?? '')
-    const kw = String(f.关键词 ?? '')
-    if ((note.includes('缺口') || kw.includes('缺口')) && String(f.状态 ?? '') === '生效') {
-      gaps.push(brief(f))
-    }
-  }
-
-  // 原文-总结未配对：按「项目 + 时间」分桶，只有总结没有原文的那些。
-  // 「原文」条的判据是 `类型=原文`；配套关系靠 `备注` 里的「配套：<id>」互指。
-  const paired = new Set()
-  const allRows = live.map(fieldOf)
-  for (const f of allRows) {
-    const m = String(f.备注 ?? '').match(/配套[：:]\s*([^\s,，;；|｜]+)/g) || []
-    for (const x of m) {
-      const id = x.replace(/^配套[：:]\s*/, '').trim()
-      if (id !== '') { paired.add(id); paired.add(String(f.id ?? '').trim()) }
-    }
-  }
-  const unpaired = []
-  for (const f of allRows) {
-    const id = String(f.id ?? '').trim()
-    const type = String(f.类型 ?? '').trim()
-    // 只看「总结」（类型=记忆）且没被任何原文配上的
-    if (type !== '记忆') continue
-    if (paired.has(id)) continue
-    if (String(f.关键词 ?? '').includes('缺口')) continue // 缺口条不参与配对（它是提醒，不是结论）
-    unpaired.push(brief(f))
-  }
-
-  return {
-    衰减候选: decay.sort((a, b) => a.强度 - b.强度),
-    晋升候选: promote.sort((a, b) => b.项目数 - a.项目数),
-    原文总结未配对: unpaired,
-    缺口未补: gaps,
-    统计: {
-      生效条目: live.length,
-      衰减候选: decay.length,
-      晋升候选: promote.length,
-      未配对: unpaired.length,
-      缺口: gaps.length,
-      日志条数: logMap.size,
-    },
-  }
+  const inv = core.reviewInventory({ schema, header, rows, logMap })
+  return { ...inv, 统计: { ...inv.统计, 日志条数: logMap.size } }
 }
 
 /** 把四张清单渲染成模型能读的文本（空清单也要出现，说明「这张是空的」）。 */

@@ -1194,69 +1194,13 @@ function reviewFrom() {
     const core = getCore()
     const schema = loadSchema()
     const { header, rows } = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(schema))
-    const resolve = core.makeResolver(schema, header)
     const logMap = core.readReinforceLog(REINFORCE_LOG_PATH)
-    const now = new Date()
-    const live = core.filterRows(schema, header, rows, {})
-
-    const pick = (row, name) => { const i = resolve(name); return i >= 0 ? String(row[i] ?? '') : '' }
-    const fieldOf = (row) => {
-      const o = {}
-      for (const name of Object.keys({ ...schema.dimensions, ...schema.auxiliary })) o[name] = pick(row, name)
-      for (const col of ['内容', '时间', '环境', '原因', '备注']) o[col] = pick(row, col)
-      return o
-    }
-    const brief = (o) => ({ id: o.id, 内容: String(o.内容 ?? '').split('\n')[0].slice(0, 42), 项目: o.项目, 时间: o.时间 })
-
-    const decay = []
-    const promote = []
-    const gaps = []
-    for (const row of live) {
-      const f = fieldOf(row)
-      const merged = core.applyReinforceLog(f, (x, n) => x[n] ?? '', logMap.get(String(f.id ?? '').trim()))
-      const strength = core.currentStrength(merged, now)
-      if (strength < core.ARCHIVE_THRESHOLD) {
-        decay.push({ ...brief(f), 强度: Number(strength.toFixed(3)), 深度: f.深度, 距离: f.距离, 最后强化: merged.最后强化 })
-      }
-      if (core.isPromotionCandidate({ 已验证项目: merged.已验证项目 })) {
-        promote.push({ ...brief(f), 已验证项目: merged.已验证项目, 项目数: core.verifiedProjects({ 已验证项目: merged.已验证项目 }).length })
-      }
-      const note = String(f.备注 ?? '')
-      const kw = String(f.关键词 ?? '')
-      if ((note.includes('缺口') || kw.includes('缺口')) && String(f.状态 ?? '') === '生效') gaps.push(brief(f))
-    }
-
-    const paired = new Set()
-    const all = live.map(fieldOf)
-    for (const f of all) {
-      const m = String(f.备注 ?? '').match(/配套[：:]\s*([^\s,，;；|｜]+)/g) || []
-      for (const x of m) {
-        const id = x.replace(/^配套[：:]\s*/, '').trim()
-        if (id !== '') { paired.add(id); paired.add(String(f.id ?? '').trim()) }
-      }
-    }
-    const unpaired = []
-    for (const f of all) {
-      const id = String(f.id ?? '').trim()
-      if (String(f.类型 ?? '').trim() !== '记忆') continue
-      if (paired.has(id)) continue
-      if (String(f.关键词 ?? '').includes('缺口')) continue
-      unpaired.push(brief(f))
-    }
-
+    // 判据全在 core.reviewInventory —— 与 `memory_review({类型:'盘点'})` 是同一个函数。
+    const inv = core.reviewInventory({ schema, header, rows, logMap })
     return {
       ok: true,
-      衰减候选: decay.sort((a, b) => a.强度 - b.强度),
-      晋升候选: promote.sort((a, b) => b.项目数 - a.项目数),
-      原文总结未配对: unpaired,
-      缺口未补: gaps,
-      统计: {
-        生效条目: live.length,
-        衰减候选: decay.length,
-        晋升候选: promote.length,
-        未配对: unpaired.length,
-        缺口: gaps.length,
-      },
+      ...inv,
+      统计: { ...inv.统计, 日志条数: logMap.size },
       snapshots: snapshotStatus(STORE_DIR),
     }
   } catch (e) {

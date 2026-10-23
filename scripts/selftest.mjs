@@ -2083,6 +2083,37 @@ try {
         Object.keys(j).join(','))
       ok('V3-08 盘点带统计口径（生效条目/各类计数）',
         j.统计 !== undefined && typeof j.统计.生效条目 === 'number')
+      // 光断「键存在」是弱断言：清单全空也能过。这里**真造一条超龄条目**，
+      // 钉住「判据真的跑了、候选真的算出来」。selftest 沙箱里的条目都是新的，
+      // 所以这条不依赖沙箱内容，而是自己在临时库里造。
+      {
+        const box = mkdtempSync(join(tmpdir(), 'tm-v3-rev-'))
+        const csv2 = join(box, 'memory.csv')
+        writeFileSync(csv2, readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv')))
+        const lock2 = join(box, '.lock')
+        const oldDay = '2024-01-01'
+        const oldId = core.appendEntry({ schema: schema0, csvPath: csv2, lockPath: lock2,
+          row: { 内容: '超龄条目', 时间: oldDay, 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '情景',
+            稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest' } })
+        const t2 = core.readTable(readFileSync(csv2, 'utf8'), core.legacyWidthOf(schema0))
+        const inv2 = core.reviewInventory({ schema: schema0, header: t2.header, rows: t2.rows })
+        ok('V3-08 衰减候选是**真算出来的**（造一条超龄条目 → 清单里真有它）',
+          inv2['衰减候选'].some((it) => it.id === oldId) && inv2['衰减候选'].every((it) => it.强度 < 0.1),
+          `候选 ${inv2['衰减候选'].length} 条`)
+        ok('V3-08 候选按强度升序（最该先处理的在前）',
+          inv2['衰减候选'].every((it, i, a) => i === 0 || a[i - 1].强度 <= it.强度))
+        // 变异锚点：把判据里的 `strength < ARCHIVE_THRESHOLD` 改坏，这条会红。
+        ok('V3-08 常驻条目**不进**衰减候选（豁免在盘点里也生效）',
+          (() => {
+            const id2 = core.appendEntry({ schema: schema0, csvPath: csv2, lockPath: lock2,
+              row: { 内容: '超龄但常驻', 时间: oldDay, 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '情景',
+                稳定性: '稳定', 距离: '常驻', 依据: '推断', 项目: '通用', 角色: 'selftest' } })
+            const t3 = core.readTable(readFileSync(csv2, 'utf8'), core.legacyWidthOf(schema0))
+            const inv3 = core.reviewInventory({ schema: schema0, header: t3.header, rows: t3.rows })
+            return !inv3['衰减候选'].some((it) => it.id === id2)
+          })())
+        rmSync(box, { recursive: true, force: true })
+      }
       ok('V3-08 盘点**只读**：跑完真库 sha256 不变', sha(store.CSV_PATH) === sha(store.CSV_PATH))
     }
 
