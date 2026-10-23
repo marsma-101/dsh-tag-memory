@@ -946,6 +946,41 @@ window.__ModuleLoader__.load({
 				return chips.length === 0 ? null : React.createElement('div', { className: 'tm-crumbs' }, chips)
 			}
 
+			/**
+			 * 取代 / 归档：两个「改库语义」的动作，走同一个口。
+			 *
+			 * 界面**不能直接改 CSV**——那会绕开校验、判重、写锁和写前快照。
+			 * 所以这里只做三件事：弹一句确认（改库是重操作，不能点错就生效）、
+			 * 调 API、把结果（含快照名）说给用户听。
+			 *
+			 * `act` 是 'supersede' | 'archive' | 'unarchive'。
+			 */
+			async function markEntry(act, id) {
+				if (id === '') return
+				const wording = act === 'supersede'
+					? `把 ${id} 标记为「被取代」？\n\n旧条不会被删、也不会被改，会追加一条新的顶上；操作前会自动留一份快照。`
+					: act === 'archive'
+						? `把 ${id} 归档？\n\n归档后默认不再出现在列表与召回里（勾「含已归档」能查回来）；操作前会自动留一份快照。`
+						: `把 ${id} 恢复成「生效」？`
+				try { if (typeof window !== 'undefined' && !window.confirm(wording)) return } catch { /* 没有 confirm 就直接做 */ }
+				setBusy(true)
+				try {
+					const url = act === 'supersede' ? `${API}/supersede` : `${API}/archive`
+					const body = act === 'supersede' ? { 目标id: id } : { 目标id: id, 状态: act === 'archive' ? '已归档' : '生效' }
+					const r = await postJSON(url, body)
+					if (r.ok !== true) {
+						setTip(`${act === 'supersede' ? '取代' : '归档'}没成功：${r.error ?? '未知原因'}`)
+						return
+					}
+					if (act === 'supersede') setTip(`已取代 ${id} → ${r.id}（快照 ${r.snapshot ?? '—'}）`)
+					else setTip(`${act === 'archive' ? '已归档' : '已恢复'} ${id}（快照 ${r.snapshot ?? '—'}）`)
+					// 刷新列表：`reloadKey` +1 会让上面那个取数 effect 重跑（与筛选/排序同一套机制）。
+					setReloadKey((k) => k + 1)
+				} catch (e) {
+					setTip(`请求失败：${String(e?.message ?? e)}`)
+				} finally { setBusy(false) }
+			}
+
 			/** 翻转一个 {id: true} 形态的开关表（详情展开 / 正文展开）。 */
 			function toggleFlag(setter, key) {
 				setter((prev) => ({ ...prev, [key]: prev[key] !== true }))
@@ -984,6 +1019,8 @@ window.__ModuleLoader__.load({
 			/** 一条记忆：正文过长可折叠，点「详情」就地展开全部非空字段。 */
 			function renderItem(row, index) {
 				const id = row.id || String(index)
+				// 状态决定给哪几颗按钮（生效→取代/归档；已归档→恢复生效）
+				const status = row.状态 || ''
 				const content = row.内容 || '（无内容）'
 				const isLong = content.length > CONTENT_CLIP
 				const showFull = fullText[id] === true
@@ -1037,6 +1074,26 @@ window.__ModuleLoader__.load({
 							{ type: 'button', className: 'tm-link', onClick: () => copyOne(row) },
 							'复制',
 						),
+						// 取代 / 归档：改库语义的动作，走 API（不直接碰 CSV）。
+						// 只在**生效**的条目上给按钮——已退场的条目再点「取代」只会拿到一句拒绝。
+						status === '生效'
+							? React.createElement(
+								'button',
+								{ type: 'button', className: 'tm-link', onClick: () => markEntry('supersede', row.id), disabled: busy },
+								'标记被取代',
+							)
+							: null,
+						status === '已归档'
+							? React.createElement(
+								'button',
+								{ type: 'button', className: 'tm-link', onClick: () => markEntry('unarchive', row.id), disabled: busy },
+								'恢复生效',
+							)
+							: React.createElement(
+								'button',
+								{ type: 'button', className: 'tm-link', onClick: () => markEntry('archive', row.id), disabled: busy },
+								'归档',
+							),
 					),
 					open ? renderDetail(row) : null,
 				)
@@ -1138,6 +1195,25 @@ window.__ModuleLoader__.load({
 									{ type: 'button', className: 'tm-link', onClick: () => copyOne(row) },
 									'复制',
 								),
+								// 取代 / 归档（与卡片视图同一套：只对生效条目给「取代」）
+								(row.状态 || '') === '生效'
+									? React.createElement(
+										'button',
+										{ type: 'button', className: 'tm-link', onClick: () => markEntry('supersede', id), disabled: busy },
+										'标记被取代',
+									)
+									: null,
+								(row.状态 || '') === '已归档'
+									? React.createElement(
+										'button',
+										{ type: 'button', className: 'tm-link', onClick: () => markEntry('unarchive', id), disabled: busy },
+										'恢复生效',
+									)
+									: React.createElement(
+										'button',
+										{ type: 'button', className: 'tm-link', onClick: () => markEntry('archive', id), disabled: busy },
+										'归档',
+									),
 							),
 						)
 						if (!open) return [main]

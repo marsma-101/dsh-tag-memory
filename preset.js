@@ -34,6 +34,7 @@ import {
   CSV_PATH,
   DATA_DIR,
   LOCK_PATH,
+  STORE_DIR,
   cwdOf,
   getCore,
   loadSchema,
@@ -43,6 +44,7 @@ import {
   setDataDir,
 } from './lib/store.mjs'
 import { PresetConfig } from './lib/config.mjs'
+import { snapshotOrThrow } from './lib/engine/snapshot.mjs'
 
 export const name = 'tag-memory-preset'
 /** Preset 行配置 schema：加载期校验 + 设置页表单描述。 */
@@ -152,7 +154,7 @@ function snapshotText(config, project) {
   let schema, header, rows
   try {
     schema = loadSchema()
-    const t = core.readTable(readFileSync(CSV_PATH, 'utf8'))
+    const t = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(schema))
     header = t.header ?? []
     rows = t.rows ?? []
   } catch { return '' }
@@ -160,8 +162,11 @@ function snapshotText(config, project) {
   const resolve = core.makeResolver(schema, header)
   const get = (row, name) => { const i = resolve(name); return i >= 0 ? String(row[i] ?? '') : '' }
 
+  // 读侧反查：旧行状态还是「生效」，但新行备注写了「取代：旧id」→ 快照里也不该出现。
+  // 漏了这一处，就会出现「快照里没有、recall 查得到」或者反过来——最坑的那种不一致。
+  const deadIds = core.supersededIds(header, rows)
   const live = rows
-    .filter((r) => !['被取代', '已归档'].includes(get(r, '状态')))
+    .filter((r) => !['被取代', '已归档'].includes(get(r, '状态')) && !deadIds.has(get(r, 'id').trim()))
     .map((r) => ({ row: r, id: get(r, 'id') }))
   if (live.length === 0) return ''
 
@@ -261,13 +266,21 @@ function renderHits(core, schema, header, hits, { take, full }) {
   return out.join('\n')
 }
 
-/** 全文兜底搜：任一单元格含关键词即命中（排除 被取代/已归档）。 */
+/**
+ * 全文兜底搜：任一单元格含关键词即命中（排除 被取代/已归档）。
+ *
+ * 反查也在这儿：关键词兜底是**独立的一条读路径**（不经过 `filterRows`），
+ * 漏了它就会出现「按条件筛不到，但关键词能搜出来」——旧条从侧门漏进结果。
+ */
 function keywordSearch(schema, header, rows, kw) {
   const idx = (c) => header.indexOf(c)
   const statusIdx = idx('状态')
+  const idIdx = idx('id')
   const needle = kw.toLowerCase()
+  const deadIds = getCore().supersededIds(header, rows)
   return rows.filter((r) => {
     if (statusIdx >= 0) { const s = r[statusIdx] || ''; if (s === '被取代' || s === '已归档') return false }
+    if (idIdx >= 0 && deadIds.has(String(r[idIdx] ?? '').trim())) return false
     return r.some((c) => String(c).toLowerCase().includes(needle))
   })
 }
@@ -435,7 +448,7 @@ export function apply(ctx, config = {}) {
         // 关键词兜底：命中少于取几条时，合并全文搜结果
         if (kw !== '' && hits.length < take) {
           try {
-            const { header: h2, rows: all } = core.readTable(readFileSync(CSV_PATH, 'utf8'))
+            const { header: h2, rows: all } = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(s))
             const extra = keywordSearch(s, h2, all, kw).filter((r) => !hits.some((x) => x[h2.indexOf('id')] === r[h2.indexOf('id')]))
             if (extra.length) {
               hits = hits.concat(extra)
@@ -449,6 +462,74 @@ export function apply(ctx, config = {}) {
         }
         const body = renderHits(core, s, header, hits, { take: args.全部 === true ? hits.length : take, full })
         return note === '' ? body : note + '\n' + body
+      },
+    }),
+  )
+
+  // ④ 取代（只追加，永不改旧行）
+  ctx.tools.register(
+    defineTool({
+      name: 'memory_supersede',
+      description: [
+        '让一条旧记忆退场，换一条新的顶上（**旧行一个字节都不改**，只追加新行）。',
+        '什么时候用：用户纠正了你（「不对，应该是 X」）、事实变了、规矩更新了——这条记忆还在库里但已经不成立。',
+        '**必须先点名 `目标id`**：不点名不改，也不猜「大概是哪条」——先用 memory_recall 查准 id。',
+        '不传的字段**沿用旧条**（环境/原因/项目/角色这些通常不用重填），只传真正变了的那几项。',
+        '写进去的新行 `备注` 会自动带「取代：<旧id>」，读取层据此让旧条退场；旧条的 `状态` 列仍是原值，这是设计，不是没生效。',
+        '**不要**为了「改一条记忆」去动 CSV 文件——那会把判重、写锁、校验全绕过去。改记忆只有这一个工具。',
+      ].join(' '),
+      parameters: {
+        目标id: { type: 'string', required: true, description: '要取代的旧条 id（形如 M-20261024-001），必须先在库里查准。' },
+        内容: { type: 'string', description: '新的内容（一句话结论，可多行）。不填则沿用旧条。' },
+        环境: { type: 'string', description: '新的适用条件。不填沿用旧条。' },
+        原因: { type: 'string', description: '新的记忆理由。不填沿用旧条。' },
+        类型: { type: 'string', description: "'原文' | '记忆' | '固定'。不填沿用旧条。" },
+        深度: { type: 'string', description: "'情景' | '语义' | '程序'。仅 类型=记忆 时填。" },
+        稳定性: { type: 'string', description: "'稳定' | '观察' | '易变'。" },
+        距离: { type: 'string', description: "'常驻' | '按需' | '深藏'。" },
+        依据: { type: 'string', description: "'原话' | '推断' | '外部'。用户纠正的写「原话」。" },
+        项目: { type: 'string', description: '默认沿用旧条。' },
+        角色: { type: 'string', description: '默认沿用旧条。' },
+        关键词: { type: 'string', description: '兜底检索用，逗号分隔。不填沿用旧条。' },
+        备注: { type: 'string', description: '「取代：<旧id>」会自动接在你的备注后面，不用自己写。' },
+        时间: { type: 'string', description: 'YYYY-MM-DD；默认今天（取代就是「今天更新的」）。' },
+      },
+      output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
+      async execute(args, exec) {
+        if (!ready()) return degradedNotice()
+        const core = getCore()
+        const s = loadSchema()
+        const agent = exec?.agent
+        const targetId = String(args.目标id ?? '').trim()
+
+        // 改库语义之前先留档（S-防-2）。留档失败就不许动库——「有档可回」这句承诺不能作废。
+        let snap
+        try {
+          snap = snapshotOrThrow({ storeDir: STORE_DIR, csvPath: CSV_PATH, label: `取代 ${targetId}` }, '取代')
+        } catch (e) {
+          throw new Error(String(e?.message ?? e))
+        }
+
+        const row = {}
+        for (const k of ['内容', '环境', '原因', '类型', '深度', '稳定性', '距离', '依据', '项目', '角色', '关键词', '备注', '时间']) {
+          const v = String(args[k] ?? '').trim()
+          if (v !== '') row[k] = v
+        }
+        // 用户没给项目时沿用旧条；给了就用给的（跨项目取代是正常的）
+        if (row.角色 === undefined) {
+          const agentId = resolveAgentId(config, agent)
+          if (agentId) row.角色 = agentId
+        }
+
+        let r
+        try {
+          r = core.supersedeEntry({ schema: s, csvPath: CSV_PATH, lockPath: LOCK_PATH, targetId, row })
+        } catch (e) {
+          throw new Error(`未取代：${String(e?.message ?? e)}`)
+        }
+        if (!r.ok) throw new Error(`未取代：${r.error}`)
+        // 明确终态（学 mnemon §3.2）：成功回执带 id + 版本 + 快照，失败一律抛异常。
+        return `✓ 已取代：${r.targetId} → ${r.id}（${r.version}）｜旧行未改动，读取层已让它退场｜快照 ${snap.name}`
       },
     }),
   )

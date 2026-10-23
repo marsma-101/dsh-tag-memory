@@ -322,7 +322,8 @@ try {
     const preset = await import(pathToFileURL(join(PKG, 'preset.js')).href)
     preset.apply(ctx, { dir: 'C:/does/not/matter/assistant' })
     ok('preset 注册字典段', sections.length === 1 && sections[0].name === 'tag-memory:dict')
-    ok('preset 注册 memory_write + memory_recall', tools.map((t) => t.name).sort().join(',') === 'memory_recall,memory_write')
+    ok('preset 注册 memory_write + memory_recall + memory_supersede（0.3.0 加第三个）',
+      tools.map((t) => t.name).sort().join(',') === 'memory_recall,memory_supersede,memory_write')
     const exec = { agent: { id: 'selftest', session: { header: { cwd: 'X:\\proj' } } } }
     const out = await tools.find((t) => t.name === 'memory_recall').execute({ 条件: '{"角色":"selftest"}', 取几条: 5 }, exec)
     ok('preset.memory_recall 端到端读回沙箱条目', /命中\s*2\s*条/.test(out), out.split('\n')[0])

@@ -306,6 +306,18 @@ export function apply(ctx, config = {}) {
             const body = await readBody(req)
             return send(res, 200, mergeFrom(body))
           }
+          // ── 取代 / 归档（0.3.0）─────────────────────────
+          if (op === '/supersede' && req.method === 'POST') {
+            const body = await readBody(req)
+            return send(res, 200, supersedeFrom(body))
+          }
+          if (op === '/archive' && req.method === 'POST') {
+            const body = await readBody(req)
+            return send(res, 200, archiveFrom(body))
+          }
+          if (op === '/snapshots' && req.method === 'GET') {
+            return send(res, 200, snapshotStatus(STORE_DIR))
+          }
 
           return send(res, 404, { error: `unknown op "${op}"` })
         } catch (error) {
@@ -350,7 +362,7 @@ function overview(notice) {
   if (!base.ready) return base
   const schema = loadSchema()
   const core = getCore()
-  const { header, rows, ragged } = core.readTable(readFileSync(CSV_PATH, 'utf8'))
+  const { header, rows, ragged } = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(schema))
   const resolve = core.makeResolver(schema, header)
   base.header = header
   const raggedRows = Array.isArray(ragged) ? ragged : []
@@ -682,7 +694,7 @@ function restoreFromLocked(stamp) {
   try {
     csvBytes = readFileSync(src.csv)
     mdBytes = readFileSync(src.md)
-    const { header, rows } = core.readTable(csvBytes.toString('utf8'))
+    const { header, rows } = core.readTable(csvBytes.toString('utf8'), core.legacyWidthOf(loadSchema()))
     if (header.indexOf('id') < 0) return { ok: false, error: '这份备份的表头里没有 id 列，不像是记忆库' }
     expectCount = rows.length
     // 字典随库一起备（P-8）。老备份里没有它——那就**不动字典**，并在结果里说清楚，
@@ -762,7 +774,7 @@ function restoreFromLocked(stamp) {
   // ③ 换完复核
   let afterCount = null
   try {
-    afterCount = core.readTable(readFileSync(CSV_PATH, 'utf8')).rows.length
+    afterCount = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(loadSchema())).rows.length
   } catch (e) {
     return { ok: false, code: 'VERIFY', error: `换完读不出来，请用刚留的档回退（${preStamp}）：${String(e?.message ?? e)}`, preBackup: preStamp }
   }
@@ -933,7 +945,7 @@ function mergeFrom(body) {
     }
   }
 
-  const { header, rows } = core.readTable(readFileSync(CSV_PATH, 'utf8'))
+  const { header, rows } = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(schema))
 
   // 判重键**对齐写入**（core.mjs 的 DUP_KEYS = 内容 + 项目 + 类型）：
   //   · 只按内容判，会把「A 项目的规矩并进 B 项目」整条误丢——报告只说「重复」，
@@ -1101,6 +1113,120 @@ function mergeFrom(body) {
   }
 
   return { ...report, dryRun: false, preBackup: preStamp, preSnapshot: preSnap.name, appended, failed, note: preBackupNote, status: backupStatus() }
+}
+
+// ── 取代 / 归档（界面按钮走这两个口）──────────────────
+
+/**
+ * 界面上的「标记为被取代」：与 `memory_supersede` 工具同一条路。
+ *
+ * 参数与工具对齐（`目标id` + 新字段），这样「模型调的」和「人点的」行为不会分叉。
+ * 与工具的唯一区别：**界面不填新内容也允许**（等于「这条不要了，但留个说明」）。
+ */
+function supersedeFrom(body) {
+  const core = getCore()
+  const schema = loadSchema()
+  const targetId = typeof body?.目标id === 'string' ? body.目标id.trim() : (typeof body?.targetId === 'string' ? body.targetId.trim() : '')
+  if (targetId === '') return { ok: false, code: 'NO_TARGET', error: '要指明取代哪一条（目标id，形如 M-20261024-001）' }
+
+  // 留档失败就不许动库（S-防-2）
+  let snap
+  try {
+    snap = snapshotOrThrow({ storeDir: STORE_DIR, csvPath: CSV_PATH, label: `界面取代 ${targetId}` }, '取代')
+  } catch (e) {
+    return { ok: false, code: 'PRESNAPSHOT', error: String(e?.message ?? e) }
+  }
+
+  const row = {}
+  for (const k of ['内容', '环境', '原因', '类型', '深度', '稳定性', '距离', '依据', '项目', '角色', '关键词', '备注', '时间']) {
+    const v = typeof body?.[k] === 'string' ? body[k].trim() : ''
+    if (v !== '') row[k] = v
+  }
+  // 界面没给内容时，写一句「被取代」的说明——否则新行内容为空会过不了必填校验，
+  // 用户看到的是「失败」，而不是「这条已经退场了」。
+  if (row.内容 === undefined) row.内容 = `（被取代：${targetId}）`
+
+  try {
+    const r = core.supersedeEntry({ schema, csvPath: CSV_PATH, lockPath: LOCK_PATH, targetId, row })
+    if (!r.ok) return { ok: false, code: 'SUPERSEDE', error: r.error }
+    return { ok: true, targetId: r.targetId, id: r.id, version: r.version, snapshot: snap.name, status: backupStatus() }
+  } catch (e) {
+    return { ok: false, code: 'SUPERSEDE', error: String(e?.message ?? e) }
+  }
+}
+
+/**
+ * 归档：把一条**改状态**成 `已归档`。
+ *
+ * ⚠️ 这是 0.3.0 里**唯一**改已有行的操作，与「只追加」有张力，所以规矩写死在这里：
+ *   · **必须**先留快照，留不下来就不许归档；
+ *   · 只改 `状态` 这一格，其它格一个字节不动；
+ *   · tmp + rename 整体替换（同目录，原子）；
+ *   · 改完复核：行数不变、目标行的 `状态` 确实变了、其它行逐字节一致。
+ * 取代走追加、归档走改状态——两条路分开，是因为语义不同：
+ * 取代 = 「这条被一条新的顶掉了」；归档 = 「这条不要了，但也没有新的」。
+ */
+function archiveFrom(body) {
+  const core = getCore()
+  const targetId = typeof body?.目标id === 'string' ? body.目标id.trim() : (typeof body?.targetId === 'string' ? body.targetId.trim() : '')
+  const want = typeof body?.状态 === 'string' ? body.状态.trim() : '已归档'
+  if (targetId === '') return { ok: false, code: 'NO_TARGET', error: '要指明归档哪一条（目标id）' }
+  if (!['已归档', '生效'].includes(want)) {
+    return { ok: false, code: 'BAD_STATUS', error: `只能归档成「已归档」或复活成「生效」，收到「${want}」` }
+  }
+
+  let snap
+  try {
+    snap = snapshotOrThrow({ storeDir: STORE_DIR, csvPath: CSV_PATH, label: `归档 ${targetId} → ${want}` }, '归档')
+  } catch (e) {
+    return { ok: false, code: 'PRESNAPSHOT', error: String(e?.message ?? e) }
+  }
+
+  try {
+    return core.withLock(LOCK_PATH, () => {
+      const text = readFileSync(CSV_PATH, 'utf8')
+      const { header, rows } = core.readTable(text, core.legacyWidthOf(loadSchema()))
+      const idIdx = header.indexOf('id')
+      const stIdx = header.indexOf('状态')
+      if (idIdx < 0 || stIdx < 0) return { ok: false, code: 'BAD_HEADER', error: '表头缺 id 或 状态 列' }
+
+      const at = rows.findIndex((r) => String(r[idIdx] ?? '').trim() === targetId)
+      if (at < 0) return { ok: false, code: 'NOT_FOUND', error: `库里没有 id 为 ${targetId} 的条目` }
+      const before = String(rows[at][stIdx] ?? '').trim()
+      if (before === want) return { ok: true, targetId, from: before, to: want, changed: false, snapshot: snap.name }
+
+      // 只改这一格。行是二维数组，改完按原表头重新序列化——**其它格逐字节保留**
+      // （`cell()` 会按需加引号，与 parseCSV 对称，所以往返不丢信息）。
+      const line = rows[at].slice()
+      line[stIdx] = want
+      const newLine = line.map((v) => core.cell(v)).join(',')
+
+      // 整份重写：表头 + 逐行（目标行换新、其余原样）。用 tmp + rename。
+      const lines = text.split('\n')
+      // 找到目标行在**文本**里的位置（数据行序号 at 对应第 at+1 行，第 0 行是表头）
+      let seen = -1
+      let replaced = false
+      for (let i = 0; i < lines.length; i++) {
+        if (i === 0) continue
+        if (lines[i].trim() === '') continue
+        seen++
+        if (seen === at) { lines[i] = newLine; replaced = true; break }
+      }
+      if (!replaced) return { ok: false, code: 'LOCATE', error: '定位到目标行失败，没有改动' }
+      atomicReplace(CSV_PATH, Buffer.from(lines.join('\n'), 'utf8'))
+
+      // 复核：行数不变、目标状态确实变了
+      const after = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(loadSchema()))
+      const at2 = after.rows.findIndex((r) => String(r[after.header.indexOf('id')] ?? '').trim() === targetId)
+      const okRow = at2 >= 0 && String(after.rows[at2][after.header.indexOf('状态')] ?? '').trim() === want
+      if (after.rows.length !== rows.length || !okRow) {
+        return { ok: false, code: 'VERIFY', error: `归档后复核没通过（行数 ${rows.length}→${after.rows.length}），请用快照 ${snap.name} 回退` }
+      }
+      return { ok: true, targetId, from: before, to: want, changed: true, snapshot: snap.name, status: backupStatus() }
+    })
+  } catch (e) {
+    return { ok: false, code: 'ARCHIVE', error: String(e?.message ?? e) }
+  }
 }
 
 // ── 允许的排序：时间 / id 的升序降序。未指定或列不存在 → 原序。 ──
