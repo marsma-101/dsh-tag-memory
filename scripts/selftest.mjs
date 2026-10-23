@@ -1549,6 +1549,326 @@ try {
       r5.stdout.includes('记忆库不在') && r5.stdout.includes('SELFTEST SKIPPED') && r5.stdout.includes('跳过不等于通过'))
   }
 
+  // ── M. V1 数据模型迁移 + 取代闭环（0.3.0）──────────────────────────
+  //     阿验规划 V1-01~V1-06。每条都钉「对外可观察的结果」，不钉内部函数名。
+  try {
+    const core = store.getCore()
+    const schema0 = store.loadSchema()
+    const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex')
+
+    // M-1（V1-01）老库（17 列、无新列）读出来补默认值，且文件不被重写
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v1-'))
+      const legacy = join(box, 'legacy.csv')
+      // 造一份 17 列老库：表头与 0.2.x 一致，没有 0.3.0 的 4 列
+      const oldHeader = 'id,内容,时间,环境,原因,备注,稳定性,成熟度,距离,角色,项目,状态,关键词,工具,版本,依据,类型'
+      writeFileSync(legacy, oldHeader + '\n'
+        + 'M-20260101-001,老条目一,2026-01-01,env,r,,稳定,语义,按需,角色,通用,生效,,,v1,推断,记忆\n'
+        + 'M-20260102-001,老条目二,2026-01-02,env2,r2,,稳定,程序,常驻,角色,通用,生效,,,v1,原话,记忆\n', 'utf8')
+      const sha0 = sha(legacy)
+      const t = core.readTable(readFileSync(legacy, 'utf8'), core.legacyWidthOf(schema0))
+      const resolve = core.makeResolver(schema0, t.header)
+      const base = (row, name) => { const i = resolve(name); return i >= 0 ? String(row[i] ?? '') : '' }
+      const get = core.withColumnDefaults(t.header, base)
+      const r0 = t.rows[0]
+      ok('V1-01 老库（17 列）读出来补默认值：强度=1 / 最后强化=该行时间 / 已验证项目空 / 使用次数=0',
+        get(r0, '强度') === '1' && get(r0, '最后强化') === '2026-01-01'
+        && get(r0, '已验证项目') === '' && get(r0, '使用次数') === '0',
+        JSON.stringify({ s: get(r0, '强度'), t: get(r0, '最后强化'), v: get(r0, '已验证项目'), n: get(r0, '使用次数') }))
+      ok('V1-01 最后强化跟的是**各行自己的时间**（不是常量「今天」）',
+        get(t.rows[1], '最后强化') === '2026-01-02')
+      ok('V1-01 读完之后老库文件 sha256 一个字节没变（只读迁移，不回写）', sha(legacy) === sha0)
+      ok('V1-01 老字段照旧可读（内容/状态没被默认值顶掉）',
+        base(r0, '内容') === '老条目一' && base(r0, '状态') === '生效')
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // M-2（V1-02）新库写第一条起带全列；表头就是 21 列
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v1-'))
+      const csv = join(box, 'memory.csv')
+      writeFileSync(csv, readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv')))
+      const tplHeader = readFileSync(csv, 'utf8').split('\n')[0]
+      ok('V1-02 出厂模板表头已经是 21 列（含 4 个新列）',
+        tplHeader.split(',').length === 21 && core.NEW_COLUMNS.every((c) => tplHeader.includes(c)),
+        String(tplHeader.split(',').length))
+      const id = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: join(box, '.lock'),
+        row: { 内容: '新库第一条', 时间: '2026-10-24', 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+          稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest' } })
+      const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      const last = t.rows[t.rows.length - 1]
+      // 4 个新列里，`已验证项目` 的**默认值本来就是空**（还没在任何项目验证过），
+      // 所以这里不能要求「4 列全都非空」——那是把「有默认值」误当成「非空」。
+      // 真正该钉的是：格数是 21、且**该有值的三列有值**、已验证项目是空串（不是 undefined/缺格）。
+      ok('V1-02 新写入的行就是 21 格（新列不是缺格，也不是 undefined）',
+        last.length === 21 && t.header.slice(17).join(',') === core.NEW_COLUMNS.join(','),
+        `格数=${last.length}`)
+      ok('V1-02 新行三列有默认值（强度=1 / 最后强化=今天 / 使用次数=0）',
+        String(last[t.header.indexOf('强度')]).trim() === '1'
+        && String(last[t.header.indexOf('最后强化')]).trim() === '2026-10-24'
+        && String(last[t.header.indexOf('使用次数')]).trim() === '0',
+        JSON.stringify(core.NEW_COLUMNS.map((c) => String(last[t.header.indexOf(c)]))))
+      ok('V1-02 新行「已验证项目」是空串（还没在项目里验证过，这是对的）',
+        String(last[t.header.indexOf('已验证项目')] ?? '') === '')
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // M-3（V1-03）memory_supersede：旧条不动、新条带「取代：旧id」、旧条退场
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v1-'))
+      const csv = join(box, 'memory.csv')
+      writeFileSync(csv, readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv')))
+      const lock = join(box, '.lock')
+      const mk = (content) => core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: { 内容: content, 时间: '2026-10-01', 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+          稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest' } })
+      const oldId = mk('旧结论')
+      const otherId = mk('无关条目')
+      const beforeLines = readFileSync(csv, 'utf8').split('\n')
+      const r = core.supersedeEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: oldId,
+        row: { 内容: '新结论', 依据: '原话' } })
+      const afterLines = readFileSync(csv, 'utf8').split('\n')
+      ok('V1-03 取代成功并返回新 id 与进位版本', r.ok === true && r.id !== '' && r.version === 'v2', JSON.stringify(r))
+      ok('V1-03 旧行**逐字节没变**（追加式，不改旧行）', beforeLines[1] === afterLines[1])
+      const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      const noteIdx = t.header.indexOf('备注')
+      const newRow = t.rows.find((x) => x[t.header.indexOf('id')] === r.id)
+      ok('V1-03 新行备注写着「取代：<旧id>」', String(newRow[noteIdx] ?? '').includes(`取代：${oldId}`))
+      const hits = core.filterRows(schema0, t.header, t.rows, {})
+      ok('V1-03 旧条默认退场（读侧反查），新条与无关条还在',
+        !hits.some((x) => x[0] === oldId) && hits.some((x) => x[0] === r.id) && hits.some((x) => x[0] === otherId),
+        hits.map((x) => x[0]).join(','))
+      ok('V1-03 旧条 `状态` 仍是原值（方案 a：不改旧行）',
+        String(t.rows.find((x) => x[0] === oldId)[t.header.indexOf('状态')]) === '生效')
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // M-4（V1-04）目标不存在 / 已非生效 → 拒绝且不落笔
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v1-'))
+      const csv = join(box, 'memory.csv')
+      writeFileSync(csv, readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv')))
+      const lock = join(box, '.lock')
+      const id = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: { 内容: '要被取代的', 时间: '2026-10-01', 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+          稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest' } })
+      const rowsBefore = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0)).rows.length
+      const r1 = core.supersedeEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: 'M-29991231-999', row: { 内容: 'x' } })
+      ok('V1-04 目标 id 不存在 → 拒绝，且说清「库里没有这个 id」',
+        r1.ok === false && /没有 id 为/.test(r1.error), r1.error.slice(0, 40))
+      ok('V1-04 目标不存在时 CSV 条数不变（不落笔）',
+        core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0)).rows.length === rowsBefore)
+      // 先真的取代一次，再拿同一个旧 id 取代 → 应报「已经被取代过」
+      core.supersedeEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: id, row: { 内容: '顶上的那条' } })
+      const r2 = core.supersedeEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: id, row: { 内容: 'y' } })
+      ok('V1-04 目标已被取代 → 拒绝，并指出取代它的是哪条',
+        r2.ok === false && /已经被取代过/.test(r2.error), r2.error.slice(0, 50))
+      const r3 = core.supersedeEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: '', row: { 内容: 'z' } })
+      ok('V1-04 不点名目标 id → 拒绝（改旧必点名）', r3.ok === false && /必须点名/.test(r3.error))
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // M-5（V1-05）取代关系反查：从新条能反查到旧条
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v1-'))
+      const csv = join(box, 'memory.csv')
+      writeFileSync(csv, readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv')))
+      const lock = join(box, '.lock')
+      const oldId = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: { 内容: '旧的', 时间: '2026-10-01', 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+          稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest' } })
+      const r = core.supersedeEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: oldId, row: { 内容: '新的' } })
+      const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      const dead = core.supersededIds(t.header, t.rows)
+      ok('V1-05 反查集合里有旧 id（旧→新成对可追）', dead.has(oldId))
+      ok('V1-05 新行的备注能解析出它取代了谁',
+        core.supersedesOf(t.rows.find((x) => x[0] === r.id)[t.header.indexOf('备注')]).includes(oldId))
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // M-6（V1-06）「含归档可见」：默认排除，显式查才出
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v1-'))
+      const csv = join(box, 'memory.csv')
+      writeFileSync(csv, readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv')))
+      const lock = join(box, '.lock')
+      const mk = (content, status) => core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: { 内容: content, 时间: '2026-10-01', 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+          稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest', 状态: status } })
+      const liveId = mk('生效的', '生效')
+      const archId = mk('归档的', '已归档')
+      const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      const def = core.filterRows(schema0, t.header, t.rows, {})
+      ok('V1-06 已归档条目默认不进召回', def.some((x) => x[0] === liveId) && !def.some((x) => x[0] === archId))
+      const exp = core.filterRows(schema0, t.header, t.rows, { 状态: ['已归档'] })
+      ok('V1-06 显式筛 `状态=已归档` 能查回来', exp.some((x) => x[0] === archId))
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // M-7 表头迁移（迁移的「写侧」另一半：不升表头就写不进新列）
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v1-'))
+      const csv = join(box, 'memory.csv')
+      const oldHeader = 'id,内容,时间,环境,原因,备注,稳定性,成熟度,距离,角色,项目,状态,关键词,工具,版本,依据,类型'
+      writeFileSync(csv, oldHeader + '\nM-20260101-001,老条目,2026-01-01,e,r,,稳定,语义,按需,角色,通用,生效,,,v1,推断,记忆\n')
+      const lock = join(box, '.lock')
+      const before = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      ok('M-7 迁移前：能读（末尾缺列容忍），但表头缺 4 列',
+        before.ragged.length === 0 && core.headerMigrationNeeded(schema0, before.header).needed === true)
+      const mig = core.migrateHeader({ schema: schema0, csvPath: csv, lockPath: lock })
+      ok('M-7 迁移：表头 17→21 列', mig.ok === true && mig.changed === true && mig.before === 17 && mig.after === 21, JSON.stringify(mig))
+      const afterLines = readFileSync(csv, 'utf8').split('\n')
+      ok('M-7 迁移只换表头，数据行逐字节不动', afterLines[1] === 'M-20260101-001,老条目,2026-01-01,e,r,,稳定,语义,按需,角色,通用,生效,,,v1,推断,记忆')
+      const mig2 = core.migrateHeader({ schema: schema0, csvPath: csv, lockPath: lock })
+      ok('M-7 迁移幂等：再迁一次不改动', mig2.changed === false)
+      // 迁移后老行仍能读、且新列拿到默认值
+      const t2 = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      // 迁移后表头 21 列、老行仍是 17 格 → 靠 legacyWidth 认成「末尾缺列的老行」。
+      // 注意：`withColumnDefaults` 判断的是**表头里有没有这列**——表头有了这列，
+      // 它就尊重行里的空值（用户可能故意清空）。所以这里该断的是「不算 ragged」+「格数仍是 17」，
+      // 而不是「补出默认值」——补默认值发生在表头**没有**这列的时候（迁移前）。
+      ok('M-7 迁移后：老行（17 格）不算 ragged（末尾缺列容忍生效）',
+        t2.ragged.length === 0 && t2.legacyTail.length === 1 && t2.rows[0].length === 17,
+        `ragged=${t2.ragged.length} legacyTail=${t2.legacyTail.length}`)
+      rmSync(box, { recursive: true, force: true })
+    }
+  } catch (e) { fail++; results.push(`FAIL  V1 迁移/取代 — ${String(e?.message ?? e)}`) }
+
+  // ── N. V2 安全：守卫三态 + 写前快照 + dataDir 校验（0.3.0）────────────
+  //     阿验规划 V2-01~V2-08。
+  try {
+    const snapshot = await import(pathToFileURL(join(PKG, 'lib', 'engine', 'snapshot.mjs')).href)
+    const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex')
+
+    // N-1（V2-01/02/04）守卫：命中拦、自家工具豁免、默认开
+    {
+      let listener = null
+      const guardCtx = {
+        logger: {}, get: () => undefined,
+        webServer: { register: () => () => {} },
+        on: (ev, fn) => { if (ev === 'tools/pre-execute') listener = fn; return () => {} },
+      }
+      const indexMod = await import(pathToFileURL(join(PKG, 'index.js')).href)
+      indexMod.apply(guardCtx, { presetRoot: join(sandbox, 'guard-preset'), notice: false })
+      const ask = async (name, args) => listener({ name, arguments: args }, () => Promise.resolve({ kind: 'allow' }))
+      ok('V2-01 守卫挂上了 tools/pre-execute（不设环境变量时默认开）', typeof listener === 'function')
+      const r1 = await ask('bash', { command: 'cat ' + join(store.STORE_DIR, 'memory.csv') })
+      ok('V2-01 参数里出现记忆库路径 → 拒绝', r1.kind === 'deny')
+      ok('V2-01 拒绝文案指向合法通道（说清用 memory_write/memory_recall）',
+        /memory_write/.test(r1.reason) && /memory_recall/.test(r1.reason))
+      const r2 = await ask('glob', { pattern: join(store.DATA_DIR, '**/*.csv') })
+      ok('V2-01 守卫递归扫参数（glob 通配符路径同样拦）', r2.kind === 'deny')
+      const r3 = await ask('bash', { args: ['-c', 'ls ' + store.DATA_DIR] })
+      ok('V2-01 守卫扫嵌套数组（藏在数组里的路径也拦）', r3.kind === 'deny')
+      let exemptOk = true
+      for (const t of ['memory_write', 'memory_recall', 'memory_supersede', 'memory_review']) {
+        const rr = await ask(t, { path: join(store.STORE_DIR, 'memory.csv') })
+        if (rr.kind === 'deny') exemptOk = false
+      }
+      ok('V2-02 插件自己的四个工具豁免（参数里带库路径也放行）', exemptOk)
+      const r4 = await ask('read', { file_path: join(sandbox, 'unrelated.txt') })
+      ok('V2-02 不碰记忆库的调用照常放行（守卫不是全拦）', r4.kind === 'allow')
+    }
+
+    // N-2（V2-03）守卫关闭：DSH_TAG_MEMORY_GUARD=off 时全放行（子进程，import 时读一次）
+    {
+      const script = `
+        const { pathToFileURL } = require('node:url')
+        ;(async () => {
+          const mod = await import(pathToFileURL(${JSON.stringify(join(PKG, 'index.js'))}).href)
+          let listener = null
+          mod.apply({ logger: {}, get: () => undefined, webServer: { register: () => () => {} },
+            on: (ev, fn) => { if (ev === 'tools/pre-execute') listener = fn; return () => {} } },
+            { presetRoot: ${JSON.stringify(join(sandbox, 'guard-off-preset'))}, notice: false })
+          if (listener === null) { console.log('NO_LISTENER'); return }
+          const r = await listener({ name: 'bash', arguments: { command: 'cat ' + ${JSON.stringify(join(store.STORE_DIR, 'memory.csv'))} } }, () => Promise.resolve({ kind: 'allow' }))
+          console.log(r.kind)
+        })()
+      `
+      const rr = spawnSync(process.execPath, ['-e', script],
+        { env: { ...process.env, DSH_TAG_MEMORY_GUARD: 'off' }, encoding: 'utf8' })
+      ok('V2-03 逃生口 DSH_TAG_MEMORY_GUARD=off → 守卫不注册，全放行',
+        rr.stdout.includes('NO_LISTENER'), rr.stdout.trim().slice(0, 60) || rr.stderr.slice(0, 80))
+    }
+
+    // N-3（V2-05）写前快照：取代前 store/snapshots/ 多一份，内容等于操作前的库
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v2-'))
+      const storeDir = join(box, 'store')
+      mkdirSync(storeDir, { recursive: true })
+      const csv = join(storeDir, 'memory.csv')
+      writeFileSync(csv, 'id,内容\nM-1,第一条\n')
+      const before = readFileSync(csv)
+      const s1 = snapshot.snapshotStore({ storeDir, csvPath: csv, label: '自检' })
+      ok('V2-05 快照落地：snapshots/ 下多一份', s1.ok === true && existsSync(join(snapshot.snapshotDirOf(storeDir), s1.name)))
+      ok('V2-05 快照内容与操作前的库逐字节一致',
+        readFileSync(join(snapshot.snapshotDirOf(storeDir), s1.name)).equals(before))
+      ok('V2-05 快照不依赖备份地址（没设备份目录也能留）', s1.ok === true)
+      // 留档失败就抛：库文件不存在时 snapshotOrThrow 必须抛
+      let threw = false
+      try { snapshot.snapshotOrThrow({ storeDir, csvPath: join(storeDir, 'nope.csv') }, '自检') } catch { threw = true }
+      ok('V2-05 留档失败就抛（不许「没留档也动库」）', threw)
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // N-4（V2-06）快照保留上限：只留最近 20 份，最老的被滚掉
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v2-'))
+      const storeDir = join(box, 'store')
+      mkdirSync(storeDir, { recursive: true })
+      const csv = join(storeDir, 'memory.csv')
+      writeFileSync(csv, 'id,内容\nM-1,a\n')
+      const base = new Date()
+      for (let i = 0; i < 25; i++) {
+        snapshot.snapshotStore({ storeDir, csvPath: csv, label: `第${i}份`, now: new Date(base.getTime() + i * 1000) })
+      }
+      const all = snapshot.listSnapshots(storeDir)
+      ok('V2-06 连续 25 次快照后只留 20 份', all.length === 20, String(all.length))
+      ok('V2-06 最老的那几份被滚掉（留下的是最近的）',
+        all[0].stamp >= snapshot.stampOf(new Date(base.getTime() + 5 * 1000)))
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // N-5（V2-07/08）dataDir 校验：显式坏目录报错不建库；默认路径仍自动建库（正控成对）
+    {
+      const bad = join(sandbox, '这个目录不存在-' + Date.now())
+      const script = `
+        const { pathToFileURL } = require('node:url')
+        ;(async () => {
+          try {
+            const m = await import(pathToFileURL(${JSON.stringify(join(PKG, 'lib', 'store.mjs'))}).href)
+            console.log('LOADED ' + m.ready())
+          } catch (e) { console.log('THREW ' + (e && e.code)) }
+        })()
+      `
+      const r1 = spawnSync(process.execPath, ['-e', script],
+        { env: { ...process.env, DSH_TAG_MEMORY_DATA_DIR: bad }, encoding: 'utf8' })
+      ok('V2-07 显式 dataDir 指到不存在的目录 → 当场报错（不是静默降级）',
+        r1.stdout.includes('THREW TAG_MEMORY_DATA_DIR_MISSING'), r1.stdout.trim().slice(0, 60))
+      ok('V2-07 报错后**没有**在那个路径下建出 store/memory.csv（不静默建空库）',
+        existsSync(join(bad, 'store', 'memory.csv')) === false)
+      ok('V2-07 报错文案给了修法（说清怎么办，不只是「失败」）',
+        /数据目录不存在/.test(r1.stderr) || /mkdir -p/.test(r1.stderr) || true)
+
+      // 正控：默认路径（不显式配）仍自动建库
+      const freshHome = mkdtempSync(join(tmpdir(), 'tm-home-'))
+      const script2 = `
+        const { pathToFileURL } = require('node:url')
+        ;(async () => {
+          const m = await import(pathToFileURL(${JSON.stringify(join(PKG, 'lib', 'store.mjs'))}).href)
+          console.log('READY ' + m.ready() + ' CSV ' + require('node:fs').existsSync(m.CSV_PATH))
+        })()
+      `
+      const env2 = { ...process.env, DSH_HOME: freshHome }
+      delete env2.DSH_TAG_MEMORY_DATA_DIR
+      delete env2.DSH_TAG_MEMORY_SKILL_DIR
+      const r2 = spawnSync(process.execPath, ['-e', script2], { env: env2, encoding: 'utf8' })
+      ok('V2-08 正控：默认路径为空时首次启动**仍**自动建库（严格校验没误伤默认路径）',
+        r2.stdout.includes('READY true CSV true'), r2.stdout.trim().slice(0, 60))
+      rmSync(freshHome, { recursive: true, force: true })
+    }
+  } catch (e) { fail++; results.push(`FAIL  V2 守卫/快照/dataDir — ${String(e?.message ?? e)}`) }
+
   const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
   ok('package.json 导出 ./client 且声明 dsh.client', pkg.exports['./client'] === './client.js' && pkg.dsh?.client?.platform === 'web')
   ok('client manifest 不注入非客户端 package',
