@@ -16,7 +16,7 @@ import { constants as FS } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { basename, dirname, join, isAbsolute, relative, resolve } from 'node:path'
 import {
-  BACKUP_CFG_PATH, CSV_PATH, DATA_DIR, INDEX_PATH, LOCK_PATH, PRESET_ROOT, SCHEMA_PATH, STORE_DIR,
+  BACKUP_CFG_PATH, CSV_PATH, DATA_DIR, INDEX_PATH, LOCK_PATH, PRESET_ROOT, REINFORCE_LOG_PATH, SCHEMA_PATH, STORE_DIR,
   backupReady, coreStale, getBackupCore, getCore, initInfo, legacyInfo, loadSchema, ready, reloadSchema,
   setDataDir,
 } from './lib/store.mjs'
@@ -318,6 +318,10 @@ export function apply(ctx, config = {}) {
           if (op === '/snapshots' && req.method === 'GET') {
             return send(res, 200, snapshotStatus(STORE_DIR))
           }
+          // ── 盘点（V3-c）────────────────────────────────
+          if (op === '/review' && req.method === 'GET') {
+            return send(res, 200, reviewFrom())
+          }
 
           return send(res, 404, { error: `unknown op "${op}"` })
         } catch (error) {
@@ -386,6 +390,51 @@ function overview(notice) {
     const liveRows = core.filterRows(schema, header, rows, {})
     if (i >= 0) for (const r of liveRows) { const v = r[i] || '留白'; counts[v] = (counts[v] || 0) + 1 }
     base.byDimension[dim.name] = counts
+  }
+
+  // ── 待整理 / 待晋升（M-整-1 / M-整-2）──────────────────────
+  // 两个清单都是**只读现算**：强度不写盘、候选不改状态。
+  // 「待整理」只是候选——归档得人工点头（总纲：不自动归档）。
+  try {
+    const logMap = core.readReinforceLog(REINFORCE_LOG_PATH)
+    const now = new Date()
+    const live = core.filterRows(schema, header, rows, {})
+    const pendingDecay = []
+    const pendingPromote = []
+    for (const r of live) {
+      const baseRow = {}
+      for (const name of Object.keys({ ...schema.dimensions, ...schema.auxiliary })) {
+        const i = resolve(name)
+        baseRow[name] = i >= 0 ? String(r[i] ?? '') : ''
+      }
+      const merged = core.applyReinforceLog(baseRow, (x, n) => x[n] ?? '', logMap.get(String(baseRow.id ?? '').trim()))
+      const strength = core.currentStrength(merged, now)
+      const item = {
+        id: merged.id,
+        preview: String(merged.内容 ?? '').split('\n')[0].slice(0, 42),
+        项目: merged.项目,
+        类型: merged.类型,
+        深度: merged.深度,
+        距离: merged.距离,
+        强度: Number(strength.toFixed(3)),
+        最后强化: merged.最后强化,
+        使用次数: merged.使用次数,
+        已验证项目: merged.已验证项目,
+      }
+      if (strength < core.ARCHIVE_THRESHOLD) pendingDecay.push(item)
+      if (core.isPromotionCandidate({ 已验证项目: merged.已验证项目 })) pendingPromote.push(item)
+    }
+    // 最该先处理的排前面：强度最低的、项目数最多的
+    pendingDecay.sort((a, b) => a.强度 - b.强度)
+    pendingPromote.sort((a, b) => core.verifiedProjects({ 已验证项目: b.已验证项目 }).length - core.verifiedProjects({ 已验证项目: a.已验证项目 }).length)
+    base.pendingDecay = pendingDecay
+    base.pendingPromote = pendingPromote
+    base.reinforceLog = { path: REINFORCE_LOG_PATH, ids: logMap.size }
+  } catch (e) {
+    // 清单算不出来不能把整个 overview 弄挂——但要说清，别装作「没有待整理」。
+    base.pendingDecay = []
+    base.pendingPromote = []
+    base.pendingError = String(e?.message ?? e)
   }
   return base
 }
@@ -680,6 +729,7 @@ function restoreFromLocked(stamp) {
     csv: join(st.dir, `memory-${stamp}.csv`),
     md: join(st.dir, `index-${stamp}.md`),
     schema: join(st.dir, `schema-${stamp}.json`),
+    log: join(st.dir, `reinforce-${stamp}.log`),
   }
   if (!existsSync(src.csv)) return { ok: false, error: `这份备份不完整：缺 memory-${stamp}.csv` }
   if (!existsSync(src.md)) return { ok: false, error: `这份备份不完整：缺 index-${stamp}.md` }
@@ -691,6 +741,7 @@ function restoreFromLocked(stamp) {
   let mdBytes = null
   let schemaBytes = null
   let schemaVersion = ''
+  let logBytes = null
   try {
     csvBytes = readFileSync(src.csv)
     mdBytes = readFileSync(src.md)
@@ -704,6 +755,8 @@ function restoreFromLocked(stamp) {
       const parsed = JSON.parse(schemaBytes.toString('utf8'))
       schemaVersion = typeof parsed?.version === 'string' ? parsed.version : ''
     }
+    // 强化日志跟着库一起回滚（O-13）。老备份里没有它 → 不动现在的日志，并明说。
+    if (existsSync(src.log)) logBytes = readFileSync(src.log)
   } catch (e) {
     return { ok: false, error: `这份备份读不出来：${String(e?.message ?? e)}` }
   }
@@ -771,6 +824,21 @@ function restoreFromLocked(stamp) {
     }
   }
 
+  // ②c 强化日志跟着回滚（O-13）：日志里是「用过几次、在哪些项目验证过」，
+  //     只回滚库不回滚日志 → 强度退回 1、晋升候选全作废，等于把整理成果丢了。
+  let logInfo = { available: logBytes !== null, swapped: false, note: '' }
+  if (logBytes === null) {
+    logInfo.note = '这份备份里没有强化日志（是加日志之前的备份）——现在的日志保持不动。'
+  } else {
+    try {
+      atomicReplace(REINFORCE_LOG_PATH, logBytes)
+      logInfo.swapped = true
+      logInfo.note = '强化日志也换回这一版。'
+    } catch (e) {
+      logInfo.note = `日志没换成功：${String(e?.message ?? e)}（库已经换好了，日志还是现在这份）`
+    }
+  }
+
   // ③ 换完复核
   let afterCount = null
   try {
@@ -788,7 +856,7 @@ function restoreFromLocked(stamp) {
   if (cfg.broken) {
     try { appendFileSync(join(st.dir, 'last-backup.log'),
       `${localIsoTimestamp()}  restore ${stamp}  条目=${afterCount}  恢复前留档=${preStamp}  ⚠ 备份配置损坏，水位未更新\n`, 'utf8') } catch { /* 非致命 */ }
-    return { ok: true, stamp, entryCount: afterCount, preBackup: preStamp, preSnapshot: preSnapshot.name, backupNote: preBackupNote, schema: schemaInfo, status: backupStatus(), cfgWarning: `备份配置损坏（${cfg.error}），水位未更新` }
+    return { ok: true, stamp, entryCount: afterCount, preBackup: preStamp, preSnapshot: preSnapshot.name, backupNote: preBackupNote, schema: schemaInfo, reinforceLog: logInfo, status: backupStatus(), cfgWarning: `备份配置损坏（${cfg.error}），水位未更新` }
   }
   cfg.lastBackupAt = localIsoTimestamp()
   cfg.lastCount = afterCount
@@ -1113,6 +1181,87 @@ function mergeFrom(body) {
   }
 
   return { ...report, dryRun: false, preBackup: preStamp, preSnapshot: preSnap.name, appended, failed, note: preBackupNote, status: backupStatus() }
+}
+
+/**
+ * 盘点四张清单（只读，不改库）。
+ *
+ * 与 `memory_review({类型:'盘点'})` 同一套判据——**一份逻辑，两个入口**：
+ * 模型用工具调，界面用这个 API 取。分开写两套判据迟早会分叉。
+ */
+function reviewFrom() {
+  try {
+    const core = getCore()
+    const schema = loadSchema()
+    const { header, rows } = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(schema))
+    const resolve = core.makeResolver(schema, header)
+    const logMap = core.readReinforceLog(REINFORCE_LOG_PATH)
+    const now = new Date()
+    const live = core.filterRows(schema, header, rows, {})
+
+    const pick = (row, name) => { const i = resolve(name); return i >= 0 ? String(row[i] ?? '') : '' }
+    const fieldOf = (row) => {
+      const o = {}
+      for (const name of Object.keys({ ...schema.dimensions, ...schema.auxiliary })) o[name] = pick(row, name)
+      for (const col of ['内容', '时间', '环境', '原因', '备注']) o[col] = pick(row, col)
+      return o
+    }
+    const brief = (o) => ({ id: o.id, 内容: String(o.内容 ?? '').split('\n')[0].slice(0, 42), 项目: o.项目, 时间: o.时间 })
+
+    const decay = []
+    const promote = []
+    const gaps = []
+    for (const row of live) {
+      const f = fieldOf(row)
+      const merged = core.applyReinforceLog(f, (x, n) => x[n] ?? '', logMap.get(String(f.id ?? '').trim()))
+      const strength = core.currentStrength(merged, now)
+      if (strength < core.ARCHIVE_THRESHOLD) {
+        decay.push({ ...brief(f), 强度: Number(strength.toFixed(3)), 深度: f.深度, 距离: f.距离, 最后强化: merged.最后强化 })
+      }
+      if (core.isPromotionCandidate({ 已验证项目: merged.已验证项目 })) {
+        promote.push({ ...brief(f), 已验证项目: merged.已验证项目, 项目数: core.verifiedProjects({ 已验证项目: merged.已验证项目 }).length })
+      }
+      const note = String(f.备注 ?? '')
+      const kw = String(f.关键词 ?? '')
+      if ((note.includes('缺口') || kw.includes('缺口')) && String(f.状态 ?? '') === '生效') gaps.push(brief(f))
+    }
+
+    const paired = new Set()
+    const all = live.map(fieldOf)
+    for (const f of all) {
+      const m = String(f.备注 ?? '').match(/配套[：:]\s*([^\s,，;；|｜]+)/g) || []
+      for (const x of m) {
+        const id = x.replace(/^配套[：:]\s*/, '').trim()
+        if (id !== '') { paired.add(id); paired.add(String(f.id ?? '').trim()) }
+      }
+    }
+    const unpaired = []
+    for (const f of all) {
+      const id = String(f.id ?? '').trim()
+      if (String(f.类型 ?? '').trim() !== '记忆') continue
+      if (paired.has(id)) continue
+      if (String(f.关键词 ?? '').includes('缺口')) continue
+      unpaired.push(brief(f))
+    }
+
+    return {
+      ok: true,
+      衰减候选: decay.sort((a, b) => a.强度 - b.强度),
+      晋升候选: promote.sort((a, b) => b.项目数 - a.项目数),
+      原文总结未配对: unpaired,
+      缺口未补: gaps,
+      统计: {
+        生效条目: live.length,
+        衰减候选: decay.length,
+        晋升候选: promote.length,
+        未配对: unpaired.length,
+        缺口: gaps.length,
+      },
+      snapshots: snapshotStatus(STORE_DIR),
+    }
+  } catch (e) {
+    return { ok: false, error: String(e?.message ?? e) }
+  }
 }
 
 // ── 取代 / 归档（界面按钮走这两个口）──────────────────

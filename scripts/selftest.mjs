@@ -327,8 +327,8 @@ try {
     const preset = await import(pathToFileURL(join(PKG, 'preset.js')).href)
     preset.apply(ctx, { dir: 'C:/does/not/matter/assistant' })
     ok('preset 注册字典段', sections.length === 1 && sections[0].name === 'tag-memory:dict')
-    ok('preset 注册 memory_write + memory_recall + memory_supersede（0.3.0 加第三个）',
-      tools.map((t) => t.name).sort().join(',') === 'memory_recall,memory_supersede,memory_write')
+    ok('preset 注册四个工具（write / recall / supersede / review）',
+      tools.map((t) => t.name).sort().join(',') === 'memory_recall,memory_review,memory_supersede,memory_write')
     const exec = { agent: { id: 'selftest', session: { header: { cwd: PROJ_CWD } } } }
     const out = await tools.find((t) => t.name === 'memory_recall').execute({ 条件: '{"角色":"selftest"}', 取几条: 5 }, exec)
     ok('preset.memory_recall 端到端读回沙箱条目', /命中\s*2\s*条/.test(out), out.split('\n')[0])
@@ -1906,6 +1906,276 @@ try {
       rmSync(freshHome, { recursive: true, force: true })
     }
   } catch (e) { fail++; results.push(`FAIL  V2 守卫/快照/dataDir — ${String(e?.message ?? e)}`) }
+
+  // ── O. V3 整理：衰减/强化 + 晋升 + memory_review（0.3.0）──────────────
+  //     阿验规划 V3-01~V3-09。核心口径：**只算不写盘**，落盘只往 reinforce.log 追加。
+  try {
+    const core = store.getCore()
+    const schema0 = store.loadSchema()
+    const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex')
+    const NOW = new Date('2026-10-24T00:00:00')
+    const dayBefore = (n) => {
+      const d = new Date(NOW.getTime() - n * 86400000)
+      const p2 = (x) => String(x).padStart(2, '0')
+      return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`
+    }
+
+    // O-1（V3-01）衰减纯函数：算得出、不写盘
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v3-'))
+      const csv = join(box, 'memory.csv')
+      writeFileSync(csv, readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv')))
+      const sha0 = sha(csv)
+      const at = (depth, days) => core.currentStrength({ 强度: '1', 最后强化: dayBefore(days), 深度: depth, 类型: '记忆', 距离: '按需' }, NOW)
+      ok('V3-01 语义档 90 天 → 强度≈0.5（半衰期正确）', Math.abs(at('语义', 90) - 0.5) < 0.02, at('语义', 90).toFixed(4))
+      ok('V3-01 情景档 30 天 → 强度≈0.5', Math.abs(at('情景', 30) - 0.5) < 0.02, at('情景', 30).toFixed(4))
+      ok('V3-01 程序档 120 天 → 强度≈0.5', Math.abs(at('程序', 120) - 0.5) < 0.02, at('程序', 120).toFixed(4))
+      ok('V3-01 三档半衰期常量与 MM 一致（30/90/120）',
+        core.HALF_LIFE_DAYS.情景 === 30 && core.HALF_LIFE_DAYS.语义 === 90 && core.HALF_LIFE_DAYS.程序 === 120)
+      ok('V3-01 调衰减前后 CSV sha256 不变（只算不写盘）', sha(csv) === sha0)
+      ok('V3-01 阈值与强化量是 MM 常量（0.1 / 0.3）',
+        core.ARCHIVE_THRESHOLD === 0.1 && core.REINFORCE_BOOST === 0.3)
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // O-2（V3-02）豁免：常驻 + 固定永不衰减
+    {
+      const veryOld = dayBefore(3000)
+      ok('V3-02 距离=常驻 永不衰减（3000 天后仍是 1）',
+        core.currentStrength({ 强度: '1', 最后强化: veryOld, 深度: '情景', 类型: '记忆', 距离: '常驻' }, NOW) === 1)
+      ok('V3-02 类型=固定 永不衰减',
+        core.currentStrength({ 强度: '1', 最后强化: veryOld, 深度: '情景', 类型: '固定', 距离: '按需' }, NOW) === 1)
+      ok('V3-02 正控：既非常驻也非固定的，同样 3000 天后强度 < 0.01（豁免不是「全都返回 1」）',
+        core.currentStrength({ 强度: '1', 最后强化: veryOld, 深度: '情景', 类型: '记忆', 距离: '按需' }, NOW) < 0.01)
+    }
+
+    // O-3（V3-03）归档候选：强度 < 0.1 只进待整理，不自动归档
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v3-'))
+      const csv = join(box, 'memory.csv')
+      writeFileSync(csv, readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv')))
+      const lock = join(box, '.lock')
+      const id = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: { 内容: '极旧的一条', 时间: dayBefore(400), 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '情景',
+          稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest' } })
+      const before = readFileSync(csv, 'utf8')
+      const t = core.readTable(before, core.legacyWidthOf(schema0))
+      const get = (row, n) => { const i = t.header.indexOf(n); return i >= 0 ? String(row[i] ?? '') : '' }
+      const row = t.rows.find((r) => r[0] === id)
+      const strength = core.currentStrength({
+        强度: get(row, '强度'), 最后强化: get(row, '最后强化'), 深度: get(row, '深度'),
+        类型: get(row, '类型'), 距离: get(row, '距离'), 时间: get(row, '时间'),
+      }, NOW)
+      ok('V3-03 400 天前的情景条 → 强度 < 0.1，判为归档候选',
+        strength < core.ARCHIVE_THRESHOLD && core.isArchiveCandidate({ 强度: '1', 最后强化: dayBefore(400), 深度: '情景', 类型: '记忆', 距离: '按需' }, NOW))
+      ok('V3-03 判候选**不改状态**：CSV 里那条仍是「生效」，文件也没变',
+        readFileSync(csv, 'utf8') === before && get(row, '状态') === '生效')
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // O-4（V3-04）强化：命中 → 强度 +0.3 / 使用次数 +1 / 最后强化=今天，且**只写日志不改 CSV**
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v3-'))
+      const csv = join(box, 'memory.csv')
+      const log = join(box, 'reinforce.log')
+      writeFileSync(csv, readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv')))
+      const lock = join(box, '.lock')
+      const id = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: { 内容: '要被强化的', 时间: '2026-01-01', 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+          稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest' } })
+      const csvSha = sha(csv)
+      core.appendReinforceLog({ logPath: log, id, project: '通用', day: '2026-10-24', reinforce: true, verify: true })
+      ok('V3-04 强化后 **CSV 一个字节没动**（落盘只在日志里）', sha(csv) === csvSha)
+      ok('V3-04 日志里确实多了一条记录', existsSync(log) && readFileSync(log, 'utf8').includes(id))
+      const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      const get = (row, n) => { const i = t.header.indexOf(n); return i >= 0 ? String(row[i] ?? '') : '' }
+      const base = {}
+      for (const n of Object.keys({ ...schema0.dimensions, ...schema0.auxiliary })) base[n] = get(t.rows.find((r) => r[0] === id), n)
+      const merged = core.applyReinforceLog(base, (x, n) => x[n] ?? '', core.readReinforceLog(log).get(id))
+      ok('V3-04 合并后使用次数 +1、最后强化=今天、已验证项目含当前项目',
+        merged.使用次数 === '1' && merged.最后强化 === '2026-10-24' && core.verifiedProjects({ 已验证项目: merged.已验证项目 }).includes('通用'),
+        JSON.stringify({ n: merged.使用次数, d: merged.最后强化, p: merged.已验证项目 }))
+      ok('V3-04 合并后强度 = 1+0.3 封顶 1（不会超过 1）', Number(merged.强度) === 1)
+      // 封顶验证：低基数也封顶
+      const low = core.applyReinforceLog({ 强度: '0.5', 最后强化: '2026-01-01', 使用次数: '0', 已验证项目: '' }, (r, n) => r[n] ?? '', { uses: 5, last: '2026-10-24', projects: [] })
+      ok('V3-04 强度封顶 1.0（0.5 + 5×0.3 也只到 1）', Number(low.强度) === 1, low.强度)
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // O-5（V3-05）晋升候选：独立项目数 ≥ 3 才出现
+    {
+      ok('V3-05 2 个项目 → 不是候选', core.isPromotionCandidate({ 已验证项目: '通用;workspace' }) === false)
+      ok('V3-05 3 个项目 → 是候选', core.isPromotionCandidate({ 已验证项目: '通用;workspace;测试文件夹' }) === true)
+      ok('V3-05 判据是独立项目数、不是次数（同项目写 5 遍仍是 1 个项目）',
+        core.verifiedProjects({ 已验证项目: '通用;通用;通用;通用;通用' }).length === 1 &&
+        core.isPromotionCandidate({ 已验证项目: '通用;通用;通用' }) === false)
+      ok('V3-05 阈值常量是 3（不是 2）', core.PROMOTE_PROJECT_THRESHOLD === 3)
+    }
+
+    // O-6（V3-06）晋升人工闸：达到 3 项目也不会自动变通用
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v3-'))
+      const csv = join(box, 'memory.csv')
+      writeFileSync(csv, readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv')))
+      const lock = join(box, '.lock')
+      const id = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: { 内容: '在三个项目验证过的', 时间: '2026-10-01', 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+          稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: 'workspace', 角色: 'selftest' } })
+      const log = join(box, 'reinforce.log')
+      for (const p of ['通用', 'workspace', '测试文件夹']) {
+        core.appendReinforceLog({ logPath: log, id, project: p, day: '2026-10-20', reinforce: true, verify: true })
+      }
+      const before = readFileSync(csv, 'utf8')
+      const t = core.readTable(before, core.legacyWidthOf(schema0))
+      const row = t.rows.find((r) => r[0] === id)
+      const projectIdx = t.header.indexOf('项目')
+      const merged = core.applyReinforceLog(
+        { 已验证项目: '' }, (r, n) => r[n] ?? '', core.readReinforceLog(log).get(id))
+      ok('V3-06 三个项目验证后，候选成立', core.isPromotionCandidate({ 已验证项目: merged.已验证项目 }) === true)
+      ok('V3-06 但 CSV 里 `项目` 仍是原项目、`状态` 仍生效（不自动晋升）',
+        String(row[projectIdx]) === 'workspace' && String(row[t.header.indexOf('状态')]) === '生效')
+      ok('V3-06 读库前后一个字节没变（晋升是人工动作，不是读的时候顺手改）', readFileSync(csv, 'utf8') === before)
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // O-7（V3-07）memory_review 缺口立卡：追加缺口条目、下轮快照可见
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v3-'))
+      const csv = join(box, 'memory.csv')
+      writeFileSync(csv, readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv')))
+      const lock = join(box, '.lock')
+      const before = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0)).rows.length
+      const id = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: { 内容: '缺口：忘了记用户提到的端口号', 环境: '当前项目 workspace 里该记却没记的一条',
+          原因: '复盘时发现缺口', 类型: '记忆', 深度: '情景', 稳定性: '观察', 距离: '按需',
+          依据: '推断', 项目: 'workspace', 角色: 'selftest', 关键词: '缺口,复盘', 备注: '缺口立卡（memory_review）' } })
+      const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      const row = t.rows.find((r) => r[0] === id)
+      const get = (n) => String(row[t.header.indexOf(n)] ?? '')
+      ok('V3-07 缺口立卡后库里多一条', t.rows.length === before + 1)
+      ok('V3-07 缺口条目的字段：状态=生效 / 距离=按需 / 项目=当前项目',
+        get('状态') === '生效' && get('距离') === '按需' && get('项目') === 'workspace')
+      ok('V3-07 缺口条目带「缺口」标记（盘点据此找出来）',
+        get('关键词').includes('缺口') && get('备注').includes('缺口'))
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // O-8（V3-08）盘点四张清单：键齐、可为空但不缺
+    {
+      // 直接用 index.js 的 /review 路由（与 memory_review 同一套判据）
+      const routes = []
+      // 路由有准入闸（requestRejection）：没有 connection 服务时 fail closed 返回 503。
+      // 这里给一个「一律放行」的桩，跟 E 节那几条 API 用例同一个套路。
+      const reviewCtx = {
+        logger: {},
+        get: (name) => name === 'connection' ? { requestRejection: () => undefined } : undefined,
+        webServer: { register: (r) => { routes.push(r); return () => {} } },
+        on: () => () => {},
+      }
+      const indexMod = await import(pathToFileURL(join(PKG, 'index.js')).href)
+      indexMod.apply(reviewCtx, { presetRoot: join(sandbox, 'review-preset'), notice: false })
+      const res = { statusCode: 0, body: '', setHeader() {}, end(b) { this.body = b } }
+      await routes[0].handler({ url: '/tag-memory-api/review', method: 'GET' }, res)
+      const j = JSON.parse(res.body)
+      ok('V3-08 盘点返回四张清单（键都在，空也是空数组不是缺键）',
+        j.ok === true && Array.isArray(j['衰减候选']) && Array.isArray(j['晋升候选'])
+        && Array.isArray(j['原文总结未配对']) && Array.isArray(j['缺口未补']),
+        Object.keys(j).join(','))
+      ok('V3-08 盘点带统计口径（生效条目/各类计数）',
+        j.统计 !== undefined && typeof j.统计.生效条目 === 'number')
+      ok('V3-08 盘点**只读**：跑完真库 sha256 不变', sha(store.CSV_PATH) === sha(store.CSV_PATH))
+    }
+
+    // O-9（V3-09）原文/总结配对：只有总结没原文 → 进盘点清单
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v3-'))
+      const csv = join(box, 'memory.csv')
+      writeFileSync(csv, readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv')))
+      const lock = join(box, '.lock')
+      // 一条没配对的总结 + 一对配好了的
+      const lonely = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: { 内容: '没配原文的总结', 时间: '2026-10-01', 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+          稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: 'workspace', 角色: 'selftest' } })
+      const pairedSum = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: { 内容: '配好对的总结', 时间: '2026-10-02', 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+          稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: 'workspace', 角色: 'selftest', 备注: `配套：M-20261002-999` } })
+      const pairedRaw = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: { 内容: '配套的原文', 时间: '2026-10-02', 环境: 'e', 原因: 'r', 类型: '原文', 深度: '',
+          稳定性: '稳定', 距离: '深藏', 依据: '原话', 项目: 'workspace', 角色: 'selftest', 备注: `配套：${pairedSum}` } })
+      // 手工算一遍配对（与 index.js 的判据同一套）
+      const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      const idIdx = t.header.indexOf('id'), typeIdx = t.header.indexOf('类型'), noteIdx = t.header.indexOf('备注')
+      const paired = new Set()
+      for (const r of t.rows) {
+        for (const m of String(r[noteIdx] ?? '').match(/配套[：:]\s*([^\s,，;；|｜]+)/g) || []) {
+          const x = m.replace(/^配套[：:]\s*/, '').trim()
+          if (x !== '') { paired.add(x); paired.add(String(r[idIdx] ?? '').trim()) }
+        }
+      }
+      const unpaired = t.rows.filter((r) => String(r[typeIdx]) === '记忆' && !paired.has(String(r[idIdx])))
+        .map((r) => String(r[idIdx]))
+      ok('V3-09 没配原文的总结进「未配对」清单', unpaired.includes(lonely))
+      ok('V3-09 配好对的总结不进清单（不是「全都列出来」）', !unpaired.includes(pairedSum))
+      ok('V3-09 原文条目本身不进清单（只看总结）', !unpaired.includes(pairedRaw))
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // O-10 遗留①：快照毫秒戳 + 序号后缀（同秒批量不覆盖）
+    {
+      const snapshot = await import(pathToFileURL(join(PKG, 'lib', 'engine', 'snapshot.mjs')).href)
+      const box = mkdtempSync(join(tmpdir(), 'tm-v3-'))
+      const storeDir = join(box, 'store')
+      mkdirSync(storeDir, { recursive: true })
+      const csv = join(storeDir, 'memory.csv')
+      writeFileSync(csv, 'id,内容\nM-1,a\n')
+      const fixed = new Date('2026-10-24T00:00:00.500')
+      const names = []
+      for (let i = 0; i < 5; i++) names.push(snapshot.snapshotStore({ storeDir, csvPath: csv, now: fixed }).name)
+      ok('遗留① 同一毫秒连拍 5 份，文件名全不重名（毫秒+序号后缀）', new Set(names).size === 5, names.join(','))
+      ok('遗留① 5 份都在盘上（没有互相覆盖）', snapshot.listSnapshots(storeDir).length === 5)
+      ok('遗留① 老格式（只到秒）的快照仍能被认出来（轮转不漏老档）', (() => {
+        writeFileSync(join(snapshot.snapshotDirOf(storeDir), 'memory-20261001-120000.csv'), 'id\nM-old\n')
+        return snapshot.listSnapshots(storeDir).some((s) => s.stamp === '20261001-120000')
+      })())
+      ok('遗留② 数份数走 listSnapshots：snapshots.log 不算一份',
+        snapshot.listSnapshots(storeDir).every((s) => s.name.endsWith('.csv')) &&
+        snapshot.snapshotStatus(storeDir).count === snapshot.listSnapshots(storeDir).length)
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // O-11 O-13：强化日志进备份清单（五件套），老库没有日志也能备
+    {
+      const bk = await import(pathToFileURL(join(PKG, 'lib', 'engine', 'backup.mjs')).href)
+      ok('O-13 备份清单里含 reinforce.log（五件套）',
+        bk.BACKUP_FILES.map((f) => f.src).includes('reinforce.log'), bk.BACKUP_FILES.map((f) => f.src).join(','))
+      const box = mkdtempSync(join(tmpdir(), 'tm-v3-'))
+      const storeDir = join(box, 'store')
+      mkdirSync(storeDir, { recursive: true })
+      writeFileSync(join(storeDir, 'memory.csv'), 'id,内容\nM-1,a\n')
+      writeFileSync(join(storeDir, 'index.md'), '# i\n')
+      writeFileSync(join(storeDir, 'backup.json'), '{}\n')
+      writeFileSync(join(storeDir, 'reinforce.log'), 'M-1,2026-10-24,通用,reinforce\n')
+      mkdirSync(join(box, 'references'))
+      writeFileSync(join(box, 'references', 'tags.schema.json'), '{}\n')
+      const outDir = join(box, 'bk')
+      const r = bk.runBackup(storeDir, { dir: outDir, now: new Date() })
+      const files = readdirSync(outDir)
+      ok('O-13 备份真的产出 reinforce-<戳>.log 一份',
+        files.some((f) => f.startsWith('reinforce-') && f.endsWith('.log')), files.join(','))
+      // 老库没有日志：跳过但不失败
+      const store2 = join(box, 'store2')
+      mkdirSync(store2, { recursive: true })
+      writeFileSync(join(store2, 'memory.csv'), 'id,内容\nM-1,a\n')
+      writeFileSync(join(store2, 'index.md'), '# i\n')
+      writeFileSync(join(store2, 'backup.json'), '{}\n')
+      mkdirSync(join(box, 'references2'))
+      writeFileSync(join(box, 'references2', 'tags.schema.json'), '{}\n')
+      const r2 = bk.runBackup(store2, { dir: join(box, 'bk2'), now: new Date() })
+      ok('O-13 老库没有 reinforce.log → 备份照样成功，并记进 skipped',
+        r2.ok !== false && (r2.skipped ?? []).includes('reinforce.log'), JSON.stringify(r2.skipped ?? []))
+      rmSync(box, { recursive: true, force: true })
+    }
+  } catch (e) { fail++; results.push(`FAIL  V3 整理 — ${String(e?.message ?? e)}`) }
 
   const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
   ok('package.json 导出 ./client 且声明 dsh.client', pkg.exports['./client'] === './client.js' && pkg.dsh?.client?.platform === 'web')

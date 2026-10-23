@@ -955,7 +955,7 @@ window.__ModuleLoader__.load({
 			 *
 			 * `act` 是 'supersede' | 'archive' | 'unarchive'。
 			 */
-			async function markEntry(act, id) {
+			async function markEntry(act, id, extra) {
 				if (id === '') return
 				const wording = act === 'supersede'
 					? `把 ${id} 标记为「被取代」？\n\n旧条不会被删、也不会被改，会追加一条新的顶上；操作前会自动留一份快照。`
@@ -966,7 +966,9 @@ window.__ModuleLoader__.load({
 				setBusy(true)
 				try {
 					const url = act === 'supersede' ? `${API}/supersede` : `${API}/archive`
-					const body = act === 'supersede' ? { 目标id: id } : { 目标id: id, 状态: act === 'archive' ? '已归档' : '生效' }
+					const body = act === 'supersede'
+						? { 目标id: id, ...(extra ?? {}) }
+						: { 目标id: id, 状态: act === 'archive' ? '已归档' : '生效' }
 					const r = await postJSON(url, body)
 					if (r.ok !== true) {
 						setTip(`${act === 'supersede' ? '取代' : '归档'}没成功：${r.error ?? '未知原因'}`)
@@ -1654,6 +1656,57 @@ window.__ModuleLoader__.load({
 			 * 维护区（次位）：托管状态 + 备份历史，默认收起。
 			 * 这两样都是「出事了才看」的，按主位通则不该占着正文的位置。
 			 */
+			/**
+			 * 待整理 / 待晋升（V3）。
+			 *
+			 * 两块都是**只读候选**：强度低的进待整理（不自动归档）、项目数够的进待晋升
+			 * （不自动晋升）。所有动作都要人点一下——错归档/错晋升是这套设计要防的失败。
+			 *
+			 * 数据来自 `/overview` 的 `pendingDecay` / `pendingPromote`（服务端现算，不落盘）。
+			 */
+			function renderPending() {
+				const decay = Array.isArray(overview?.pendingDecay) ? overview.pendingDecay : []
+				const promote = Array.isArray(overview?.pendingPromote) ? overview.pendingPromote : []
+				if (decay.length === 0 && promote.length === 0) return null
+				return React.createElement(
+					'div',
+					{ className: 'tm-card', style: { marginTop: '10px' } },
+					React.createElement('h2', { className: 'tm-pane-t', style: { marginTop: 0 } }, '待整理'),
+					decay.length === 0
+						? React.createElement('div', { className: 'tm-note' }, '没有衰减到该处理的条目。')
+						: decay.map((it) => React.createElement(
+								'div',
+								{ key: it.id, className: 'tm-bkrow' },
+								React.createElement('span', { className: 'tm-mono' }, it.id),
+								React.createElement('span', { className: 'tm-tag' }, `强度 ${it.强度}`),
+								React.createElement('span', null, it.preview),
+								React.createElement(
+									'button',
+									{ type: 'button', className: 'tm-link', disabled: busy, onClick: () => markEntry('archive', it.id) },
+									'归档',
+								),
+							)),
+					React.createElement('h2', { className: 'tm-pane-t', style: { margin: '12px 0 6px' } }, '待晋升'),
+					promote.length === 0
+						? React.createElement('div', { className: 'tm-note' }, '还没有在 3 个以上不同项目里验证过的条目。')
+						: promote.map((it) => React.createElement(
+								'div',
+								{ key: it.id, className: 'tm-bkrow' },
+								React.createElement('span', { className: 'tm-mono' }, it.id),
+								React.createElement('span', { className: 'tm-tag' }, `${it.项目数} 个项目`),
+								React.createElement('span', null, it.preview),
+								React.createElement('span', { className: 'tm-note' }, it.已验证项目),
+								React.createElement(
+									'button',
+									{ type: 'button', className: 'tm-link', disabled: busy, onClick: () => markEntry('supersede', it.id, { 项目: '通用' }) },
+									'晋升为通用',
+								),
+							)),
+					React.createElement('div', { className: 'tm-note', style: { marginTop: '8px' } },
+						'这两块都只是候选：归档和晋升都要人点一下才生效。'),
+				)
+			}
+
 			function renderMaintenance() {
 				const recent = bk !== null && Array.isArray(bk.recent) ? bk.recent : []
 				const extra = bk !== null && Array.isArray(bk.log) ? bk.log.length : 0
@@ -1947,6 +2000,9 @@ window.__ModuleLoader__.load({
 							)
 						: null,
 				),
+
+				// ── 待整理 / 待晋升（V3，有候选才出现）──
+				renderPending(),
 
 				// ── 维护与状态（次位，默认收起：托管 + 备份历史）──
 				renderMaintenance(),

@@ -35,6 +35,7 @@ import {
   DATA_DIR,
   LOCK_PATH,
   STORE_DIR,
+  REINFORCE_LOG_PATH,
   cwdOf,
   getCore,
   loadSchema,
@@ -242,7 +243,13 @@ function injectText(config, project) {
 
 // ── 召回结果渲染 ────────────────────────────────────────
 
-function renderHits(core, schema, header, hits, { take, full }) {
+/**
+ * 召回结果渲染。
+ *
+ * `strengthOf(row)` 是可选的：给了就在「详细」模式里多报一行强度（现算，不落盘）。
+ * 现算而不是读 CSV 的 `强度` 列——那一列只是**上次结算时的值**，真正该看的是「现在还剩多少」。
+ */
+function renderHits(core, schema, header, hits, { take, full, strengthOf }) {
   const resolve = core.makeResolver(schema, header)
   const show = (row, col) => { const i = resolve(col); return i >= 0 ? (row[i] || '') : '' }
   const n = hits.length
@@ -261,6 +268,14 @@ function renderHits(core, schema, header, hits, { take, full }) {
     }
     out.push(`   类型=${show(row, '类型') || '—'} 深度=${show(row, '深度') || '—'} 稳定性=${show(row, '稳定性') || '—'} 距离=${show(row, '距离') || '—'}`)
     out.push(`   项目=${show(row, '项目') || '—'} 角色=${show(row, '角色') || '—'} 状态=${show(row, '状态') || '—'} 依据=${show(row, '依据') || '—'} 时间=${show(row, '时间')}`)
+    if (full && typeof strengthOf === 'function') {
+      const st = strengthOf(row)
+      if (st !== null) {
+        const proj = core.verifiedProjects({ 已验证项目: st.已验证项目 })
+        const tag = st.strength < core.ARCHIVE_THRESHOLD ? '（已低于归档阈值，待整理）' : ''
+        out.push(`   强度=${st.strength.toFixed(3)}${tag} 最后强化=${st.最后强化 || '—'} 已验证项目=${proj.length > 0 ? proj.join('/') : '—'} 使用次数=${st.使用次数}`)
+      }
+    }
   }
   if (k < n) out.push(`\n另有 ${n - k} 条命中未展开（要看得加「全部」或提高「取几条」）。`)
   return out.join('\n')
@@ -418,7 +433,7 @@ export function apply(ctx, config = {}) {
         详细: { type: 'boolean', description: 'true = 展开每条的环境/原因/备注等。' },
       },
       output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
-      async execute(args) {
+      async execute(args, exec) {
         if (!ready()) return degradedNotice()
         const core = getCore()
         const s = loadSchema()
@@ -460,7 +475,69 @@ export function apply(ctx, config = {}) {
         if (hits.length === 0) {
           return '记忆库里没有这条。已按你给的条件筛过；若条件为空，说明库中无有效条目。'
         }
-        const body = renderHits(core, s, header, hits, { take: args.全部 === true ? hits.length : take, full })
+
+        // ── 强化与验证（M-整-1 / M-整-2，惰性结算）──────────────────
+        //
+        // **只强化「真正命中并展示」的条目**，不是全库。否则「召回一次、全库复活」，
+        // 衰减就形同虚设了。`取几条` 之外的那些没展示，就不该被强化。
+        //
+        // 落盘只做一件事：往 reinforce.log 追加。**memory.csv 一个字节不动**（R1 铁律）。
+        const shown = args.全部 === true ? hits : hits.slice(0, take)
+        const project = projectName(cwdOf(exec?.agent)) || ''
+        let reinforced = 0
+        let verified = 0
+        try {
+          const idIdx = header.indexOf('id')
+          const today = core.localDate()
+          core.withLock(LOCK_PATH, () => {
+            for (const row of shown) {
+              const id = String(row[idIdx] ?? '').trim()
+              if (id === '') continue
+              // 用「行 + 日志」合并后的样子判断：CSV 里的值可能早被日志超过去了。
+              const base = {}
+              const resolve = core.makeResolver(s, header)
+              for (const name of Object.keys({ ...s.dimensions, ...s.auxiliary })) {
+                const i = resolve(name)
+                base[name] = i >= 0 ? String(row[i] ?? '') : ''
+              }
+              const logMap = core.readReinforceLog(REINFORCE_LOG_PATH)
+              const merged = core.applyReinforceLog(base, (r, n) => r[n] ?? '', logMap.get(id))
+              // 已归档/被取代的不强化（它们不该被「用」）
+              if (['被取代', '已归档'].includes(String(base.状态 ?? ''))) continue
+              const known = core.verifiedProjects({ 已验证项目: merged.已验证项目 })
+              const needVerify = project !== '' && !known.includes(project) && !known.includes('通用')
+              const res = core.appendReinforceLog({
+                logPath: REINFORCE_LOG_PATH, id, project, day: today, reinforce: true, verify: needVerify,
+              })
+              if (res.ok) { reinforced++; if (needVerify) verified++ }
+            }
+          })
+        } catch { /* 强化失败不影响召回结果——召回本身成功了，不能因为记账失败就报错 */ }
+
+        // 强度现算（读 CSV + 合并日志），只在「详细」模式展示，**不落盘**。
+        const strengthOf = (row) => {
+          try {
+            const resolve = core.makeResolver(s, header)
+            const base = {}
+            for (const name of Object.keys({ ...s.dimensions, ...s.auxiliary })) {
+              const i = resolve(name)
+              base[name] = i >= 0 ? String(row[i] ?? '') : ''
+            }
+            const logMap = core.readReinforceLog(REINFORCE_LOG_PATH)
+            const merged = core.applyReinforceLog(base, (r, n) => r[n] ?? '', logMap.get(String(base.id ?? '').trim()))
+            return {
+              strength: core.currentStrength(merged),
+              最后强化: merged.最后强化,
+              已验证项目: merged.已验证项目,
+              使用次数: merged.使用次数,
+            }
+          } catch { return null }
+        }
+        let body = renderHits(core, s, header, hits, { take: args.全部 === true ? hits.length : take, full, strengthOf })
+        if (reinforced > 0) {
+          const tip = verified > 0 ? `（本次强化 ${reinforced} 条，其中 ${verified} 条记入「已验证项目」）` : `（本次强化 ${reinforced} 条）`
+          body += '\n\n' + tip
+        }
         return note === '' ? body : note + '\n' + body
       },
     }),
@@ -533,4 +610,178 @@ export function apply(ctx, config = {}) {
       },
     }),
   )
+
+  // ⑤ 复盘（缺口立卡 + 闲时盘点）
+  ctx.tools.register(
+    defineTool({
+      name: 'memory_review',
+      description: [
+        '记忆库的复盘工具，两个用途：',
+        '【缺口立卡】`类型=缺口`：发现「该记却没记」（用户指出你漏了、或收尾自检发现中了必写清单却没写）→ 立一张缺口卡，',
+        '下轮快照就能看到它提醒你补记。缺口条目是**正常条目**（状态=生效、距离=按需、项目=当前项目），不是特殊存储。',
+        '【闲时盘点】`类型=盘点`：返回四张清单——衰减候选 / 晋升候选 / 原文-总结未配对 / 缺口未补，当整理工单用。',
+        '**只读**：盘点不改库、不改状态；衰减候选只是候选，归档要人工点头。',
+      ].join(' '),
+      parameters: {
+        类型: { type: 'string', required: true, description: "'缺口'（立卡）| '盘点'（出四张清单）" },
+        内容: { type: 'string', description: '类型=缺口 时必填：漏记了什么（一句话）。' },
+        环境: { type: 'string', description: '类型=缺口 时可选：这条缺口在什么条件下该被记住。' },
+        原因: { type: 'string', description: '类型=缺口 时可选：为什么该记却没记。' },
+        关键词: { type: 'string', description: '类型=缺口 时可选：兜底检索词。' },
+      },
+      output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
+      async execute(args, exec) {
+        if (!ready()) return degradedNotice()
+        const core = getCore()
+        const s = loadSchema()
+        const kind = String(args.类型 ?? '').trim()
+        const agent = exec?.agent
+
+        if (kind === '缺口') {
+          const content = String(args.内容 ?? '').trim()
+          if (content === '') throw new Error('类型=缺口 时必须给 `内容`：漏记了什么。')
+          const agentId = resolveAgentId(config, agent)
+          const proj = projectName(cwdOf(agent)) || '通用'
+          const row = {
+            内容: content,
+            环境: String(args.环境 ?? '').trim() || `当前项目「${proj}」里该记却没记的一条`,
+            原因: String(args.原因 ?? '').trim() || '复盘时发现缺口：该记却没记，下轮提醒补记',
+            类型: '记忆',
+            深度: '情景',
+            稳定性: '观察',
+            距离: '按需',   // 按需：下轮快照能看到（本项目条目进全文），补记后可归档
+            依据: '推断',
+            项目: proj,
+            角色: agentId,
+            关键词: String(args.关键词 ?? '').trim() || '缺口,复盘',
+            备注: '缺口立卡（memory_review）',
+          }
+          try {
+            const id = core.appendEntry({ schema: s, csvPath: CSV_PATH, lockPath: LOCK_PATH, row })
+            return `✓ 已立缺口卡 ${id}（项目=${proj}）。下轮快照里能看到它；补记完可以把它归档。`
+          } catch (e) {
+            throw new Error(`未立卡：${String(e?.message ?? e)}`)
+          }
+        }
+
+        if (kind === '盘点') {
+          const out = reviewInventory({ core, schema: s })
+          return renderInventory(out)
+        }
+
+        throw new Error(`类型只能是 '缺口' 或 '盘点'，收到「${kind}」。`)
+      },
+    }),
+  )
+}
+
+/**
+ * 盘点四张清单（只读）。
+ *
+ * 四张的判据：
+ *   · 衰减候选：现算强度 < 0.1（**只是候选**，不自动归档）
+ *   · 晋升候选：独立项目数 ≥ 3（**只是候选**，人工点头才升）
+ *   · 原文-总结未配对：同项目同时间窗里，只有总结没有配套原文（备注里没有「配套：」也没被引用）
+ *   · 缺口未补：`备注` 或 `关键词` 带「缺口」标记、且仍是生效状态的条目
+ */
+function reviewInventory({ core, schema }) {
+  const { header, rows } = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(schema))
+  const resolve = core.makeResolver(schema, header)
+  const logMap = core.readReinforceLog(REINFORCE_LOG_PATH)
+  const now = new Date()
+  const live = core.filterRows(schema, header, rows, {})
+
+  const pick = (row, name) => { const i = resolve(name); return i >= 0 ? String(row[i] ?? '') : '' }
+  const fieldOf = (row) => {
+    const o = {}
+    for (const name of Object.keys({ ...schema.dimensions, ...schema.auxiliary })) o[name] = pick(row, name)
+    for (const col of ['内容', '时间', '环境', '原因', '备注']) o[col] = pick(row, col)
+    return o
+  }
+
+  const decay = []
+  const promote = []
+  const gaps = []
+  const brief = (o) => ({ id: o.id, 内容: String(o.内容 ?? '').split('\n')[0].slice(0, 42), 项目: o.项目, 时间: o.时间 })
+
+  for (const row of live) {
+    const f = fieldOf(row)
+    const merged = core.applyReinforceLog(f, (x, n) => x[n] ?? '', logMap.get(String(f.id ?? '').trim()))
+    const strength = core.currentStrength(merged, now)
+    if (strength < core.ARCHIVE_THRESHOLD) {
+      decay.push({ ...brief(f), 强度: Number(strength.toFixed(3)), 深度: f.深度, 距离: f.距离, 最后强化: merged.最后强化 })
+    }
+    if (core.isPromotionCandidate({ 已验证项目: merged.已验证项目 })) {
+      promote.push({ ...brief(f), 已验证项目: merged.已验证项目, 项目数: core.verifiedProjects({ 已验证项目: merged.已验证项目 }).length })
+    }
+    const note = String(f.备注 ?? '')
+    const kw = String(f.关键词 ?? '')
+    if ((note.includes('缺口') || kw.includes('缺口')) && String(f.状态 ?? '') === '生效') {
+      gaps.push(brief(f))
+    }
+  }
+
+  // 原文-总结未配对：按「项目 + 时间」分桶，只有总结没有原文的那些。
+  // 「原文」条的判据是 `类型=原文`；配套关系靠 `备注` 里的「配套：<id>」互指。
+  const paired = new Set()
+  const allRows = live.map(fieldOf)
+  for (const f of allRows) {
+    const m = String(f.备注 ?? '').match(/配套[：:]\s*([^\s,，;；|｜]+)/g) || []
+    for (const x of m) {
+      const id = x.replace(/^配套[：:]\s*/, '').trim()
+      if (id !== '') { paired.add(id); paired.add(String(f.id ?? '').trim()) }
+    }
+  }
+  const unpaired = []
+  for (const f of allRows) {
+    const id = String(f.id ?? '').trim()
+    const type = String(f.类型 ?? '').trim()
+    // 只看「总结」（类型=记忆）且没被任何原文配上的
+    if (type !== '记忆') continue
+    if (paired.has(id)) continue
+    if (String(f.关键词 ?? '').includes('缺口')) continue // 缺口条不参与配对（它是提醒，不是结论）
+    unpaired.push(brief(f))
+  }
+
+  return {
+    衰减候选: decay.sort((a, b) => a.强度 - b.强度),
+    晋升候选: promote.sort((a, b) => b.项目数 - a.项目数),
+    原文总结未配对: unpaired,
+    缺口未补: gaps,
+    统计: {
+      生效条目: live.length,
+      衰减候选: decay.length,
+      晋升候选: promote.length,
+      未配对: unpaired.length,
+      缺口: gaps.length,
+      日志条数: logMap.size,
+    },
+  }
+}
+
+/** 把四张清单渲染成模型能读的文本（空清单也要出现，说明「这张是空的」）。 */
+function renderInventory(inv) {
+  const out = []
+  out.push(`记忆库盘点（生效 ${inv.统计.生效条目} 条）`)
+  out.push('')
+  const block = (title, list, line, empty) => {
+    out.push(`【${title}】${list.length} 条`)
+    if (list.length === 0) { out.push('  ' + empty); out.push(''); return }
+    for (const it of list) out.push('  ' + line(it))
+    out.push('')
+  }
+  block('衰减候选（强度 < 0.1，只是候选，不会自动归档）', inv.衰减候选,
+    (it) => `[${it.id}] 强度=${it.强度} 深度=${it.深度 || '—'} ${it.内容}`,
+    '没有——说明库里的条目都还「活着」。')
+  block('晋升候选（独立项目数 ≥ 3，要人工点头才晋升）', inv.晋升候选,
+    (it) => `[${it.id}] ${it.项目数} 个项目：${it.已验证项目}｜${it.内容}`,
+    '没有——还没有哪条在 3 个以上不同项目里被验证过。')
+  block('原文-总结未配对（同项目同时间窗只有总结、没配套原文）', inv.原文总结未配对,
+    (it) => `[${it.id}] ${it.项目 || '—'}｜${it.内容}`,
+    '没有——该配的都配上了。')
+  block('缺口未补（立了卡但还没补记的）', inv.缺口未补,
+    (it) => `[${it.id}] ${it.内容}`,
+    '没有——没有欠着的缺口。')
+  out.push('> 盘点只读：以上都是候选，归档/晋升都要人工点头。')
+  return out.join('\n')
 }
