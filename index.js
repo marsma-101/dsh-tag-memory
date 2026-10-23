@@ -27,13 +27,79 @@ export const name = 'tag-memory'
 /** Host 行配置 schema：加载期校验 + 设置页表单描述。 */
 export const Config = HostConfig
 
-/** 消费 webServer（挂 API 路由）；不发布服务，故无需 realm。 */
-export const inject = ['webServer']
+/** 消费 webServer（挂 API 路由）与 tools（挂 pre-execute 守卫）；不发布服务，故无需 realm。 */
+export const inject = ['webServer', 'tools']
 
 const ROUTE = '/tag-memory-api'
 
 /** 两次自愈之间至少隔这么久（毫秒），避免 agent/created 风暴里反复扫盘。 */
 const HEAL_COOLDOWN_MS = 3000
+
+// ── 隔离守卫（S-防-1）────────────────────────────────────
+//
+// 记忆库就是一个 CSV，任何 fs / shell / glob 工具都碰得到它——改一格、删一行、
+// 甚至整份覆盖，插件完全不知道。守卫在**工具执行前**拦住所有「参数里出现记忆库路径」
+// 的调用，只留插件自己的四个工具当合法通道（它们跑在插件代码里，不经过这条管线）。
+//
+// 三处细节是刻意这么写的，改之前先读完：
+//   ① **逃生口在 import 时读一次**。值在任何 agent 存在之前就固定了，插件、工具、模型
+//      都无法在进程生命周期内改它。写成每次调用时读，模型就能靠改环境变量绕开守卫。
+//   ② **needle 运行时拼装**。源码里若出现 `tag-memory` 这个字面量，插件自己的源码路径
+//      就会被守卫拦下（写这个插件的活直接做不下去）。拼起来，源码里就没有这个串。
+//   ③ **扫的是参数里的字符串，而且递归**。shell 命令、glob 通配、文件路径一条规则全覆盖；
+//      只看顶层就漏了 `{args:['-c','cat /…/memory.csv']}` 这种。
+const GUARD_DISABLED = process.env.DSH_TAG_MEMORY_GUARD === 'off'
+
+/** 基础 needle：默认数据目录名。运行时拼装，源码里不留这个字面量。 */
+const GUARD_NEEDLE = ['tag', 'memory'].join('-')
+
+/**
+ * 这个调用是不是在碰记忆库。
+ *
+ * needle 是**一组**、不是一条：基础那条只管默认目录名（`<DSH_HOME>/tag-memory`），
+ * 用户把 `dataDir` 配到别处（比如 `/data/mem`）时它一个字都匹配不上——
+ * 实测过：`/data/mem/store/memory.csv` 在只有基础 needle 时直接放行。
+ * 所以真正生效的 needle 由 `apply()` 把**当前数据目录**拼进去（见 `guardNeedles()`）。
+ */
+function argumentsTouchGuard(args, needles) {
+  if (typeof args === 'string') return needles.some((n) => n !== '' && args.includes(n))
+  if (Array.isArray(args)) return args.some((a) => argumentsTouchGuard(a, needles))
+  if (args && typeof args === 'object') return Object.values(args).some((a) => argumentsTouchGuard(a, needles))
+  return false
+}
+
+/** 拒绝话术：告诉模型**该用什么**，而不只是「不许」。 */
+function guardDenialReason() {
+  return '记忆库只能经插件自己的工具访问：写用 memory_write / 读用 memory_recall / 改旧条用 memory_supersede。'
+    + '参数里出现了记忆库的路径，这次调用已拦下——用 fs / shell / glob 直接读写会绕开校验、判重与写锁，'
+    + '把库改坏（错列、丢行、并发写坏）插件是发现不了的。要改库请走上面三个工具。'
+}
+
+/** 插件自己的四个工具：合法通道，不经过这条管线，必须豁免。 */
+const GUARD_EXEMPT_TOOLS = ['memory_write', 'memory_recall', 'memory_supersede', 'memory_review']
+
+/**
+ * 当前该用哪几条 needle 判定。
+ *
+ * `dataDir` 可配，所以数据目录不一定叫 `tag-memory`。这里把**实际在用的**目录名、
+ * 库文件路径、锁文件路径都收进来——用户在 `dataDir` 下直接写 `memory.csv` 也算碰库。
+ * 目录名太短（少于 4 字）时跳过：`mem` 这种词会误伤普通对话内容。
+ */
+function guardNeedles(dataDir, csvPath, lockPath) {
+  const out = [GUARD_NEEDLE]
+  const add = (v) => { if (typeof v === 'string' && v.trim() !== '') out.push(v.trim()) }
+  add(csvPath)
+  add(lockPath)
+  // 目录名单独也收一条（`cat /data/mem/store/memory.csv` 里 csvPath 能中，
+  // 但 `ls /data/mem` 这种只给目录的也得拦）。
+  const base = typeof dataDir === 'string' ? dataDir.trim().replace(/[\\/]+$/, '') : ''
+  if (base !== '') {
+    const name = base.split(/[\\/]/).pop() ?? ''
+    if (name.length >= 4) out.push(name)
+    out.push(base)
+  }
+  return Array.from(new Set(out.filter((n) => n !== '')))
+}
 
 export function apply(ctx, config = {}) {
   // 数据目录：配置优先（`dataDir`，兼容旧名 `libraryDir`）；没配就是推断链
@@ -139,6 +205,36 @@ export function apply(ctx, config = {}) {
   heal('挂载')
   const off = ctx.on('agent/created', () => heal('新智能体'))
 
+  // ── 隔离守卫：工具执行前的闸（S-防-1）──────────────────
+  //
+  // 挂在 **profile 平面**，所以管这个 profile 下所有智能体的所有工具调用。
+  // 位置在这里（heal 之后、API 路由之前）是刻意的：守卫比 API 更早生效，
+  // 万一路由没挂上（`ctx.webServer` 缺失），库至少还是守着的。
+  //
+  // 逃生口是**模块级常量**（import 时读一次），不在这里读——见文件头 ①。
+  let offGuard = null
+  if (!GUARD_DISABLED) {
+    const needles = guardNeedles(DATA_DIR, CSV_PATH, LOCK_PATH)
+    try {
+      offGuard = ctx.on('tools/pre-execute', (exec, next) => {
+        // 豁免：插件自己的工具走插件代码，根本不经过这条管线。
+        const toolName = typeof exec?.name === 'string' ? exec.name : ''
+        if (GUARD_EXEMPT_TOOLS.includes(toolName)) return next()
+        if (argumentsTouchGuard(exec?.arguments, needles)) {
+          // waterfall：返回即截断，后来者翻不了案。
+          return Promise.resolve({ kind: 'deny', reason: guardDenialReason() })
+        }
+        return next()
+      })
+      log(`[tag-memory] 隔离守卫生效（needle ${needles.length} 条；逃生口 DSH_TAG_MEMORY_GUARD=off）`)
+    } catch (e) {
+      // 挂不上不能装作守住了：这条必须出声，否则用户以为库是保护着的。
+      log(`[tag-memory] ⚠ 隔离守卫没挂上，库对 fs/shell 工具是敞开的：${String(e?.message ?? e)}`)
+    }
+  } else {
+    log('[tag-memory] 隔离守卫已按 DSH_TAG_MEMORY_GUARD=off 关闭')
+  }
+
   /**
    * 给 /tag-memory-api 做 request admission。
    *
@@ -227,6 +323,7 @@ export function apply(ctx, config = {}) {
   return () => {
     try { offRoute?.() } catch { /* 已释放 */ }
     try { off?.() } catch { /* 已释放 */ }
+    try { offGuard?.() } catch { /* 已释放 */ }
   }
 }
 
