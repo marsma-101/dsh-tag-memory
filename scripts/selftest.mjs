@@ -1,4 +1,4 @@
-﻿/**
+/**
  * selftest.mjs —— 自检：一条命令验完插件的纯逻辑，**全程沙箱、不碰任何 live 数据**。
  *
  *   node scripts/selftest.mjs
@@ -1446,9 +1446,23 @@ try {
     }
 
     ok('设成同一个目录：什么都不做', store2.setLibraryDir(lib2) === false)
-    ok('指到不存在的目录：ready=false，路径照实报出来（不假装还是好的）',
-      store2.setLibraryDir(join(sandbox, '不存在的库')) === true &&
-      store2.ready() === false && store2.SKILL_DIR === resolve(join(sandbox, '不存在的库')))
+    // 0.3.0 起（P2-13 / V2-c）：显式指到**不存在**的目录要**当场报错**，不再静默降级。
+    // 老用例断的是「ready=false + 路径照实报出来」——那其实是「装作切过去了」的旧行为：
+    // 界面会显示一个不存在的库路径，人以为库被搬走，其实它还好好在原处。
+    // 新规矩：抛错 + **回滚到原目录**（不把进程留在一个坏路径上）。
+    {
+      const before = store2.DATA_DIR
+      let caught = null
+      try { store2.setLibraryDir(join(sandbox, '不存在的库')) } catch (e) { caught = e }
+      ok('指到不存在的目录：当场报错（不是静默降级）',
+        caught !== null && caught.code === 'TAG_MEMORY_DATA_DIR_MISSING')
+      ok('指到不存在的目录：报错里给了修法（说清三条路，不是只说「失败」）',
+        caught !== null && /修法三选一/.test(String(caught.message)) && /mkdir -p/.test(String(caught.message)))
+      ok('指到不存在的目录：目录没被偷偷建出来（不静默建空库）',
+        existsSync(join(sandbox, '不存在的库')) === false)
+      ok('指到不存在的目录：数据目录回滚到原处（进程不停在坏路径上）',
+        store2.DATA_DIR === before && store2.ready() === true)
+    }
   }
 
   // ── L. 本体落点（`--dest` / P-7）与空环境跳过（P-2）─────────────────

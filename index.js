@@ -21,6 +21,7 @@ import {
   setDataDir,
 } from './lib/store.mjs'
 import { DEFAULT_MEMORY_FILE_NAMES, NOTICE_BEGIN, detectMemoryFiles, renderNotice, selfHeal } from './lib/notice.mjs'
+import { snapshotOrThrow, snapshotStatus } from './lib/engine/snapshot.mjs'
 import { HostConfig } from './lib/config.mjs'
 
 export const name = 'tag-memory'
@@ -696,12 +697,28 @@ function restoreFromLocked(stamp) {
   }
 
   // ① 强制先备份当前这一版 —— 失败就不许恢复
+  //    两层留档，缺一不可：
+  //      · 快照（snapshots/，不依赖备份地址）——**这一层保证「任何时候都留得下来」**；
+  //      · 全量备份（runBackup，要设备份地址）——用户能在「备份历史」里看见并回退。
+  //    原来只有第二层，于是没设备份地址的用户**根本恢复不了**（NO_DIR 直接挡回）。
+  //    现在快照先落，全量备份失败只降级成提示，不再否决整个恢复。
   let pre = null
+  let preSnapshot = null
+  try {
+    preSnapshot = snapshotOrThrow({ storeDir: STORE_DIR, csvPath: CSV_PATH, label: `恢复 ${stamp} 之前自动留档` }, '恢复')
+  } catch (e) {
+    return { ok: false, code: 'PRESNAPSHOT', error: String(e?.message ?? e) }
+  }
+  let preBackupNote = ''
   try {
     pre = bk.runBackup(STORE_DIR, { label: `恢复 ${stamp} 之前自动留档` })
   } catch (e) {
-    return { ok: false, code: 'PREBACKUP', error: `恢复前留档没成功，已中止：${String(e?.message ?? e)}` }
+    // 没设备份地址 / 备份写不进 —— 只影响「备份历史」那份，快照已经在手，恢复照做。
+    preBackupNote = `（全量备份没做成：${String(e?.message ?? e)}；快照 ${preSnapshot.name} 已留）`
   }
+  // 下面各处要报「回退到哪份」：优先报全量备份的戳（界面能点），没有就报快照的戳。
+  // 两个都是**恢复前**的档，语义一样；`pre` 可能为 null（没设备份地址），所以统一走这里。
+  const preStamp = pre !== null && typeof pre.stamp === 'string' && pre.stamp !== '' ? pre.stamp : preSnapshot.stamp
 
   // ② 整体替换（用上面读下来的那份字节，不用磁盘上现在这个名字——它可能刚被留档覆盖）
   //    tmp + rename：要么还是旧库，要么已经是完整的新库，没有「半截」这个中间态。
@@ -714,8 +731,8 @@ function restoreFromLocked(stamp) {
     return {
       ok: false,
       code: 'WRITE',
-      error: `替换文件时出错，请用刚留的档回退（${pre.stamp}）：${String(e?.message ?? e)}`,
-      preBackup: pre.stamp,
+      error: `替换文件时出错，请用刚留的档回退（${preStamp}）：${String(e?.message ?? e)}`,
+      preBackup: preStamp,
     }
   }
 
@@ -747,10 +764,10 @@ function restoreFromLocked(stamp) {
   try {
     afterCount = core.readTable(readFileSync(CSV_PATH, 'utf8')).rows.length
   } catch (e) {
-    return { ok: false, code: 'VERIFY', error: `换完读不出来，请用刚留的档回退（${pre.stamp}）：${String(e?.message ?? e)}`, preBackup: pre.stamp }
+    return { ok: false, code: 'VERIFY', error: `换完读不出来，请用刚留的档回退（${preStamp}）：${String(e?.message ?? e)}`, preBackup: preStamp }
   }
   if (afterCount !== expectCount) {
-    return { ok: false, code: 'VERIFY', error: `换完记录数对不上（应为 ${expectCount}，实际 ${afterCount}）——请用刚留的档回退（${pre.stamp}）`, preBackup: pre.stamp }
+    return { ok: false, code: 'VERIFY', error: `换完记录数对不上（应为 ${expectCount}，实际 ${afterCount}）——请用刚留的档回退（${preStamp}）`, preBackup: preStamp }
   }
 
   // ④ 水位：把「现在库里是什么」登记成刚恢复的这一版
@@ -758,18 +775,18 @@ function restoreFromLocked(stamp) {
   const cfg = readCfg()
   if (cfg.broken) {
     try { appendFileSync(join(st.dir, 'last-backup.log'),
-      `${localIsoTimestamp()}  restore ${stamp}  条目=${afterCount}  恢复前留档=${pre.stamp}  ⚠ 备份配置损坏，水位未更新\n`, 'utf8') } catch { /* 非致命 */ }
-    return { ok: true, stamp, entryCount: afterCount, preBackup: pre.stamp, schema: schemaInfo, status: backupStatus(), cfgWarning: `备份配置损坏（${cfg.error}），水位未更新` }
+      `${localIsoTimestamp()}  restore ${stamp}  条目=${afterCount}  恢复前留档=${preStamp}  ⚠ 备份配置损坏，水位未更新\n`, 'utf8') } catch { /* 非致命 */ }
+    return { ok: true, stamp, entryCount: afterCount, preBackup: preStamp, preSnapshot: preSnapshot.name, backupNote: preBackupNote, schema: schemaInfo, status: backupStatus(), cfgWarning: `备份配置损坏（${cfg.error}），水位未更新` }
   }
   cfg.lastBackupAt = localIsoTimestamp()
   cfg.lastCount = afterCount
   try { writeJsonAtomic(BACKUP_CFG_PATH, cfg) } catch { /* 非致命 */ }
   try {
     appendFileSync(join(st.dir, 'last-backup.log'),
-      `${localIsoTimestamp()}  restore ${stamp}  条目=${afterCount}  恢复前留档=${pre.stamp}\n`, 'utf8')
+      `${localIsoTimestamp()}  restore ${stamp}  条目=${afterCount}  恢复前留档=${preStamp}\n`, 'utf8')
   } catch { /* 非致命 */ }
 
-  return { ok: true, stamp, entryCount: afterCount, preBackup: pre.stamp, schema: schemaInfo, status: backupStatus() }
+  return { ok: true, stamp, entryCount: afterCount, preBackup: preStamp, preSnapshot: preSnapshot.name, backupNote: preBackupNote, schema: schemaInfo, status: backupStatus() }
 }
 
 // ── 合并 ────────────────────────────────────────────────
@@ -1055,12 +1072,22 @@ function mergeFrom(body) {
 
   // ④ 落笔：先留档 → 只追加
   if (newItems.length === 0) return { ...report, applied: [], note: '没有需要新增的条目（全是重复），一个字节都没动' }
-  let pre
+  // 留档两层，与恢复同一条规矩：快照先落（不依赖备份地址），全量备份失败只降级成提示。
+  // 原来只有全量备份，没设备份地址的用户连合库都做不了。
+  let preSnap
+  try {
+    preSnap = snapshotOrThrow({ storeDir: STORE_DIR, csvPath: CSV_PATH, label: '合并外来记忆库之前自动留档' }, '合并')
+  } catch (e) {
+    return { ok: false, code: 'PRESNAPSHOT', error: String(e?.message ?? e) }
+  }
+  let pre = null
+  let preBackupNote = ''
   try {
     pre = backupCore().runBackup(STORE_DIR, { label: '合并外来记忆库之前自动留档' })
   } catch (e) {
-    return { ok: false, code: e?.code ?? 'ERROR', error: `合并前留档没成功，已中止（一个字节都没动）：${String(e?.message ?? e)}` }
+    preBackupNote = `（全量备份没做成：${String(e?.message ?? e)}；快照 ${preSnap.name} 已留）`
   }
+  const preStamp = pre !== null && typeof pre.stamp === 'string' && pre.stamp !== '' ? pre.stamp : preSnap.stamp
 
   const appended = []
   const failed = []
@@ -1073,7 +1100,7 @@ function mergeFrom(body) {
     }
   }
 
-  return { ...report, dryRun: false, preBackup: pre.stamp, appended, failed, status: backupStatus() }
+  return { ...report, dryRun: false, preBackup: preStamp, preSnapshot: preSnap.name, appended, failed, note: preBackupNote, status: backupStatus() }
 }
 
 // ── 允许的排序：时间 / id 的升序降序。未指定或列不存在 → 原序。 ──
