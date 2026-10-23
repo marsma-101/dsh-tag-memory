@@ -26,7 +26,7 @@
  *
  * 退出码：0 = 全过（含「跳过」）；1 = 有 FAIL。
  */
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, copyFileSync, existsSync, symlinkSync, cpSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, copyFileSync, existsSync, symlinkSync, cpSync, realpathSync, utimesSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
@@ -2267,6 +2267,213 @@ try {
       rmSync(box, { recursive: true, force: true })
     }
   } catch (e) { fail++; results.push(`FAIL  V3 整理 — ${String(e?.message ?? e)}`) }
+
+  // ── Q. V4 读取打磨：复盘三段式 + 上限 + 缓存 + 画像（0.3.0）──────────────
+  //     阿验规划 V4-01~V4-10 里**后端相关**的部分（前端 4/5/6 归阿帘）。
+  try {
+    const core = store.getCore()
+    const schema0 = store.loadSchema()
+    const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex')
+
+    // 造一个独立的 recall 沙箱（不动全局沙箱库，免得影响别的节）
+    const mkRecallBox = (count) => {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v4-'))
+      const skill = join(box, 'skill')
+      mkdirSync(join(skill, 'references'), { recursive: true })
+      mkdirSync(join(skill, 'store'), { recursive: true })
+      copyFileSync(join(PKG, 'lib', 'engine', 'tags.schema.json'), join(skill, 'references', 'tags.schema.json'))
+      const header = readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv'), 'utf8').split('\n')[0]
+      const HEAD = header.split(',')
+      const mkRow = (o) => {
+        const a = new Array(HEAD.length).fill('')
+        for (const [k, v] of Object.entries(o)) { const i = HEAD.indexOf(k); if (i >= 0) a[i] = v }
+        return a.join(',')
+      }
+      const rows = []
+      for (let i = 0; i < count; i++) {
+        rows.push(mkRow({
+          id: `M-20260101-${String(i + 1).padStart(3, '0')}`, 内容: `沙箱条目${i + 1}号`,
+          时间: '2026-01-01', 环境: 'e', 原因: 'r', 稳定性: '稳定', 成熟度: '语义',
+          距离: '按需', 角色: 'selftest', 项目: '通用', 状态: '生效', 依据: '推断', 类型: '记忆',
+        }))
+      }
+      writeFileSync(join(skill, 'store', 'memory.csv'), header + '\n' + rows.join('\n') + '\n')
+      writeFileSync(join(skill, 'store', 'index.md'), '# i\n')
+      return { box, skill }
+    }
+
+    /** 在子进程里跑 recall（数据目录要换，不能污染当前进程的 store 单例）。 */
+    const runRecall = (skill, args, cwdName = 'proj') => {
+      const script = `
+        const { pathToFileURL } = require('node:url')
+        const { join } = require('node:path')
+        ;(async () => {
+          const tools = []
+          const preset = await import(pathToFileURL(${JSON.stringify(join(PKG, 'preset.js'))}).href)
+          preset.apply({ systemPrompt: { section: () => {}, getSectionOrder: () => 50 }, tools: { register: (t) => tools.push(t) } }, { dir: 'C:/x' })
+          const recall = tools.find((t) => t.name === 'memory_recall')
+          const out = await recall.execute(${JSON.stringify(args)}, { agent: { id: 't', session: { header: { cwd: ${JSON.stringify(join(skill, 'proj'))} } } } })
+          console.log(out)
+        })()
+      `
+      return spawnSync(process.execPath, ['-e', script],
+        { env: { ...process.env, DSH_TAG_MEMORY_DATA_DIR: skill }, encoding: 'utf8' })
+    }
+
+    // Q-1（V4-01）复盘放宽搜：条件筛空 → 类型/时间窗找最接近的 3 条 + 「都不是？」提示
+    {
+      const { box, skill } = mkRecallBox(5)
+      const r = runRecall(skill, { 条件: '{"内容":"这个词库里绝对没有"}', 复盘: true })
+      ok('V4-01 复盘模式：条件筛空后走放宽搜，摆出最近条目',
+        /放宽/.test(r.stdout) && /沙箱条目/.test(r.stdout), r.stdout.slice(0, 80))
+      ok('V4-01 放宽搜带「都不是？」提示（让用户认，而不是模型替他决定）',
+        /都不是/.test(r.stdout))
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // Q-2（V4-02）引导补记：真没有时给出 memory_write / memory_review 两条路
+    {
+      const { box, skill } = mkRecallBox(2)
+      const r = runRecall(skill, { 条件: '{"内容":"这个词库里绝对没有"}', 复盘: true })
+      ok('V4-02 复盘引导补记：明确指向 memory_write',
+        /memory_write/.test(r.stdout), r.stdout.slice(0, 60))
+      ok('V4-02 复盘引导立卡：明确指向 memory_review',
+        /memory_review/.test(r.stdout))
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // Q-3（V4-03）问用户话术（O-6）：含模板化提问，不是一句冷冰冰的「没有」
+    {
+      const { box, skill } = mkRecallBox(2)
+      const r = runRecall(skill, { 条件: '{"内容":"这个词库里绝对没有"}', 复盘: true })
+      ok('V4-03 复盘含「先问用户」话术（聊过吗/什么时候/你的想法）',
+        /咱们之前聊过这个吗/.test(r.stdout) && /什么想法或倾向/.test(r.stdout))
+      ok('V4-03 话术明说「问之前不要替用户假设答案」（防模型自问自答）',
+        /不要替用户假设/.test(r.stdout))
+      // 正控：普通模式（不传复盘）**不该**出现问用户话术
+      const plain = runRecall(skill, { 条件: '{"内容":"这个词库里绝对没有"}' })
+      ok('V4-03 正控：普通模式查不到就说没有，不走复盘话术',
+        !/咱们之前聊过这个吗/.test(plain.stdout) && /没有这条/.test(plain.stdout))
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // Q-4（V4-04）端到端闭环：查不到 → 问用户 → 用户答复落库 → 再查能查到
+    {
+      const { box, skill } = mkRecallBox(2)
+      const r1 = runRecall(skill, { 条件: '{"内容":"端口号是多少"}', 复盘: true })
+      ok('V4-04 闭环①：查不到并给出问用户话术', /咱们之前聊过这个吗/.test(r1.stdout))
+      // 模拟用户答复后落库
+      const csv = join(skill, 'store', 'memory.csv')
+      const lock = join(skill, 'store', '.append.lock')
+      core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: { 内容: '端口号是 3180（用户答复）', 时间: '2026-10-24', 环境: 'e', 原因: 'r', 类型: '记忆',
+          深度: '语义', 稳定性: '稳定', 距离: '按需', 依据: '原话', 项目: 'proj', 角色: 'selftest' } })
+      const r2 = runRecall(skill, { 条件: '{"内容":"端口号是 3180（用户答复）"}' })
+      ok('V4-04 闭环②：落库后能查回来（端到端闭合）',
+        /命中 1 条/.test(r2.stdout) && /端口号是 3180/.test(r2.stdout), r2.stdout.split('\n')[0])
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // Q-5（V4-05）recall 上限：取几条≤50、全部≤200，超了带「还有 N 条未展开」
+    {
+      const { box, skill } = mkRecallBox(60)
+      const r1 = runRecall(skill, { 取几条: 100 })
+      ok('V4-05 `取几条:100` 实际只展开 50 条（上限生效）',
+        /显示前 50 条/.test(r1.stdout), r1.stdout.split('\n')[0])
+      ok('V4-05 截断后明说「还有 N 条未展开」+ 指出是上限截的',
+        /还有 10 条未展开/.test(r1.stdout) && /上限 50/.test(r1.stdout), r1.stdout.split('\n').slice(-1)[0])
+      const r2 = runRecall(skill, { 全部: true })
+      ok('V4-05 正控：`全部:true` 且总数 < 200 时全展开、不报截断',
+        /命中 60 条/.test(r2.stdout) && !/还有 \d+ 条未展开/.test(r2.stdout), r2.stdout.split('\n')[0])
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // Q-6（V4-06）缓存：命中可观测、失效正确
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v4-cache-'))
+      const csv = join(box, 'memory.csv')
+      writeFileSync(csv, 'id,内容\nM-1,a\n')
+      store.invalidateCache()
+      const r1 = store.readTableCached(csv, core, schema0)
+      const before = store.cacheStats()
+      const r2 = store.readTableCached(csv, core, schema0)
+      const after = store.cacheStats()
+      ok('V4-06 第二次读走缓存（命中计数可观测地 +1）',
+        r1.cached === false && r2.cached === true && after.hits === before.hits + 1,
+        `hits ${before.hits}→${after.hits}`)
+      ok('V4-06 缓存命中时结果与首次一致', JSON.stringify(r1.rows) === JSON.stringify(r2.rows))
+      writeFileSync(csv, 'id,内容\nM-1,a\nM-2,b\n')
+      const r3 = store.readTableCached(csv, core, schema0)
+      ok('V4-06 文件变了 → 缓存失效、读到新内容（rows 1→2）',
+        r3.cached === false && r3.rows.length === 2, `${r3.cached} ${r3.rows.length}`)
+      // 同长度改内容：只靠 size 会漏，必须靠 mtime
+      writeFileSync(csv, 'id,内容\nM-1,a\nM-2,c\n')
+      const future = new Date(Date.now() + 2000)
+      try { utimesSync(csv, future, future) } catch { /* 某些 fs 不支持，跳过 */ }
+      const r4 = store.readTableCached(csv, core, schema0)
+      ok('V4-06 同长度改内容也能失效（mtime 抓得住，不是只比 size）',
+        r4.cached === false && String(r4.rows[1][1]) === 'c', `${r4.cached} ${r4.rows[1]?.[1]}`)
+      ok('V4-06 缓存只缓存解析结果、不写盘（读不改变文件）',
+        (() => { const h = sha(csv); store.readTableCached(csv, core, schema0); return sha(csv) === h })())
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // Q-7（V4-07）画像路由：固定 + 常驻 + 通用 → 进快照全文、豁免衰减
+    {
+      const dict = core.renderDict(schema0)
+      ok('V4-07 字典里有画像的落库姿势（类型=固定 / 距离=常驻 / 项目=通用）',
+        /画像/.test(dict) && /类型=固定/.test(dict) && /距离=常驻/.test(dict) && /项目=通用/.test(dict))
+      // 画像条目自动享受两条好处：豁免衰减 + 进快照全文
+      const profile = { 强度: '1', 最后强化: '2020-01-01', 深度: '情景', 类型: '固定', 距离: '常驻' }
+      ok('V4-07 画像条目（固定+常驻）3000 天后强度仍是 1（不淡出）',
+        core.currentStrength(profile, new Date('2026-10-24')) === 1)
+    }
+
+    // Q-8（V4-08）画像推理指引在字典里：不直接问 + 多维水平估计
+    {
+      const dict = core.renderDict(schema0)
+      ok('V4-08 字典含「从已有信息推理、不直接问」',
+        /不直接问/.test(dict) && /推理/.test(dict))
+      ok('V4-08 字典含「多维度水平估计、不是一个标签」',
+        /多维度的水平估计/.test(dict) && /不是一个标签/.test(dict))
+      ok('V4-08 字典含推理示例（PLC/三视图 → 工科/机械背景）',
+        /PLC|三视图/.test(dict))
+      ok('V4-08 字典含画像维护方式（水平变化走 supersede）',
+        /memory_supersede/.test(dict))
+    }
+
+    // Q-9（V4-09）画像更新走 supersede，旧画像退场
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v4-pf-'))
+      const csv = join(box, 'memory.csv')
+      writeFileSync(csv, readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv')))
+      const lock = join(box, '.lock')
+      const oldId = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: { 内容: '画像：编程 入门', 时间: '2026-01-01', 环境: '推断自提问深度', 原因: '让解释深浅跟着走',
+          类型: '固定', 深度: '', 稳定性: '观察', 距离: '常驻', 依据: '推断', 项目: '通用', 角色: 'selftest' } })
+      const r = core.supersedeEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: oldId,
+        row: { 内容: '画像：编程 进阶（学完新东西）', 稳定性: '稳定' } })
+      const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      const hits = core.filterRows(schema0, t.header, t.rows, {})
+      ok('V4-09 画像更新走 supersede：新条在、旧条退场',
+        r.ok && !hits.some((x) => x[0] === oldId) && hits.some((x) => x[0] === r.id),
+        hits.map((x) => x[0]).join(','))
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // Q-10（V4-10）快照尾部收尾自检一行
+    {
+      const sections = []
+      const ctx2 = { systemPrompt: { section: (s) => sections.push(s), getSectionOrder: () => 50 }, tools: { register: () => {} } }
+      const preset2 = await import(pathToFileURL(join(PKG, 'preset.js')).href)
+      preset2.apply(ctx2, { dir: 'C:/x' })
+      const text = sections[0].text({ agent: { id: 'selftest', session: { header: { cwd: join(sandbox, 'proj') } } } })
+      ok('V4-10 快照尾部有收尾自检行（答复前自问中了哪条必写）',
+        /答复前自问/.test(text) && /必写/.test(text))
+      ok('V4-10 自检行同时提醒「之前/上次」（该查没查）',
+        /之前\/上次/.test(text))
+    }
+  } catch (e) { fail++; results.push(`FAIL  V4 读取打磨 — ${String(e?.message ?? e)}`) }
 
   const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
   ok('package.json 导出 ./client 且声明 dsh.client', pkg.exports['./client'] === './client.js' && pkg.dsh?.client?.platform === 'web')

@@ -36,6 +36,7 @@ import {
   LOCK_PATH,
   STORE_DIR,
   REINFORCE_LOG_PATH,
+  readTableCached,
   cwdOf,
   getCore,
   loadSchema,
@@ -155,7 +156,7 @@ function snapshotText(config, project) {
   let schema, header, rows
   try {
     schema = loadSchema()
-    const t = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(schema))
+    const t = readTableCached(CSV_PATH, core, schema)
     header = t.header ?? []
     rows = t.rows ?? []
   } catch { return '' }
@@ -231,6 +232,10 @@ function snapshotText(config, project) {
   if (notes.length) parts.push('', ...notes.map((n) => `> ${n}`))
   if (blocks.length) parts.push('', ...blocks)
 
+  // 收尾自检（M-嵌-2 / V4-10）：一行约 40 字，换「该记没记、该查没查」的兜底。
+  // 放在**段尾**是刻意的——模型读到快照最后才看到它，正好在准备答复之前。
+  parts.push('', '> **答复前自问**：这一轮中了哪条必写？用户说「之前/上次」了吗？中了就立刻 memory_write / memory_recall。')
+
   return parts.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()
 }
 
@@ -298,6 +303,76 @@ function keywordSearch(schema, header, rows, kw) {
     if (idIdx >= 0 && deadIds.has(String(r[idIdx] ?? '').trim())) return false
     return r.some((c) => String(c).toLowerCase().includes(needle))
   })
+}
+
+// ── 复盘三段式（M-读-4 / V4-a）────────────────────────────
+//
+// 触发场景：用户说「之前说过 X」「上次不是定过 Y 吗」，模型查了没查到——
+// 或者干脆没查就被用户指出。**「查不到」不该是一句冷冰冰的「没有」**，
+// 那等于把一次有价值的机会丢掉了。三段式把它变成一段对话：
+//
+//   ① 放宽搜：条件筛 → 关键词全文兜底 → 只按类型/时间窗找最接近的 3 条
+//   ② 引导补记：库里真没有 → 告诉模型怎么补（memory_write）或立卡（memory_review）
+//   ③ 问用户：**补记之前先问用户**（主子 2026-10-23 补充，O-6）
+//      用户答复本身就是一条新记忆——比模型自己猜着补一条靠谱得多。
+
+/** `取几条` 硬上限（M-读-2）。 */
+const RECALL_TAKE_MAX = 50
+/** `全部=true` 时的展开上限（M-读-2）。 */
+const RECALL_ALL_MAX = 200
+
+/** 「都不是？」提示：放宽搜找到的东西，要明说它可能不是用户要的。 */
+function reviewHint(nearby) {
+  if (nearby.length === 0) return ''
+  return `\n（上面 ${nearby.length} 条是按类型/时间窗**放宽**找出来的最近条目，都不是？那就往下看。）`
+}
+
+/**
+ * 查不到时给模型的话术（三段式第 ②③ 段）。
+ *
+ * **话术是原文，不要自己改**：主子点名的就是这套问法——
+ * 「先问用户，别自己猜着补一条」。模型照着念，用户答了再落库。
+ */
+function reviewGuidance(cond, kw) {
+  const where = kw !== '' ? `关键词「${kw}」` : (cond && Object.keys(cond).length > 0 ? `条件 ${JSON.stringify(cond)}` : '全库')
+  return [
+    `记忆库里没有这条。已按${where}筛过，关键词兜底也搜过，按类型/时间窗放宽也没找到。`,
+    '',
+    '**下一步不要自己编，按这个顺序来：**',
+    '① 若这条值得记 → 用 memory_write 补记（路由=纠正/交代，`依据` 按实际填）；',
+    '② 若是「你该记得却没记」的 → 调用 memory_review({类型:"缺口", 内容:"…"}) 立卡，下轮会提醒你；',
+    '③ **补记之前先问用户**，照下面这句问（原话，别改写成别的说法）：',
+    '',
+    '「我在处理 X 时发现记忆里没有相关的记录——咱们之前聊过这个吗？如果聊过麻烦提醒我一下大概什么时候/哪次；如果没有，你对这个问题有什么想法或倾向？我先记下来。」',
+    '',
+    '用户答完，把答案用 memory_write 落库（依据=原话）。**问之前不要替用户假设答案。**',
+  ].join('\n')
+}
+
+/**
+ * 放宽搜：条件筛空后，只按「类型」和「时间窗」找最接近的。
+ *
+ * 为什么是这两维：用户说「之前/上次」时，他自己也记不清维度——
+ * 但「那大概是哪类话」「大概什么时候」这两个线索最耐用。
+ * 这里**不猜内容**，只把候选摆出来让用户认。
+ */
+function reviewWidenSearch(core, schema, cond, take) {
+  const { header, rows } = readTableCached(CSV_PATH, core, schema)
+  const resolve = core.makeResolver(schema, header)
+  const live = core.filterRows(schema, header, rows, {})
+  // 条件里提到类型就按类型；没提就不限（全库按时间倒序取最近几条）
+  const typeWanted = cond?.类型 !== undefined ? [].concat(cond.类型) : null
+  const cand = live.filter((r) => {
+    if (typeWanted === null) return true
+    const i = resolve('类型')
+    if (i < 0) return true
+    const v = String(r[i] ?? '')
+    return v === '通用' || typeWanted.includes(v)
+  })
+  // 按时间倒序（新的在前）：用户说「上次」时，最近的更可能对
+  const timeIdx = resolve('时间')
+  const sorted = cand.slice().sort((a, b) => String(b[timeIdx] ?? '').localeCompare(String(a[timeIdx] ?? '')))
+  return { header, hits: sorted.slice(0, take) }
 }
 
 // ── 挂载 ────────────────────────────────────────────────
@@ -424,13 +499,16 @@ export function apply(ctx, config = {}) {
         '默认排除 状态=被取代/已归档（除非条件里显式提到「状态」）。',
         '【先报总数，再取前 3】：本工具已按此返回。命中太少 → 用「关键词」全文兜底搜。',
         '筛完 + 关键词搜完仍无命中 → 直说「记忆库里没有这条并说明筛了哪些维度」，不得拿常驻条目顶替。',
+        '【复盘模式】用户说「之前/上次/不是定过吗」而你没查到时，加 `复盘=true`：会走三段兜底，',
+        '并在真没有时给你一段「先问用户」的话术——**照它问，别自己编**。',
       ].join(' '),
       parameters: {
         条件: { type: 'string', description: '结构化条件（JSON）。空 = 全库（仍排除 被取代/已归档）。' },
         关键词: { type: 'string', description: '全文兜底搜：任一字段含此词即命中。可选。' },
-        取几条: { type: 'number', description: '默认 3。' },
-        全部: { type: 'boolean', description: 'true = 展开全部命中。' },
+        取几条: { type: 'number', description: '默认 3，**上限 50**。' },
+        全部: { type: 'boolean', description: 'true = 展开全部命中（**上限 200**，超出的报「还有 N 条未展开」）。' },
         详细: { type: 'boolean', description: 'true = 展开每条的环境/原因/备注等。' },
+        复盘: { type: 'boolean', description: 'true = 复盘模式：筛不到时走三段兜底（放宽搜 → 引导补记 → 问用户），而不是直接说「没有」。' },
       },
       output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
       async execute(args, exec) {
@@ -446,8 +524,15 @@ export function apply(ctx, config = {}) {
             return '条件必须是一个 JSON 对象，例如 {"深度":"语义"}。'
           }
         }
-        const take = Number.isFinite(args.取几条) && args.取几条 > 0 ? Math.floor(args.取几条) : 3
+        // 上限（M-读-2 / V4-b）：`取几条` 封顶 50，`全部` 展开封顶 200。
+        // 不封顶的话，模型一句「取几条:1000」就能把整本库塞进上下文——token 账是硬的。
+        const asked = Number.isFinite(args.取几条) && args.取几条 > 0 ? Math.floor(args.取几条) : 3
+        const take = Math.min(asked, RECALL_TAKE_MAX)
+        const takeCapped = asked > RECALL_TAKE_MAX
+        const allWanted = args.全部 === true
+        const expandLimit = allWanted ? RECALL_ALL_MAX : take
         const full = args.详细 === true
+        const reviewMode = args.复盘 === true
 
         let header, hits
         try {
@@ -463,7 +548,7 @@ export function apply(ctx, config = {}) {
         // 关键词兜底：命中少于取几条时，合并全文搜结果
         if (kw !== '' && hits.length < take) {
           try {
-            const { header: h2, rows: all } = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(s))
+            const { header: h2, rows: all } = readTableCached(CSV_PATH, core, s)
             const extra = keywordSearch(s, h2, all, kw).filter((r) => !hits.some((x) => x[h2.indexOf('id')] === r[h2.indexOf('id')]))
             if (extra.length) {
               hits = hits.concat(extra)
@@ -473,6 +558,16 @@ export function apply(ctx, config = {}) {
         }
 
         if (hits.length === 0) {
+          // 复盘模式（V4-a）：放宽搜 → 找到了就摆出来并提示「都不是？」；没找到就走引导 + 问用户。
+          if (reviewMode) {
+            let nearby = []
+            try { nearby = reviewWidenSearch(core, s, cond, 3).hits } catch { /* 放宽搜失败就当没有 */ }
+            if (nearby.length > 0) {
+              const widened = renderHits(core, s, header, nearby, { take: 3, full, strengthOf: null })
+              return reviewGuidance(cond, kw) + reviewHint(nearby) + '\n\n--- 放宽搜找到的最近条目 ---\n' + widened
+            }
+            return reviewGuidance(cond, kw)
+          }
           return '记忆库里没有这条。已按你给的条件筛过；若条件为空，说明库中无有效条目。'
         }
 
@@ -482,7 +577,7 @@ export function apply(ctx, config = {}) {
         // 衰减就形同虚设了。`取几条` 之外的那些没展示，就不该被强化。
         //
         // 落盘只做一件事：往 reinforce.log 追加。**memory.csv 一个字节不动**（R1 铁律）。
-        const shown = args.全部 === true ? hits : hits.slice(0, take)
+        const shown = allWanted ? hits.slice(0, RECALL_ALL_MAX) : hits.slice(0, take)
         const project = projectName(cwdOf(exec?.agent)) || ''
         let reinforced = 0
         let verified = 0
@@ -533,7 +628,13 @@ export function apply(ctx, config = {}) {
             }
           } catch { return null }
         }
-        let body = renderHits(core, s, header, hits, { take: args.全部 === true ? hits.length : take, full, strengthOf })
+        let body = renderHits(core, s, header, hits, { take: expandLimit, full, strengthOf })
+        // 上限提示（V4-b）：被截了就要明说「还有 N 条」，不能让人以为库里就这么多。
+        const notShown = hits.length - Math.min(expandLimit, hits.length)
+        if (notShown > 0) {
+          const why = takeCapped ? `（\`取几条\` 已按上限 ${RECALL_TAKE_MAX} 截断）` : (allWanted ? `（\`全部\` 已按上限 ${RECALL_ALL_MAX} 截断）` : '')
+          body += `\n\n还有 ${notShown} 条未展开${why}——要看得加条件缩小范围。`
+        }
         if (reinforced > 0) {
           const tip = verified > 0 ? `（本次强化 ${reinforced} 条，其中 ${verified} 条记入「已验证项目」）` : `（本次强化 ${reinforced} 条）`
           body += '\n\n' + tip

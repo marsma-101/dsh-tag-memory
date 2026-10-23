@@ -19,6 +19,7 @@ import {
   BACKUP_CFG_PATH, CSV_PATH, DATA_DIR, INDEX_PATH, LOCK_PATH, PRESET_ROOT, REINFORCE_LOG_PATH, SCHEMA_PATH, STORE_DIR,
   backupReady, coreStale, getBackupCore, getCore, initInfo, legacyInfo, loadSchema, ready, reloadSchema,
   setDataDir,
+  readTableCached,
 } from './lib/store.mjs'
 import { DEFAULT_MEMORY_FILE_NAMES, NOTICE_BEGIN, detectMemoryFiles, renderNotice, selfHeal } from './lib/notice.mjs'
 import { snapshotOrThrow, snapshotStatus } from './lib/engine/snapshot.mjs'
@@ -366,7 +367,7 @@ function overview(notice) {
   if (!base.ready) return base
   const schema = loadSchema()
   const core = getCore()
-  const { header, rows, ragged } = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(schema))
+  const { header, rows, ragged } = readTableCached(CSV_PATH, core, schema)
   const resolve = core.makeResolver(schema, header)
   base.header = header
   const raggedRows = Array.isArray(ragged) ? ragged : []
