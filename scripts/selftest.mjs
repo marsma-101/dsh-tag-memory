@@ -317,6 +317,11 @@ try {
 
   // ── D. preset ─────────────────────────────────────────
   try {
+    // 用例里当「当前项目」的路径：用沙箱里的真实目录，别写死盘符。
+    // projectName 走 path.basename(path.resolve(cwd))，Linux 上 `X:\proj` 解出来是 `X:\proj`
+    // 而不是 `proj`，跨项目闸门就永远对不上（旧版这两条 FAIL 就是这个坑）。
+    const PROJ_CWD = join(sandbox, 'proj')
+    const OTHER_CWD = join(sandbox, 'another')
     const sections = [], tools = []
     const ctx = { systemPrompt: { section: (s) => sections.push(s), getSectionOrder: () => 50 }, tools: { register: (t) => tools.push(t) } }
     const preset = await import(pathToFileURL(join(PKG, 'preset.js')).href)
@@ -324,7 +329,7 @@ try {
     ok('preset 注册字典段', sections.length === 1 && sections[0].name === 'tag-memory:dict')
     ok('preset 注册 memory_write + memory_recall + memory_supersede（0.3.0 加第三个）',
       tools.map((t) => t.name).sort().join(',') === 'memory_recall,memory_supersede,memory_write')
-    const exec = { agent: { id: 'selftest', session: { header: { cwd: 'X:\\proj' } } } }
+    const exec = { agent: { id: 'selftest', session: { header: { cwd: PROJ_CWD } } } }
     const out = await tools.find((t) => t.name === 'memory_recall').execute({ 条件: '{"角色":"selftest"}', 取几条: 5 }, exec)
     ok('preset.memory_recall 端到端读回沙箱条目', /命中\s*2\s*条/.test(out), out.split('\n')[0])
     const wrote = await tools.find((t) => t.name === 'memory_write').execute({
@@ -335,7 +340,7 @@ try {
 
     // ── D2. 记忆快照（注入模型：B-1 字典+快照 / B-2 常驻真落地 / B-3 跨项目只给索引）──
     // 此时沙箱库里 3 条生效：A（常驻/通用）、C（按需/通用）、D（按需/本项目 proj）；B 已归档。
-    const here = sections[0].text({ agent: { id: 'selftest', session: { header: { cwd: 'X:\\proj' } } } })
+    const here = sections[0].text({ agent: { id: 'selftest', session: { header: { cwd: PROJ_CWD } } } })
     ok('快照：字典之后还有条目正文（不再是「只有字典」）', /记忆快照/.test(here) && /## 记忆字典/.test(here), here.slice(0, 80))
     ok('快照 B-2：距离=常驻 的条目给全文', /\[M-20260101-001\] 自检件A/.test(here) && /环境：selftest 沙箱/.test(here))
     ok('快照：通用条目给全文', /\[M-\d{8}-\d{3}\] 自检件C/.test(here) && !/在「通用」：自检件C/.test(here))
@@ -354,7 +359,7 @@ try {
       const s2 = []
       const ctx2 = { systemPrompt: { section: (s) => s2.push(s), getSectionOrder: () => 50 }, tools: { register: () => {} } }
       preset.apply(ctx2, { dir: 'C:/x', snapshot: { maxPinned: 0 } })
-      const t2 = s2[0].text({ agent: { id: 'selftest', session: { header: { cwd: 'X:\\proj' } } } })
+      const t2 = s2[0].text({ agent: { id: 'selftest', session: { header: { cwd: PROJ_CWD } } } })
       ok('预算闸 B-2：maxPinned=0 → 常驻不再给全文（降为索引）', !/\[M-20260101-001\] 自检件A\n/.test(t2) && /在「通用」：自检件A/.test(t2))
       ok('预算闸 B-2：超上限时明说溢出', /常驻超过上限 0 条，其中 1 条只留索引/.test(t2), t2.split('\n').filter((l) => l.startsWith('> ')).join(' ｜ ').slice(0, 200))
     }
@@ -364,7 +369,7 @@ try {
       const s3 = []
       const ctx3 = { systemPrompt: { section: (s) => s3.push(s), getSectionOrder: () => 50 }, tools: { register: () => {} } }
       preset.apply(ctx3, { dir: 'C:/x', snapshot: { enabled: false } })
-      const t3 = s3[0].text({ agent: { id: 'selftest', session: { header: { cwd: 'X:\\proj' } } } })
+      const t3 = s3[0].text({ agent: { id: 'selftest', session: { header: { cwd: PROJ_CWD } } } })
       ok('预算闸：snapshot.enabled=false → 退回「只注入字典」', /## 记忆字典/.test(t3) && !/记忆快照/.test(t3))
     }
   } catch (e) {
@@ -1391,10 +1396,43 @@ try {
     }
 
     // 被人手改过那一段：报错、且**整批不落盘**（宁可不摘，也不猜着改别人的文件）
+    //
+    // 0.2.2 起 bundle patch 自带接线，`--wire-presets` 不再往 profile 补丁写声明
+    // （install.mjs 的 wire() 见到 bundle patch 里有 WIRE_MARK 就直接返回）。所以这里
+    // **手工把 WIRE_BLOCK 写进补丁**，还原「老安装产物留下那段声明」的场景；否则前置不成立，
+    // 补丁里根本没有那段，卸载当然什么都不用摘——这条用例就白测了。
+    //
+    // 分两半钉：
+    //   ① 没手改 → 整段照抄地对上，卸得掉（证明这段字面量与 install.mjs 的 WIRE_BLOCK 一致）；
+    //   ② 手改一行 → 报错、退出码 1，且补丁与清单**一个字节没动**（整批不落盘）。
     {
-      writeFileSync(patchFile, '# 基础\n- id: tools\n', 'utf8')
+      // 与 install.mjs 的 WIRE_BLOCK 逐字一致（注释头 + 那段内联声明）
+      const WIRE_BLOCK = [
+        '# ── 记忆：标签记忆（dsh-tag-memory）—— 智能体半 ──────────────────',
+        '# 0.2.0 起 preset 是声明行：这一段在 **profile 平面全局注册**，因此对该 profile 下',
+        '# 所有智能体生效（含以后新建的），不必逐个 preset 挂。缺了它，界面照样能用，',
+        '# 但谁也拿不到标签字典、也调不到 memory_write / memory_recall。',
+        '# 回滚：删掉这一段。',
+        '- insert:',
+        '    - id: tag-memory-preset',
+        `      name: '${WIRE}'`,
+      ].join('\n')
+      const BASE = '# 基础\n- id: tools\n'
+
+      // ① 正控：补丁里是「我们原样写的」那一段 → 卸得掉，且回到追加前的样子
+      writeFileSync(patchFile, BASE + '\n\n' + WIRE_BLOCK + '\n', 'utf8')
       writeFileSync(pkgFile, JSON.stringify({ name: 'web' }, null, 2) + '\n', 'utf8')
-      run(['--apply', '--wire-presets'])
+      run(['--apply']) // 让清单里真的有我们的条目，卸载才有东西可摘
+      const r0 = run(['--uninstall', '--apply'])
+      ok('手改段的正控：补丁里是原样那段 → 卸得掉（字面量与 install.mjs 一致）',
+        r0.status === 0 && !readFileSync(patchFile, 'utf8').includes(WIRE) &&
+        readFileSync(patchFile, 'utf8') === BASE.replace(/\s*$/, '') + '\n',
+        r0.stdout.slice(-240))
+
+      // ② 手改一行：报错、退出码 1，补丁与清单都没动
+      writeFileSync(patchFile, BASE + '\n\n' + WIRE_BLOCK + '\n', 'utf8')
+      writeFileSync(pkgFile, JSON.stringify({ name: 'web' }, null, 2) + '\n', 'utf8')
+      run(['--apply']) // 清单里装上我们的条目
       const edited = readFileSync(patchFile, 'utf8')
         .replace(`      name: '${WIRE}'`, `      name: '${WIRE}'   # 我手改过`)
       writeFileSync(patchFile, edited, 'utf8')
