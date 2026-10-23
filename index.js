@@ -393,42 +393,21 @@ function overview(notice) {
   }
 
   // ── 待整理 / 待晋升（M-整-1 / M-整-2）──────────────────────
-  // 两个清单都是**只读现算**：强度不写盘、候选不改状态。
-  // 「待整理」只是候选——归档得人工点头（总纲：不自动归档）。
+  //
+  // **直接调 `core.reviewInventory()`**——这里原本有第二份独立实现（自己按
+  // dimensions+auxiliary 收字段），和 core 那份是同一个 bug 的两份拷贝：
+  // 两份都漏了 `id` 和 `内容`（它们既不是字典维度、也不是辅助项），
+  // 结果清单里的条目没有 id → 前端「归档」「晋升」按钮拿到 undefined、点不动。
+  //
+  // 教训写在这儿：**同一套判据只许有一份实现**。抽成公共函数之后，
+  // 「改一处忘另一处」这类 bug 从结构上就不可能再犯。
+  //
+  // 两个清单都是**只读现算**：强度不写盘、候选不改状态（归档得人工点头）。
   try {
     const logMap = core.readReinforceLog(REINFORCE_LOG_PATH)
-    const now = new Date()
-    const live = core.filterRows(schema, header, rows, {})
-    const pendingDecay = []
-    const pendingPromote = []
-    for (const r of live) {
-      const baseRow = {}
-      for (const name of Object.keys({ ...schema.dimensions, ...schema.auxiliary })) {
-        const i = resolve(name)
-        baseRow[name] = i >= 0 ? String(r[i] ?? '') : ''
-      }
-      const merged = core.applyReinforceLog(baseRow, (x, n) => x[n] ?? '', logMap.get(String(baseRow.id ?? '').trim()))
-      const strength = core.currentStrength(merged, now)
-      const item = {
-        id: merged.id,
-        preview: String(merged.内容 ?? '').split('\n')[0].slice(0, 42),
-        项目: merged.项目,
-        类型: merged.类型,
-        深度: merged.深度,
-        距离: merged.距离,
-        强度: Number(strength.toFixed(3)),
-        最后强化: merged.最后强化,
-        使用次数: merged.使用次数,
-        已验证项目: merged.已验证项目,
-      }
-      if (strength < core.ARCHIVE_THRESHOLD) pendingDecay.push(item)
-      if (core.isPromotionCandidate({ 已验证项目: merged.已验证项目 })) pendingPromote.push(item)
-    }
-    // 最该先处理的排前面：强度最低的、项目数最多的
-    pendingDecay.sort((a, b) => a.强度 - b.强度)
-    pendingPromote.sort((a, b) => core.verifiedProjects({ 已验证项目: b.已验证项目 }).length - core.verifiedProjects({ 已验证项目: a.已验证项目 }).length)
-    base.pendingDecay = pendingDecay
-    base.pendingPromote = pendingPromote
+    const inv = core.reviewInventory({ schema, header, rows, logMap })
+    base.pendingDecay = inv.衰减候选
+    base.pendingPromote = inv.晋升候选
     base.reinforceLog = { path: REINFORCE_LOG_PATH, ids: logMap.size }
   } catch (e) {
     // 清单算不出来不能把整个 overview 弄挂——但要说清，别装作「没有待整理」。

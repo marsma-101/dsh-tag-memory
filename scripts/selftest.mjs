@@ -2083,6 +2083,66 @@ try {
         Object.keys(j).join(','))
       ok('V3-08 盘点带统计口径（生效条目/各类计数）',
         j.统计 !== undefined && typeof j.统计.生效条目 === 'number')
+
+      // ── /overview 的待整理·待晋升清单必须带 id（P1 回归锚点）──
+      // 这条钉的是「前端按钮点不动」那个 bug：清单里没有 id，按钮传给服务端的是 undefined，
+      // 服务端 NO_TARGET 兜底（不误改库），但功能是坏的。
+      // 为什么 331 条全绿也照躺：旧断言只断「清单存在」，条目缺 id 照样过。
+      const ovRes = { statusCode: 0, body: '', setHeader() {}, end(b) { this.body = b } }
+      await routes[0].handler({ url: '/tag-memory-api/overview', method: 'GET' }, ovRes)
+      const ovj = JSON.parse(ovRes.body)
+      const decayList = Array.isArray(ovj.pendingDecay) ? ovj.pendingDecay : []
+      const promoteList = Array.isArray(ovj.pendingPromote) ? ovj.pendingPromote : []
+      ok('/overview 待整理清单带 id（每个都有，形如 M-YYYYMMDD-NNN）',
+        decayList.every((it) => typeof it.id === 'string' && /^M-\d{8}-\d{3}$/.test(it.id)),
+        decayList.slice(0, 3).map((it) => String(it.id)).join(','))
+      ok('/overview 待整理清单带内容（前端要显示预览，不能只有 id）',
+        decayList.every((it) => typeof it.内容 === 'string' && it.内容 !== ''),
+        decayList.slice(0, 2).map((it) => String(it.内容).slice(0, 12)).join(' | '))
+      ok('/overview 待晋升清单也带 id 与内容（同一个字段收集，不能只修一半）',
+        promoteList.every((it) => typeof it.id === 'string' && /^M-\d{8}-\d{3}$/.test(it.id) && it.内容 !== ''))
+      // ── 正控：自己造一条超龄条目，证明清单**真能出来** ──
+      // 为什么不能指望沙箱现成的种子：沙箱那两条是「常驻」和「已归档」——
+      // 常驻按 O-2 永不衰减（强度恒 1），归档的不进任何清单。所以沙箱里本来就没有候选。
+      // 这里自己造一条「按需 + 2024 年」，跑完删掉，不影响别的用例。
+      {
+        const oldId = core.appendEntry({ schema: schema0, csvPath: store.CSV_PATH, lockPath: store.LOCK_PATH,
+          row: { 内容: 'overview 正控用的超龄条目', 时间: '2024-01-01', 环境: 'e', 原因: 'r', 类型: '记忆',
+            深度: '情景', 稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest' } })
+        const ov2 = { statusCode: 0, body: '', setHeader() {}, end(b) { this.body = b } }
+        await routes[0].handler({ url: '/tag-memory-api/overview', method: 'GET' }, ov2)
+        const j2 = JSON.parse(ov2.body)
+        const list2 = Array.isArray(j2.pendingDecay) ? j2.pendingDecay : []
+        const hit = list2.find((it) => it.id === oldId)
+        ok('/overview 待整理清单非空，且**真的含**刚造的那条超龄条目（正控：空清单会让上面三条恒真）',
+          hit !== undefined, `pendingDecay=${list2.length} 命中=${hit !== undefined}`)
+        ok('/overview 清单条目的 id 是**可点的真 id**（前端按钮直接拿它调 /archive）',
+          hit !== undefined && hit.id === oldId && /^M-\d{8}-\d{3}$/.test(hit.id))
+        ok('/overview 清单条目带内容预览（界面上要给人看是哪一条）',
+          hit !== undefined && String(hit.内容).includes('overview 正控用的超龄条目'))
+        // 结构锚点：overview 与 /review 必须是同一份判据算出来的（同一批 id）
+        const revRes2 = { statusCode: 0, body: '', setHeader() {}, end(b) { this.body = b } }
+        await routes[0].handler({ url: '/tag-memory-api/review', method: 'GET' }, revRes2)
+        const rj = JSON.parse(revRes2.body)
+        ok('/overview 与 /review 的衰减候选是同一批（判据只有一份，不再各写一遍）',
+          JSON.stringify(list2.map((it) => it.id)) === JSON.stringify((rj['衰减候选'] ?? []).map((it) => it.id)),
+          `overview ${list2.length} / review ${(rj['衰减候选'] ?? []).length}`)
+        // 清理 + 端到端：把这条归档掉，别影响后面的用例。
+        // 顺便钉住「按钮点得动」这件事：清单里的 id 直接拿去调 /archive，要能成功。
+        const arcRes = { statusCode: 0, body: '', setHeader() {}, end(b) { this.body = b } }
+        const arcReq = {
+          url: '/tag-memory-api/archive', method: 'POST',
+          on(event, fn) {
+            if (event === 'data') fn(Buffer.from(JSON.stringify({ 目标id: oldId })))
+            else if (event === 'end') fn()
+            return arcReq
+          },
+        }
+        await routes[0].handler(arcReq, arcRes)
+        const aj = JSON.parse(arcRes.body)
+        ok('/overview 清单里的 id 能直接拿去归档（端到端：按钮点得动）',
+          aj.ok === true && aj.targetId === oldId, JSON.stringify(aj).slice(0, 90))
+      }
       // 光断「键存在」是弱断言：清单全空也能过。这里**真造一条超龄条目**，
       // 钉住「判据真的跑了、候选真的算出来」。selftest 沙箱里的条目都是新的，
       // 所以这条不依赖沙箱内容，而是自己在临时库里造。
