@@ -1073,7 +1073,30 @@ window.__ModuleLoader__.load({
 			 * 只说「确认归档？」等于没确认。这是阿验提的硬要求。
 			 */
 			async function archiveSelected() {
-				const ids = Object.keys(pendingSel)
+				/**
+				 * 只认「还在待整理清单里」的勾选（P2 修复，阿栈 2026-10-25 交叉核对抓到的）。
+				 *
+				 * `pendingSel` 是 `{id:true}` 的累积表，条目从清单里消失（被单独归档、强度回升、
+				 * 别处刷新）时它不会被自动清掉。于是：全勾 2 条 → 单独归档其中 1 条 → 按钮条数按
+				 * 清单算成「归档所选（1）」，这里却按勾选表取到 2 个 id，确认框说「将归档 2 条」
+				 * 并真去归档 2 条。二次确认的条数跟实际动作对不上，那条已消失的若强度回升就会被
+				 * 顺带归档掉。所以**按钮条数与动作条数必须用同一个集合**：按 `overview.pendingDecay` 取交集。
+				 */
+				const live = new Set(
+					(Array.isArray(overview?.pendingDecay) ? overview.pendingDecay : [])
+						.map((it) => it?.id)
+						.filter((id) => id !== undefined && id !== ''),
+				)
+				const picked = Object.keys(pendingSel)
+				const ids = picked.filter((id) => live.has(id))
+				// 顺手摘掉已不在清单里的残留勾选，免得下次又冒出来（也是「清空勾选」之外的自愈）。
+				if (ids.length !== picked.length) {
+					setPendingSel((prev) => {
+						const next = {}
+						for (const id of Object.keys(prev)) if (live.has(id)) next[id] = true
+						return next
+					})
+				}
 				if (ids.length === 0 || batch !== null) return
 				// 硬要求：条数写进确认话里，不是「确认归档？」这种空话。
 				const wording = `将归档 ${ids.length} 条，确认？\n\n${ids.join('、')}\n\n归档后它们默认不再出现在列表与召回里（勾「含已归档」能查回来）；每条归档前都会自动留一份快照。`
