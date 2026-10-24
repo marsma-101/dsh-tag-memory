@@ -1,4 +1,4 @@
-﻿// client.js —— 浏览器端的一半：设置 →「记忆」页。
+// client.js —— 浏览器端的一半：设置 →「记忆」页。
 //
 // 格式是 DSH 的客户端模块加载器契约：本文件执行时只登记一个 factory，
 // 真正的模块体（以及它注入的样式）要等模块被实例化才跑。React 来自平台
@@ -23,22 +23,31 @@ window.__ModuleLoader__.load({
 		/** 侧边栏里的纵向位置：官方「插件」按钮是 0，排在它下面。 */
 		const PANEL_ORDER = 5
 
-		/** 详情里的字段顺序（只渲染非空项）。 */
-		const DETAIL_FIELDS = ['类型', '深度', '稳定性', '距离', '角色', '项目', '状态', '时间', '环境', '原因', '依据', '关键词', '工具', '版本', '作用', '备注']
+		/** 详情里的字段顺序（只渲染非空项）。0.3.0 的 4 个新列排在末尾。 */
+		const DETAIL_FIELDS = ['类型', '深度', '稳定性', '距离', '角色', '项目', '状态', '时间', '强度', '最后强化', '使用次数', '已验证项目', '环境', '原因', '依据', '关键词', '工具', '版本', '作用', '备注']
 		/**
 		 * 表格的列**照库自己的表头来**（`overview.header`），不另立一套——
 		 * 库加一列，表格就多一列。这份只在 overview 还没回来时兜底。
 		 */
-		const FALLBACK_HEADER = ['id', '内容', '时间', '环境', '原因', '备注', '稳定性', '成熟度', '距离', '角色', '项目', '状态', '关键词', '工具', '版本', '依据', '类型']
+		const FALLBACK_HEADER = ['id', '内容', '时间', '环境', '原因', '备注', '稳定性', '成熟度', '距离', '角色', '项目', '状态', '关键词', '工具', '版本', '依据', '类型', '强度', '最后强化', '已验证项目', '使用次数']
+		/**
+		 * 0.3.0 新增的 4 列。列设置里照实列出来，但**本库表头还没有它们时**（老库 17 列）
+		 * 摆成不可勾的「未落列」——勾了也不会有值，那就是骗人。表头迁移后自动可勾。
+		 */
+		const NEW_COLUMNS = ['强度', '最后强化', '已验证项目', '使用次数']
 		/**
 		 * 默认摆出来的列。挑的是「一行看得完」的；环境/原因/备注/工具/版本/依据
-		 * 这些长文本或常空的留在「详情」里，想要也能在「列」里勾出来。
+		 * 这些长文本或常空的留在「详情」里，想要也能在「列设置」里勾出来。
+		 *
+		 * `强度` 摆进来：它短（0~1），又是待整理区的判据，一眼看得到衰到哪儿了。
+		 * 另外三个默认不摆——`最后强化`/`已验证项目` 偏长，`使用次数` 常看不着；
+		 * 要的就在列设置里勾，勾选会记住。
 		 */
-		const DEFAULT_COLUMNS = ['id', '内容', '时间', '类型', '稳定性', '成熟度', '距离', '角色', '项目', '状态', '关键词']
+		const DEFAULT_COLUMNS = ['id', '内容', '时间', '类型', '稳定性', '强度', '成熟度', '距离', '角色', '项目', '状态', '关键词']
 		/** 列的显示宽窄：mono 等宽（id/时间）、wide 放宽（长文本）、其余按内容自适应。 */
 		const COLUMN_KIND = {
-			id: 'mono', 时间: 'mono',
-			内容: 'wide', 环境: 'wide', 原因: 'wide', 备注: 'wide', 关键词: 'wide',
+			id: 'mono', 时间: 'mono', 最后强化: 'mono',
+			内容: 'wide', 环境: 'wide', 原因: 'wide', 备注: 'wide', 关键词: 'wide', 已验证项目: 'wide',
 		}
 		/** 表格单元格里长文本的截断长度（够看个大概，全文走 title 与「详情」）。 */
 		const CELL_CLIP = 56
@@ -189,6 +198,31 @@ window.__ModuleLoader__.load({
 .tm-tr-detail>td{white-space:normal;background:var(--dsw-alias-interactive-bg-hover)}
 .tm-tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
 .tm-count{font-size:12px;color:var(--dsw-alias-label-secondary)}
+/* 列设置（V4-f）：设置类的东西，收起时不占地方，展开也只是表格上方一条。 */
+.tm-colpick{margin-bottom:10px;padding:10px 12px;border-radius:10px;
+  background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-base));
+  box-shadow:inset 0 0 0 1px var(--dsw-alias-separator,rgba(127,127,127,.18))}
+.tm-colpick-h{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+.tm-colpick-h>.tm-note{flex:auto}
+.tm-colpick-list{display:flex;flex-wrap:wrap;gap:6px 14px}
+.tm-colpick-item{display:inline-flex;align-items:center;gap:6px;font-size:12px;line-height:1.8;cursor:pointer}
+.tm-colpick-item[data-off]{opacity:.5;cursor:default}
+.tm-colpick-item[data-new] .tm-mtag{color:var(--dsw-alias-label-secondary)}
+/* 待整理区的批量操作条：全选 + 归档所选 + 进度，都摆在候选清单**上面**。 */
+.tm-batchbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0 8px}
+.tm-batchbar>.tm-count{flex:auto}
+/* 待整理/待晋升的行：勾选 + id + 强度 + 内容预览 + 按钮。
+   不复用 .tm-bkrow 的 margin-left:auto（那是给备份行把标签推到右边的），
+   这里内容是主体，要占住中间。 */
+.tm-prow{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;line-height:1.6;
+  border-top:1px solid var(--dsw-alias-separator,rgba(127,127,127,.14))}
+.tm-prow:first-of-type{border-top:none}
+.tm-prow .tm-mono{flex:none;font:11px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color:var(--dsw-alias-label-secondary)}
+.tm-prow .tm-tag{flex:none;padding:1px 8px;border-radius:999px;font-size:11px;
+  background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
+.tm-prow .tm-preview{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tm-prow .tm-link{flex:none}
 
 /* ── 备份 / 恢复 / 合并 ──
    按钮不另占一张卡：跟标题同一行，右对齐 —— 主位留给「要看的条目」。 */
@@ -369,13 +403,6 @@ window.__ModuleLoader__.load({
 			const [tip, setTip] = React.useState('')
 			const searchRef = React.useRef(null)
 
-			// 视图偏好落本地，重开设置页还在。
-			React.useEffect(() => {
-				try {
-					window.localStorage.setItem(STORE_KEY, JSON.stringify({ v: STORE_VERSION, cond, sort, limit, includeArchived, view }))
-				} catch { /* 隐私模式/配额，忽略 */ }
-			}, [cond, sort, limit, includeArchived, view])
-
 			// 键盘：`/` 聚焦搜索框，`Esc` 清空全部条件与关键词。
 			React.useEffect(() => {
 				function onKey(event) {
@@ -436,14 +463,18 @@ window.__ModuleLoader__.load({
 			const [reloadKey, setReloadKey] = React.useState(0)
 			const reloadEntries = () => setReloadKey((k) => k + 1)
 
-			// 概况（含维度取值与计数），只在挂载时取一次。
+			/**
+			 * 概况（含维度取值、计数、待整理/待晋升清单），挂载时取一次；
+			 * **`reloadKey` 变了一次重取**——归档/取代/批量归档改完库，这两块必须跟着变，
+			 * 否则「归档了 3 条，待整理还摆着那 3 条」——用户会以为没生效，再点一次。
+			 */
 			React.useEffect(() => {
 				let alive = true
 				loadJSON(`${API}/overview`)
 					.then((data) => { if (alive) setOverview(data) })
 					.catch((failure) => { if (alive) setError(String((failure && failure.message) || failure)) })
 				return () => { alive = false }
-			}, [])
+			}, [reloadKey])
 
 			/**
 			 * 实发条件：开了「含已归档」就把**全部状态取值 + 留白**显式写进去——
@@ -564,6 +595,31 @@ window.__ModuleLoader__.load({
 			 * `null` = 还没问出来（或老宿主没有这条路由），此时按老办法：先试系统框，失败了再兜底。
 			 */
 			const [pickerKind, setPickerKind] = React.useState(null)
+			/**
+			 * ── V4 前端三件（d/e/f）的 state ─────────────────────
+			 * **必须放在这里**：自检的渲染冒烟按 useState 的调用序号预置取值，
+			 * 插在中间会把后面所有 state 整体挤位、测出来的版式不是用户看到的那个。
+			 * 新增一律追加在最后一个 state（pickerKind）之后。
+			 */
+			/** V4-f 列设置：勾了哪些列（列名）。空 = 用默认那拨。 */
+			const [columnsPicked, setColumnsPicked] = React.useState(() => (Array.isArray(saved.columns) ? saved.columns.filter((c) => typeof c === 'string') : null))
+			/** 列设置面板开没开。默认收起——它是「设置」，按主位通则不占正文。 */
+			const [colOpen, setColOpen] = React.useState(false)
+			/** V4-e 待整理区勾选的 id 表 `{id: true}`。 */
+			const [pendingSel, setPendingSel] = React.useState({})
+			/** V4-e 批量归档的进度/结果：`null` = 没在跑；`{done,total}` = 跑到第几条。 */
+			const [batch, setBatch] = React.useState(null)
+			/** V4-e 批量归档的收尾话（成功 N / 失败 M + 失败清单）。 */
+			const [batchNote, setBatchNote] = React.useState(null)
+
+			// 视图偏好落本地，重开设置页还在。
+			// **放在这批 state 之后**：它要用 `columnsPicked`，挪到前面就是「用了还没声明的变量」。
+			React.useEffect(() => {
+				try {
+					window.localStorage.setItem(STORE_KEY, JSON.stringify({ v: STORE_VERSION, cond, sort, limit, includeArchived, view, columns: columnsPicked }))
+				} catch { /* 隐私模式/配额，忽略 */ }
+			}, [cond, sort, limit, includeArchived, view, columnsPicked])
+
 			React.useEffect(() => {
 				let alive = true
 				loadJSON(`${API}/picker`)
@@ -989,6 +1045,86 @@ window.__ModuleLoader__.load({
 			}
 
 			/**
+			 * ── V4-d 手动刷新 ────────────────────────────────
+			 *
+			 * 界面不是自动同步的：别处（智能体、另一个窗口、手改文件）写了库，
+			 * 这里不点就一直是旧数据。所以给一颗「刷新」——重取概况与第一页。
+			 *
+			 * 为什么不是定时轮询：这套东西的写路径是「人点头才动」，轮询只是白耗请求；
+			 * 而且轮询到的更新会**冲掉用户正在填的筛选**，那是更坏的体验。
+			 * 打开时拉一次已有（挂载 effect），这里补的是「看着页面时的主动刷新」。
+			 */
+			async function refreshAll() {
+				if (loading) return
+				setReloadKey((k) => k + 1)
+			}
+
+			/**
+			 * ── V4-e 批量归档 ────────────────────────────────
+			 *
+			 * 走现有 `POST /archive` **逐条**调，不新增批量 API（队长 2026-10-24 拍板）：
+			 *   ① 每条归档前后端都自动拍快照，毫秒戳已就绪，连拍几十份不互相覆盖；
+			 *   ② 逐条有天然的进度与失败隔离——第 3 条失败，前 2 条已经落盘且各有快照，
+			 *      能准确报「成功 N / 失败 M」，用户知道到底动了哪几条；
+			 *   ③ 批量 API 要处理「部分成功」的回滚语义（前 3 条成了、第 4 条失败要不要退回去），
+			 *      那个语义比逐条复杂得多，异常路径上最容易出错。
+			 *
+			 * **二次确认必须带条数**：「将归档 N 条，确认？」。一次误操作 = N 条退场，
+			 * 只说「确认归档？」等于没确认。这是阿验提的硬要求。
+			 */
+			async function archiveSelected() {
+				const ids = Object.keys(pendingSel)
+				if (ids.length === 0 || batch !== null) return
+				// 硬要求：条数写进确认话里，不是「确认归档？」这种空话。
+				const wording = `将归档 ${ids.length} 条，确认？\n\n${ids.join('、')}\n\n归档后它们默认不再出现在列表与召回里（勾「含已归档」能查回来）；每条归档前都会自动留一份快照。`
+				try { if (typeof window !== 'undefined' && !window.confirm(wording)) return } catch { /* 没有 confirm 就直接做 */ }
+
+				const total = ids.length
+				const failed = []
+				const failedIds = new Set()
+				let okCount = 0
+				setBatchNote(null)
+				setBatch({ done: 0, total })
+				for (let i = 0; i < ids.length; i++) {
+					const id = ids[i]
+					try {
+						const r = await postJSON(`${API}/archive`, { 目标id: id, 状态: '已归档' })
+						// `changed === false` 也算成功（本来就是已归档，没得改）——不能报成失败。
+						if (r.ok === true) okCount++
+						else { failed.push(`${id}（${r.error ?? r.code ?? '未知原因'}）`); failedIds.add(id) }
+					} catch (e) {
+						failed.push(`${id}（${String(e?.message ?? e)}）`)
+						failedIds.add(id)
+					}
+					setBatch({ done: i + 1, total })
+				}
+
+				setBatch(null)
+				setBatchNote({ ok: okCount, failed })
+				// 成功的从勾选里摘掉；失败的留着，用户可以再点一次。
+				setPendingSel((prev) => {
+					const next = { ...prev }
+					for (const id of ids) if (!failedIds.has(id)) delete next[id]
+					return next
+				})
+				// 刷新列表与概况：归档的条目该从待整理区消失、列表里也不该再有。
+				setReloadKey((k) => k + 1)
+			}
+
+			/** 待整理区：全选 / 全不选（只作用于当前摆出来的那些）。 */
+			function togglePendingAll(list, on) {
+				setPendingSel((prev) => {
+					const next = { ...prev }
+					for (const it of list) {
+						if (it?.id === undefined || it.id === '') continue
+						if (on) next[it.id] = true
+						else delete next[it.id]
+					}
+					return next
+				})
+			}
+
+			/**
 			 * 一条记忆的详情：全部非空字段（正文也在里面）。
 			 * 卡片视图铺在卡片底部，表格视图铺在那一行下面——两处共用。
 			 */
@@ -1105,6 +1241,89 @@ window.__ModuleLoader__.load({
 			 * 表格视图：库本来就是 CSV，一行一条、一列一个字段，比卡片省地方得多。
 			 * 表头 + 首列（勾选）常驻，横向可滚；行内「详情」展开这一行的全部字段。
 			 */
+			/**
+			 * ── 列计划（V4-f）──────────────────────────────────
+			 *
+			 * 一处算清「这库有哪些列、该显示哪些」，表格与列设置共用**同一份**判据。
+			 * 两份实现迟早分叉（改一处忘另一处），这库已经在「盘点清单」上踩过这个坑。
+			 *
+			 * - `all`：库自己表头里的列（库长什么样就是什么样）；overview 没回来时用兜底表头。
+			 * - `visible`：真正铺到表格里的列。用户在列设置里勾过就听用户的（还要过一遍
+			 *   `all`，勾了但本库没这列的自动跳过）；没勾过就用 `DEFAULT_COLUMNS`。
+			 * - `missingNew`：0.3.0 的 4 个新列里，本库表头还没有的那些（老库 17 列）。
+			 *   它们在列设置里照样列出来，但标「未落列」且不可勾——勾了也不会有值。
+			 */
+			function columnPlan() {
+				const all = overview !== null && Array.isArray(overview.header) && overview.header.length > 0
+					? overview.header.map(String)
+					: FALLBACK_HEADER
+				const chosen = Array.isArray(columnsPicked) && columnsPicked.length > 0
+					? columnsPicked.filter((name) => all.includes(name))
+					: DEFAULT_COLUMNS.filter((name) => all.includes(name))
+				const visible = chosen.length > 0 ? chosen : all.slice(0, 12)
+				// 本库表头里还没有的新列：列设置里照样列出来，但标成「未落列」且不可勾。
+				const missingNew = NEW_COLUMNS.filter((name) => !all.includes(name))
+				return { all, visible, available: all, missingNew }
+			}
+
+			/**
+			 * 列设置面板（V4-f）：把库里的列照实摊出来，勾哪个显示哪个。
+			 *
+			 * 摆在「记忆条目」卡里、表格上面，默认收起。**它是设置，不是内容**——
+			 * 按主位通则不占正文，要改列的人才点开。
+			 * 勾选落 localStorage（`columns`），下次进来还在。
+			 */
+			function renderColumnPicker() {
+				const plan = columnPlan()
+				const on = new Set(plan.visible)
+				return React.createElement(
+					'div',
+					{ className: 'tm-colpick' },
+					React.createElement(
+						'div',
+						{ className: 'tm-colpick-h' },
+						React.createElement('span', { className: 'tm-note' }, '勾选要在表格里显示的列（只影响表格视图，选择会记住）'),
+						React.createElement(
+							'button',
+							{ type: 'button', className: 'tm-btn', onClick: () => setColumnsPicked(null) },
+							'恢复默认',
+						),
+					),
+					React.createElement(
+						'div',
+						{ className: 'tm-colpick-list' },
+						plan.all.map((name) => {
+							const isNew = NEW_COLUMNS.includes(name)
+							return React.createElement(
+								'label',
+								{ key: name, className: 'tm-colpick-item', 'data-new': isNew ? 'true' : undefined },
+								React.createElement('input', {
+									type: 'checkbox',
+									className: 'tm-check',
+									checked: on.has(name),
+									onChange: () => {
+										const next = plan.visible.includes(name)
+											? plan.visible.filter((c) => c !== name)
+											: plan.all.filter((c) => c === name || plan.visible.includes(c))
+										// 一列都不剩就退回默认，别把表清成空壳。
+										setColumnsPicked(next.length > 0 ? next : null)
+									},
+								}),
+								React.createElement('span', null, name),
+								isNew ? React.createElement('span', { className: 'tm-mtag' }, '0.3.0 新列') : null,
+							)
+						}),
+						plan.missingNew.map((name) => React.createElement(
+							'label',
+							{ key: `missing-${name}`, className: 'tm-colpick-item', 'data-off': 'true', title: '本库表头还没有这一列（表头迁移后自动出现）' },
+							React.createElement('input', { type: 'checkbox', className: 'tm-check', checked: false, disabled: true, onChange: () => {} }),
+							React.createElement('span', null, name),
+							React.createElement('span', { className: 'tm-mtag' }, '未落列'),
+						)),
+					),
+				)
+			}
+
 			function renderTable() {
 				const ids = items.map((row) => row.id)
 				const allOn = ids.length > 0 && ids.every((id) => selected[id] !== undefined)
@@ -1115,11 +1334,8 @@ window.__ModuleLoader__.load({
 				 * 个别维度名与列名不同（`成熟度` 列在 schema 里叫 `深度`），所以行对象里
 				 * 的键要经维度映射——表头显示列名，筛选下拉显示维度名。
 				 */
-				const header = overview !== null && Array.isArray(overview.header) && overview.header.length > 0
-					? overview.header
-					: FALLBACK_HEADER
-				const picked = DEFAULT_COLUMNS.filter((name) => header.includes(name))
-				const columns = (picked.length > 0 ? picked : header.slice(0, 12)).map((name) => {
+				const picked = columnPlan().visible
+				const columns = picked.map((name) => {
 					const dim = dims.find((d) => d.column === name)
 					return {
 						name,
@@ -1653,36 +1869,88 @@ window.__ModuleLoader__.load({
 			}
 
 			/**
-			 * 维护区（次位）：托管状态 + 备份历史，默认收起。
-			 * 这两样都是「出事了才看」的，按主位通则不该占着正文的位置。
-			 */
-			/**
-			 * 待整理 / 待晋升（V3）。
+			 * 待整理 / 待晋升（V3 建区，V4-e/f 补批量与预览）。
 			 *
-			 * 两块都是**只读候选**：强度低的进待整理（不自动归档）、项目数够的进待晋升
-			 * （不自动晋升）。所有动作都要人点一下——错归档/错晋升是这套设计要防的失败。
+			 * 两块都是**候选清单**：强度低的进待整理（不自动归档）、项目数够的进待晋升
+			 * （不自动晋升）。所有动作都要人点一下——错归档/错晋升正是这套设计要防的失败。
 			 *
 			 * 数据来自 `/overview` 的 `pendingDecay` / `pendingPromote`（服务端现算，不落盘）。
+			 * 字段是 `{ id, 内容, 项目, 时间, 强度, 深度, 距离, 最后强化 }`（晋升项另有
+			 * `已验证项目`、`项目数`）——**预览取 `内容`**，别写成 `preview`（那是合并报告
+			 * 的字段名，两个清单里没有；V3 修 P1 时清单才补上 `id` 与 `内容`）。
 			 */
 			function renderPending() {
 				const decay = Array.isArray(overview?.pendingDecay) ? overview.pendingDecay : []
 				const promote = Array.isArray(overview?.pendingPromote) ? overview.pendingPromote : []
 				if (decay.length === 0 && promote.length === 0) return null
+				const selCount = decay.filter((it) => pendingSel[it.id] === true).length
+				const allOn = decay.length > 0 && selCount === decay.length
+				const running = batch !== null
 				return React.createElement(
 					'div',
 					{ className: 'tm-card', style: { marginTop: '10px' } },
 					React.createElement('h2', { className: 'tm-pane-t', style: { marginTop: 0 } }, '待整理'),
+					// ── V4-e 批量条：全选 / 归档所选 / 进度 ──
+					decay.length === 0 ? null : React.createElement(
+						'div',
+						{ className: 'tm-batchbar' },
+						React.createElement(
+							'label',
+							{ className: 'tm-colpick-item' },
+							React.createElement('input', {
+								type: 'checkbox',
+								className: 'tm-check',
+								checked: allOn,
+								disabled: running,
+								onChange: () => togglePendingAll(decay, !allOn),
+							}),
+							`全选（${decay.length} 条）`,
+						),
+						React.createElement(
+							'button',
+							{
+								type: 'button',
+								className: 'tm-btn',
+								disabled: running || selCount === 0,
+								title: selCount === 0 ? '先勾几条' : `将归档 ${selCount} 条（会再确认一次）`,
+								onClick: archiveSelected,
+							},
+							running ? '归档中…' : `归档所选（${selCount}）`,
+						),
+						selCount > 0 && !running
+							? React.createElement('button', { type: 'button', className: 'tm-btn', onClick: () => setPendingSel({}) }, '清空勾选')
+							: null,
+						// 进度：跑到第几条说清楚，别让用户对着不动的按钮猜。
+						running
+							? React.createElement('span', { className: 'tm-count' }, `归档中 ${batch.done}/${batch.total}…`)
+							: React.createElement('span', { className: 'tm-count' }, selCount === 0 ? '勾选后可以一次归档多条' : `已选 ${selCount} 条`),
+					),
+					// 批量归档收尾：成功 N / 失败 M，失败的逐条摆出来（谁、为什么）。
+					batchNote !== null
+						? React.createElement(
+								'div',
+								{ className: `tm-note ${batchNote.failed.length > 0 ? 'tm-warn' : 'tm-ok'}`, style: { marginBottom: '6px' } },
+								`批量归档完成：成功 ${batchNote.ok} 条${batchNote.failed.length > 0 ? `，失败 ${batchNote.failed.length} 条（${batchNote.failed.join('；')}）` : ''}。`,
+							)
+						: null,
 					decay.length === 0
 						? React.createElement('div', { className: 'tm-note' }, '没有衰减到该处理的条目。')
 						: decay.map((it) => React.createElement(
 								'div',
-								{ key: it.id, className: 'tm-bkrow' },
+								{ key: it.id, className: 'tm-prow' },
+								React.createElement('input', {
+									type: 'checkbox',
+									className: 'tm-check',
+									checked: pendingSel[it.id] === true,
+									disabled: running,
+									onChange: () => setPendingSel((prev) => ({ ...prev, [it.id]: prev[it.id] !== true })),
+								}),
 								React.createElement('span', { className: 'tm-mono' }, it.id),
 								React.createElement('span', { className: 'tm-tag' }, `强度 ${it.强度}`),
-								React.createElement('span', null, it.preview),
+								React.createElement('span', { className: 'tm-preview', title: String(it.内容 ?? '') }, String(it.内容 ?? '') || '（无内容）'),
 								React.createElement(
 									'button',
-									{ type: 'button', className: 'tm-link', disabled: busy, onClick: () => markEntry('archive', it.id) },
+									{ type: 'button', className: 'tm-link', disabled: busy || running, onClick: () => markEntry('archive', it.id) },
 									'归档',
 								),
 							)),
@@ -1691,11 +1959,11 @@ window.__ModuleLoader__.load({
 						? React.createElement('div', { className: 'tm-note' }, '还没有在 3 个以上不同项目里验证过的条目。')
 						: promote.map((it) => React.createElement(
 								'div',
-								{ key: it.id, className: 'tm-bkrow' },
+								{ key: it.id, className: 'tm-prow' },
 								React.createElement('span', { className: 'tm-mono' }, it.id),
 								React.createElement('span', { className: 'tm-tag' }, `${it.项目数} 个项目`),
-								React.createElement('span', null, it.preview),
-								React.createElement('span', { className: 'tm-note' }, it.已验证项目),
+								React.createElement('span', { className: 'tm-preview', title: String(it.内容 ?? '') }, String(it.内容 ?? '') || '（无内容）'),
+								React.createElement('span', { className: 'tm-note', title: String(it.已验证项目 ?? '') }, String(it.已验证项目 ?? '')),
 								React.createElement(
 									'button',
 									{ type: 'button', className: 'tm-link', disabled: busy, onClick: () => markEntry('supersede', it.id, { 项目: '通用' }) },
@@ -1703,7 +1971,7 @@ window.__ModuleLoader__.load({
 								),
 							)),
 					React.createElement('div', { className: 'tm-note', style: { marginTop: '8px' } },
-						'这两块都只是候选：归档和晋升都要人点一下才生效。'),
+						'这两块都只是候选：归档和晋升都要人点一下才生效。批量归档也是逐条调、每条各留一份快照。'),
 				)
 			}
 
@@ -1896,7 +2164,35 @@ window.__ModuleLoader__.load({
 							},
 							view === 'table' ? '卡片视图' : '表格视图',
 						),
+						// ── V4-f 列设置：只对表格有意义（卡片没有列）。默认收起。 ──
+						view === 'table'
+							? React.createElement(
+									'button',
+									{
+										type: 'button',
+										className: 'tm-btn',
+										'data-on': colOpen ? 'true' : undefined,
+										title: '勾选表格里要显示哪些列（选择会记住）',
+										onClick: () => setColOpen((v) => !v),
+									},
+									colOpen ? '收起列设置' : '列设置',
+								)
+							: null,
+						// ── V4-d 手动刷新：别处写了库，点一下重取（不轮询，理由见 refreshAll） ──
+						React.createElement(
+							'button',
+							{
+								type: 'button',
+								className: 'tm-btn',
+								disabled: loading,
+								title: '重新读取记忆库（别处写过库之后点这个）',
+								onClick: refreshAll,
+							},
+							loading ? '刷新中…' : '刷新',
+						),
 					),
+					// 列设置面板（次位：默认收起，展开才占地方）
+					view === 'table' && colOpen ? renderColumnPicker() : null,
 					// 维度下拉压成一行：选一个取值就叠一条条件（同维多值 = 或，维间 = 与）。
 					React.createElement(
 						'div',
