@@ -2955,6 +2955,46 @@ try {
     results.push(`FAIL  R. P0 归档安全 — ${String(e?.stack ?? e)}`)
   }
 
+  // ── S. P1-3 判重口径：读写两侧的「退场」必须是同一个集合 ─────────────
+  //     这节的由来：变异自查时把 `findDuplicate` 里的反查剔除，**436 条一条都没红**——
+  //     说明 P1-3 的修复当时没有任何断言钉住。补在这里。
+  try {
+    const core = store.getCore()
+    const schema0 = store.loadSchema()
+    const box = mkdtempSync(join(tmpdir(), 'tm-p13-'))
+    const csv = join(box, 'memory.csv')
+    writeFileSync(csv, readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv')))
+    const lock = join(box, '.lock')
+    const mkRow = (c) => ({ 内容: c, 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+      稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest' })
+
+    const oldId = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mkRow('同一个结论') })
+    core.supersedeEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: oldId, row: { 内容: '同一个结论（更新版）' } })
+
+    // ① 旧条已被取代（读侧看不到它了）→ 写同样内容**不该**被拦
+    let wroteSame = null
+    let errSame = ''
+    try { wroteSame = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mkRow('同一个结论') }) }
+    catch (e) { errSame = String(e?.message ?? e) }
+    ok('S-1 已退场的旧条不再阻塞判重（写同内容能进去）',
+      wroteSame !== null && wroteSame !== '', errSame.slice(0, 60))
+    ok('S-1 而且不会报「库里已经有了」这种误导性理由',
+      !/库里已经有了/.test(errSame))
+
+    // ② 对照：与**生效中**的条目同内容 → 必须被拦（判重没失效）
+    let errLive = ''
+    try { core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mkRow('同一个结论（更新版）') }) }
+    catch (e) { errLive = String(e?.message ?? e) }
+    ok('S-2 正控：与生效中的条目同内容仍被拦（判重本身没被改坏）',
+      /库里已经有了/.test(errLive), errLive.slice(0, 60))
+
+    // ③ 口径归一的结构锚点：findDuplicate 与 filterRows 用的是同一个 supersededIds
+    const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+    const dead = core.supersededIds(t.header, t.rows)
+    ok('S-3 被取代的旧 id 在反查集合里（读写共用这一个集合）', dead.has(oldId), [...dead].join(','))
+    rmSync(box, { recursive: true, force: true })
+  } catch (e) { fail++; results.push(`FAIL  P1-3 判重口径 — ${String(e?.message ?? e)}`) }
+
   const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
   ok('package.json 导出 ./client 且声明 dsh.client', pkg.exports['./client'] === './client.js' && pkg.dsh?.client?.platform === 'web')
   ok('client manifest 不注入非客户端 package',
