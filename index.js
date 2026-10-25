@@ -1274,9 +1274,18 @@ function archiveFrom(body) {
   const schema = loadSchema()
   const targetId = typeof body?.目标id === 'string' ? body.目标id.trim() : (typeof body?.targetId === 'string' ? body.targetId.trim() : '')
   const status = typeof body?.状态 === 'string' ? body.状态.trim() : '已归档'
-  // `强制复核`：主子手动确认「我知道它不是候选」时放行（主子 2026-10-25 拍板 B）
+  // `强制复核`：用户手动确认「我知道它不是候选」时放行（主子 2026-10-25 拍板 B）
   const force = body?.强制复核 === true || body?.force === true
-  const requireCandidate = body?.requireCandidate === true
+  // ⚠️ **默认 true**（落法 A，评审卡 kmvnul5t1k2p8）。
+  //
+  // 之前默认 false，于是：同一份库、同一条今天刚写的条目，
+  // 智能体走 `memory_archive`（requireCandidate:true）被四判据拦下，
+  // 界面点「归档」按钮（默认 false）却能直接归档——**按钮不受四判据保护**，
+  // 可以归档任意一条（含强度≈1 的）。两条路本该是同一套规矩。
+  //
+  // 现在默认也过四判据；要归档非候选必须显式传 `强制复核=true`（界面那颗按钮会带确认）。
+  // 调用方仍可传 `requireCandidate:false` 显式关掉（内部/测试用）。
+  const requireCandidate = body?.requireCandidate !== false
 
   const r = core.archiveEntry({
     schema, csvPath: CSV_PATH, lockPath: LOCK_PATH, logPath: REINFORCE_LOG_PATH,

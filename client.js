@@ -1025,7 +1025,21 @@ window.__ModuleLoader__.load({
 					const body = act === 'supersede'
 						? { 目标id: id, ...(extra ?? {}) }
 						: { 目标id: id, 状态: act === 'archive' ? '已归档' : '生效' }
-					const r = await postJSON(url, body)
+					let r = await postJSON(url, body)
+					// 被四判据拒了（NOT_CANDIDATE）→ 不是「失败」，是「这条不该归档」。
+					// 给用户一次**显式**放行的机会：二次确认里把理由摆出来，用户点头才带 `强制复核` 重发。
+					// 这样界面和智能体走的是同一套判据，区别只在「人能不能手动越过」。
+					if (r.ok !== true && r.code === 'NOT_CANDIDATE') {
+						const verdict = r.verdict ?? null
+						const why = verdict !== null && typeof verdict.reason === 'string' ? verdict.reason : ''
+						const ask = `这条现在**不满足归档判据**：\n\n${why || r.error}\n\n`
+							+ '盘点出的候选是一份快照清单，执行时会重新校验——它可能刚被用过（强度回升），或者本来就不该归档。\n\n'
+							+ '确实要归档吗？（强制复核）'
+						let go = false
+						try { go = typeof window !== 'undefined' ? window.confirm(ask) === true : false } catch { go = false }
+						if (!go) { setTip(`已取消：${why || '不满足归档判据'}`); return }
+						r = await postJSON(url, { ...body, 强制复核: true })
+					}
 					if (r.ok !== true) {
 						setTip(`${act === 'supersede' ? '取代' : '归档'}没成功：${r.error ?? '未知原因'}`)
 						return

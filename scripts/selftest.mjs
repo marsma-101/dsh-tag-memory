@@ -2513,7 +2513,7 @@ try {
         `逻辑 ${before.rows.length} / 物理 ${physCount(csv)}`)
 
       // 归档第 2 条（前面有一条多行记录——正是旧实现踩雷的位置）
-      const r = core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: b, status: '已归档' })
+      const r = core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: b, status: '已归档', force: true })
       ok('R-a2 归档成功', r.ok === true, JSON.stringify(r))
 
       const after = readRows(csv)
@@ -2538,7 +2538,7 @@ try {
       const { csv, lock } = newLib()
       const multi = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk({ 内容: '我是多行\n第二段\n第三段' }) })
       const tail = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk({ 内容: '后面一条' }) })
-      const r = core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: multi, status: '已归档' })
+      const r = core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: multi, status: '已归档', force: true })
       ok('R-b1 归档多行条目成功', r.ok === true, JSON.stringify(r))
       const after = readRows(csv)
       const idIdx = after.header.indexOf('id'), stIdx = after.header.indexOf('状态'), cIdx = after.header.indexOf('内容')
@@ -2587,7 +2587,8 @@ try {
       const beforeText = readFileSync(csv, 'utf8')
       const before = readRows(csv)
       const target = ids[2]  // 归档第 3 条（前面有 1 条多行）
-      const r = core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: target, status: '已归档' })
+      // 本组测「整体重建后全字段对账」，不是测四判据 → 显式 force 放行
+      const r = core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: target, status: '已归档', force: true })
       ok('R-d1 归档成功', r.ok === true, JSON.stringify(r))
       const after = readRows(csv)
       ok('R-d2 行数不变', after.rows.length === before.rows.length, `${before.rows.length}→${after.rows.length}`)
