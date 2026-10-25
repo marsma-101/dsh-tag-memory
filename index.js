@@ -756,7 +756,7 @@ function restoreFromLocked(stamp) {
   }
   let preBackupNote = ''
   try {
-    pre = bk.runBackup(STORE_DIR, { label: `恢复 ${stamp} 之前自动留档` })
+    pre = bk.runBackup(STORE_DIR, { label: `恢复 ${stamp} 之前自动留档`, alreadyLocked: true })
   } catch (e) {
     // 没设备份地址 / 备份写不进 —— 只影响「备份历史」那份，快照已经在手，恢复照做。
     preBackupNote = `（全量备份没做成：${String(e?.message ?? e)}；快照 ${preSnapshot.name} 已留）`
