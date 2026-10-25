@@ -308,19 +308,24 @@ function sortByRelevance(hits, get, project, strengthOf) {
       return st === null ? 0 : Number(st.strength) || 0
     } catch { return 0 }
   }
-  // 先算一次、排序里复用——每次都现算一遍会把 O(n log n) 变成 O(n log n × 解析)
-  const cache = new Map()
-  const cached = (fn, e) => {
+  // 先算一次、排序里复用——每次都现算一遍会把 O(n log n) 变成 O(n log n × 解析)。
+  // ⚠️ **每个维度各自一个 Map**：早先所有维度共用一个 Map、key 只用行对象，
+  // 于是「距离」算出来的值把「项目」的缓存覆盖了——排序看起来完全没生效
+  // （本项目排在其它项目后面）。三维度三张表，key 才不打架。
+  const cacheDist = new Map()
+  const cacheProj = new Map()
+  const cacheStrength = new Map()
+  const cached = (cache, fn, e) => {
     if (!cache.has(e)) cache.set(e, fn(e))
     return cache.get(e)
   }
   return hits.slice().sort((a, b) => {
-    const d = cached(distRank, a) - cached(distRank, b)
+    const d = cached(cacheDist, distRank, a) - cached(cacheDist, distRank, b)
     if (d !== 0) return d
-    const p = cached(projRank, a) - cached(projRank, b)
+    const p = cached(cacheProj, projRank, a) - cached(cacheProj, projRank, b)
     if (p !== 0) return p
-    const sa = cached(strengthOfRow, a)
-    const sb = cached(strengthOfRow, b)
+    const sa = cached(cacheStrength, strengthOfRow, a)
+    const sb = cached(cacheStrength, strengthOfRow, b)
     if (Math.abs(sa - sb) > 1e-9) return sb - sa
     const ta = String(get(a, '时间') ?? '')
     const tb = String(get(b, '时间') ?? '')
@@ -664,43 +669,18 @@ export function apply(ctx, config = {}) {
           return '记忆库里没有这条。已按你给的条件筛过；若条件为空，说明库中无有效条目。'
         }
 
-        // ── 强化与验证（M-整-1 / M-整-2，惰性结算）──────────────────
+        // ── 召回是**纯读**（卡 kmvnul5yka32f，0.3.2 三态拆分）──────────
         //
-        // **只强化「真正命中并展示」的条目**，不是全库。否则「召回一次、全库复活」，
-        // 衰减就形同虚设了。`取几条` 之外的那些没展示，就不该被强化。
-        //
-        // 落盘只做一件事：往 reinforce.log 追加。**memory.csv 一个字节不动**（R1 铁律）。
+        // 这里原来会在命中时自动写 reinforce.log（强化 + 记已验证项目）。
+        // 那是错的：**召回 ≠ 使用 ≠ 验证**，三件事必须分开。
+        //   · 召回 = 「我查了一下」，可能只是看看，不代表这条被用上了；
+        //   · 使用 = 「我真的按它做了」，要显式标记（`memory_mark_used`）；
+        //   · 验证 = 「在某个项目里实测有效」，更要显式（同一个工具带 `项目`）。
+        // 混在一起的后果：模型每查一次库，全库强度就涨一轮——衰减彻底失效；
+        // 而且「已验证项目」会被自动灌满，晋升候选全是假的。
+        // 现在 recall 只读不写；要记账得调 `memory_mark_used`。
         const shown = allWanted ? hits.slice(0, RECALL_ALL_MAX) : hits.slice(0, take)
         const project = projectName(cwdOf(exec?.agent)) || ''
-        let reinforced = 0
-        let verified = 0
-        try {
-          const idIdx = header.indexOf('id')
-          const today = core.localDate()
-          core.withLock(LOCK_PATH, () => {
-            for (const row of shown) {
-              const id = String(row[idIdx] ?? '').trim()
-              if (id === '') continue
-              // 用「行 + 日志」合并后的样子判断：CSV 里的值可能早被日志超过去了。
-              const base = {}
-              const resolve = core.makeResolver(s, header)
-              for (const name of Object.keys({ ...s.dimensions, ...s.auxiliary })) {
-                const i = resolve(name)
-                base[name] = i >= 0 ? String(row[i] ?? '') : ''
-              }
-              const logMap = core.readReinforceLog(REINFORCE_LOG_PATH)
-              const merged = core.applyReinforceLog(base, (r, n) => r[n] ?? '', logMap.get(id))
-              // 已归档/被取代的不强化（它们不该被「用」）
-              if (['被取代', '已归档'].includes(String(base.状态 ?? ''))) continue
-              const known = core.verifiedProjects({ 已验证项目: merged.已验证项目 })
-              const needVerify = project !== '' && !known.includes(project) && !known.includes('通用')
-              const res = core.appendReinforceLog({
-                logPath: REINFORCE_LOG_PATH, id, project, day: today, reinforce: true, verify: needVerify,
-              })
-              if (res.ok) { reinforced++; if (needVerify) verified++ }
-            }
-          })
-        } catch { /* 强化失败不影响召回结果——召回本身成功了，不能因为记账失败就报错 */ }
 
         // 强度现算（读 CSV + 合并日志），只在「详细」模式展示，**不落盘**。
         const strengthOf = (row) => {
@@ -735,9 +715,9 @@ export function apply(ctx, config = {}) {
           const why = takeCapped ? `（\`取几条\` 已按上限 ${RECALL_TAKE_MAX} 截断）` : (allWanted ? `（\`全部\` 已按上限 ${RECALL_ALL_MAX} 截断）` : '')
           body += `\n\n还有 ${notShown} 条未展开${why}——要看得加条件缩小范围。`
         }
-        if (reinforced > 0) {
-          const tip = verified > 0 ? `（本次强化 ${reinforced} 条，其中 ${verified} 条记入「已验证项目」）` : `（本次强化 ${reinforced} 条）`
-          body += '\n\n' + tip
+        // 召回不改任何账：只提示「真要记账该用哪个工具」，不替模型决定。
+        if (shown.length > 0) {
+          body += '\n\n（召回只读，不改强度。真按它做了 → `memory_mark_used`；在某项目实测有效 → 同工具带 `项目`。）'
         }
         return note === '' ? body : note + '\n' + body
       },
@@ -752,7 +732,9 @@ export function apply(ctx, config = {}) {
         '让一条旧记忆退场，换一条新的顶上（**旧行一个字节都不改**，只追加新行）。',
         '什么时候用：用户纠正了你（「不对，应该是 X」）、事实变了、规矩更新了——这条记忆还在库里但已经不成立。',
         '**必须先点名 `目标id`**：不点名不改，也不猜「大概是哪条」——先用 memory_recall 查准 id。',
-        '不传的字段**沿用旧条**（环境/原因/项目/角色这些通常不用重填），只传真正变了的那几项。',
+        '不传的字段**沿用旧条**（环境/原因/项目这些通常不用重填），只传真正变了的那几项。',
+        '**例外是 `角色`**：新行一律写**当前智能体**（谁改的就记谁），不沿用旧条的角色——',
+        '因为「谁写入的」说的是这次操作的人，不是这条记忆原来是谁写的。',
         '写进去的新行 `备注` 会自动带「取代：<旧id>」，读取层据此让旧条退场；旧条的 `状态` 列仍是原值，这是设计，不是没生效。',
         '**不要**为了「改一条记忆」去动 CSV 文件——那会把判重、写锁、校验全绕过去。改记忆只有这一个工具。',
       ].join(' '),
@@ -807,6 +789,61 @@ export function apply(ctx, config = {}) {
       },
     }),
   )
+
+  // ⑤ 标记「已使用 / 已验证」（卡 kmvnul5yka32f：三态拆分后的显式入口）
+  ctx.tools.register(
+    defineTool({
+      name: 'memory_mark_used',
+      description: [
+        '把一条记忆标成「用过 / 在某个项目验证过」。**这是召回之外唯一的记账入口**。',
+        '三态分开：召回（memory_recall）= 只是查了一下，**不改强度**；使用 = 你真的按它做了；验证 = 在某个项目里实测有效。',
+        '什么时候用：你照某条记忆的结论改了代码/做了决定 → 传 `目标id` 记一次「使用」；',
+        '如果是在**某个具体项目**里实测有效 → 再带 `项目`，记进「已验证项目」（独立项目数 ≥ 3 会成为晋升候选）。',
+        '不传 `项目` 只记使用次数（强度 +0.3、最后强化=今天）；传了 `项目` 同时记验证。',
+        '**别为了「让这条别被归档」来调它**——那不是使用，那是掩盖。',
+      ].join(' '),
+      parameters: {
+        目标id: { type: 'string', required: true, description: '哪一条（形如 M-20261024-001）。' },
+        项目: { type: 'string', description: '在哪个项目里验证过。不传 = 只记使用，不记验证。' },
+      },
+      output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
+      async execute(args) {
+        if (!ready()) return degradedNotice()
+        const core = getCore()
+        const s = loadSchema()
+        const id = String(args.目标id ?? '').trim()
+        if (id === '') throw new Error('要指明哪一条（目标id）。')
+        const explicitProject = String(args.项目 ?? '').trim()
+        const today = core.localDate()
+
+        let result
+        try {
+          result = core.withLock(LOCK_PATH, () => {
+            const { header, rows } = readTableCached(CSV_PATH, core, s)
+            const idIdx = header.indexOf('id')
+            const stIdx = header.indexOf('状态')
+            const row = rows.find((r) => String(r[idIdx] ?? '').trim() === id)
+            if (row === undefined) return { ok: false, error: `库里没有 id 为 ${id} 的条目。` }
+            const st = stIdx >= 0 ? String(row[stIdx] ?? '').trim() : ''
+            if (st === '已归档') return { ok: false, error: `${id} 已归档，不能再记使用。要复活先改状态。` }
+            const res = core.appendReinforceLog({
+              logPath: REINFORCE_LOG_PATH, id, project: explicitProject, day: today,
+              reinforce: true, verify: explicitProject !== '',
+            })
+            if (!res.ok) return { ok: false, error: res.error }
+            return { ok: true, verified: explicitProject !== '' }
+          })
+        } catch (e) {
+          throw new Error(`记账失败：${String(e?.message ?? e)}`)
+        }
+        if (!result.ok) throw new Error(result.error)
+        return result.verified
+          ? `✓ 已记 ${id}：使用 +1，并在「${explicitProject}」记一次验证（强度 +0.3，最后强化=${today}）`
+          : `✓ 已记 ${id}：使用 +1（强度 +0.3，最后强化=${today}）`
+      },
+    }),
+  )
+
 
   // ⑤ 归档（智能体提交「建议清单」，服务端逐条复核四条判据）
   ctx.tools.register(
