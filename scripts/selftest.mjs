@@ -2653,6 +2653,18 @@ try {
           const s = core.currentStrength({ 强度: '1', 最后强化: daysAgo(200), 深度: '语义', 类型: '记忆', 距离: '按需' }, NOW)
           return s >= core.ARCHIVE_THRESHOLD
         })())
+
+      // 反控 5（第④条判据「最后强化超半衰期」单独钉）——**2026-10-25 变异自查补**：
+      // 去掉 archiveVerdict 里 `if (days < halfDays) return` 那一段，446 条全绿——
+      // 说明第四条判据当时没有任何断言覆盖（盲区）。这两条补上。
+      // 场景：强度已经很低（0.01），但**刚强化过**（1 天前）→ 按设计不该是候选。
+      ok('R-e6 判据第④条：强度 0.01 但 1 天前刚强化 → 不是候选（未超半衰期）',
+        core.archiveVerdict({ 强度: '0.01', 最后强化: daysAgo(1), 深度: '语义', 类型: '记忆', 距离: '按需' }, NOW).candidate === false,
+        JSON.stringify(core.archiveVerdict({ 强度: '0.01', 最后强化: daysAgo(1), 深度: '语义', 类型: '记忆', 距离: '按需' }, NOW)))
+      // 正控：同样强度、但已超半衰期（语义 120 天 > 90）→ 是候选
+      ok('R-e7 判据第④条正控：强度 0.01 且 120 天前强化（超语义半衰期 90 天）→ 是候选',
+        core.archiveVerdict({ 强度: '0.01', 最后强化: daysAgo(120), 深度: '语义', 类型: '记忆', 距离: '按需' }, NOW).candidate === true,
+        JSON.stringify(core.archiveVerdict({ 强度: '0.01', 最后强化: daysAgo(120), 深度: '语义', 类型: '记忆', 距离: '按需' }, NOW)))
     }
 
     // ══ R-f：「过期候选」执行时拒绝（候选算完后条目被强化）══
