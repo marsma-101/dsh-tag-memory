@@ -172,14 +172,26 @@ function snapshotText(config, project) {
     .map((r) => ({ row: r, id: get(r, 'id') }))
   if (live.length === 0) return ''
 
+  // ── 三档分桶（卡 kmvnul5ulpmbb）──
+  //
+  // **深藏必须优先于项目匹配**。原来的 `isHere` 只看项目：
+  //   `项目=通用 + 距离=深藏` 会被判成「本项目/通用」→ 进全文块。
+  // 但「深藏」的意思是「正文不该进上下文，要用先 memory_recall 取」——
+  // 一条 `通用+深藏+原文` 本该只给一行索引，结果整段原文进了系统提示词。
+  // 这是结构性闸门失效，不是措辞问题。
+  //
+  // 顺序固定：**常驻 → 深藏 → 项目匹配**。
+  // 常驻在最前是因为「钉住」是更强的承诺（主子的长期偏好，标了就是每轮必读）；
+  // 深藏排第二，压过项目匹配；剩下的才按 本项目/通用 分。
   const isPinned = (e) => get(e.row, '距离') === '常驻'
+  const isDeep = (e) => get(e.row, '距离') === '深藏'
   const isHere = (e) => {
     const p = get(e.row, '项目')
     return p === '通用' || (project !== '' && p === project)
   }
   const pinned = live.filter(isPinned).sort(byIdDesc)
-  const local = live.filter((e) => !isPinned(e) && isHere(e)).sort(byIdDesc)
-  const rest = live.filter((e) => !isPinned(e) && !isHere(e)).sort(byIdDesc)
+  const local = live.filter((e) => !isPinned(e) && !isDeep(e) && isHere(e)).sort(byIdDesc)
+  const rest = live.filter((e) => !isPinned(e) && (isDeep(e) || !isHere(e))).sort(byIdDesc)
 
   const pinnedCut = pinned.slice(cfg.maxPinned) // 超过条数上限 → 只留索引
   const degraded = []                            // 字数预算内放不下 → 降级成索引
