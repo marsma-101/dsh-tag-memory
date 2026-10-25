@@ -36,6 +36,7 @@ import {
   LOCK_PATH,
   STORE_DIR,
   REINFORCE_LOG_PATH,
+  MISSES_PATH,
   readTableCached,
   cwdOf,
   getCore,
@@ -633,6 +634,18 @@ export function apply(ctx, config = {}) {
         }
 
         if (hits.length === 0) {
+          // 零命中 → 记台账（卡 kmvnul5vzxn7b）。**两种模式都记**：
+          // 普通模式「没查到就换关键词再查」和复盘模式「没查到要问用户」都是失败，
+          // 都该留痕；否则盘点时只看得到复盘那部分，普通模式的失败全是隐形的。
+          // 同条件限频（6 小时内同指纹只记一次），免得反复查同一个词把台账灌爆。
+          try {
+            const resolveM = core.makeResolver(s, header)
+            const dimsUsed = cond && typeof cond === 'object' ? Object.keys(cond).join('/') : ''
+            core.appendMiss({
+              missesPath: MISSES_PATH, cond, kw, project: projectName(cwdOf(exec?.agent)) || '', dims: dimsUsed,
+            })
+          } catch { /* 台账写不了不影响召回本身 */ }
+
           // 复盘模式（V4-a）：放宽搜 → 找到了就摆出来并提示「都不是？」；没找到就走引导 + 问用户。
           if (reviewMode) {
             let nearby = []
@@ -925,7 +938,7 @@ export function apply(ctx, config = {}) {
 function reviewInventory({ core, schema }) {
   const { header, rows } = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(schema))
   const logMap = core.readReinforceLog(REINFORCE_LOG_PATH)
-  const inv = core.reviewInventory({ schema, header, rows, logMap })
+  const inv = core.reviewInventory({ schema, header, rows, logMap, misses: core.readMisses(MISSES_PATH) })
   return { ...inv, 统计: { ...inv.统计, 日志条数: logMap.size } }
 }
 

@@ -16,7 +16,7 @@ import { constants as FS } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { basename, dirname, join, isAbsolute, relative, resolve } from 'node:path'
 import {
-  BACKUP_CFG_PATH, CSV_PATH, DATA_DIR, INDEX_PATH, LOCK_PATH, PRESET_ROOT, REINFORCE_LOG_PATH, SCHEMA_PATH, STORE_DIR,
+  BACKUP_CFG_PATH, CSV_PATH, DATA_DIR, INDEX_PATH, LOCK_PATH, PRESET_ROOT, REINFORCE_LOG_PATH, MISSES_PATH, SCHEMA_PATH, STORE_DIR,
   backupReady, coreStale, getBackupCore, getCore, initInfo, legacyInfo, loadSchema, ready, reloadSchema,
   setDataDir,
   readTableCached,
@@ -406,7 +406,7 @@ function overview(notice) {
   // 两个清单都是**只读现算**：强度不写盘、候选不改状态（归档得人工点头）。
   try {
     const logMap = core.readReinforceLog(REINFORCE_LOG_PATH)
-    const inv = core.reviewInventory({ schema, header, rows, logMap })
+    const inv = core.reviewInventory({ schema, header, rows, logMap, misses: core.readMisses(MISSES_PATH) })
     base.pendingDecay = inv.衰减候选
     base.pendingPromote = inv.晋升候选
     base.reinforceLog = { path: REINFORCE_LOG_PATH, ids: logMap.size }
@@ -1176,7 +1176,7 @@ function reviewFrom() {
     const { header, rows } = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(schema))
     const logMap = core.readReinforceLog(REINFORCE_LOG_PATH)
     // 判据全在 core.reviewInventory —— 与 `memory_review({类型:'盘点'})` 是同一个函数。
-    const inv = core.reviewInventory({ schema, header, rows, logMap })
+    const inv = core.reviewInventory({ schema, header, rows, logMap, misses: core.readMisses(MISSES_PATH) })
     return {
       ok: true,
       ...inv,
