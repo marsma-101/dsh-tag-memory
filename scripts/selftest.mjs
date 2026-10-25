@@ -3788,8 +3788,10 @@ try {
         mkdirSync(join(skill, 'store'), { recursive: true })
         copyFileSync(csv, join(skill, 'store', 'memory.csv'))
         copyFileSync(join(PKG, 'lib', 'engine', 'tags.schema.json'), join(skill, 'references', 'tags.schema.json'))
-        const savedDir = process.env.DSH_TAG_MEMORY_DATA_DIR
-        process.env.DSH_TAG_MEMORY_DATA_DIR = skill
+        // ⚠️ 必须用 store.setLibraryDir() 切库：REINFORCE_LOG_PATH 是模块级 let，
+        //    只改环境变量它不会重算，日志会写到原库——用例查新目录就永远是空的（假绿）。
+        const origDir = store.SKILL_DIR
+        store.setLibraryDir(skill)
         try {
           const p2 = await import(pathToFileURL(join(PKG, 'preset.js')).href + '?c1=' + Date.now())
           const tools2 = []
@@ -3798,14 +3800,14 @@ try {
           const rec2 = tools2.find((t) => t.name === 'memory_recall')
           const exec2 = { agent: { id: 'selftest', session: { header: { cwd: join(sandbox, 'proj') } } } }
           await rec2.execute({ 条件: JSON.stringify({ 角色: 'selftest' }), 取几条: 5 }, exec2)
-          const afterLog = existsSync(join(skill, 'store', 'reinforce.log'))
-            ? readFileSync(join(skill, 'store', 'reinforce.log'), 'utf8') : ''
+          const afterLog = existsSync(store.REINFORCE_LOG_PATH)
+            ? readFileSync(store.REINFORCE_LOG_PATH, 'utf8') : ''
           ok('R++1-1 **单纯 memory_recall 不再自动写 verify 记录**',
             !/verify/.test(afterLog), afterLog.slice(0, 200))
           ok('R++1-2 单纯 memory_recall 也不自动强化（无 reinforce 记录）',
             !/reinforce/.test(afterLog), afterLog.slice(0, 200))
         } finally {
-          process.env.DSH_TAG_MEMORY_DATA_DIR = savedDir
+          store.setLibraryDir(origDir)
         }
       }
 
@@ -4048,8 +4050,9 @@ try {
       mkdirSync(join(skill, 'store'), { recursive: true })
       copyFileSync(csv, join(skill, 'store', 'memory.csv'))
       copyFileSync(join(PKG, 'lib', 'engine', 'tags.schema.json'), join(skill, 'references', 'tags.schema.json'))
-      const savedDir = process.env.DSH_TAG_MEMORY_DATA_DIR
-      process.env.DSH_TAG_MEMORY_DATA_DIR = skill
+      // ⚠️ 用 setLibraryDir（模块级路径常量不会因环境变量重算）——同 R++1-1 的坑
+      const origDir2 = store.SKILL_DIR
+      store.setLibraryDir(skill)
       try {
         const p3 = await import(pathToFileURL(join(PKG, 'preset.js')).href + '?ord=' + Date.now())
         const t3 = []
@@ -4063,7 +4066,7 @@ try {
         ok('R++6-1 **本项目排在其它项目之前**（交叉2 R+7-3，哪怕本项目时间更老）',
           iThis >= 0 && iThis < iOther, `本项目@${iThis} 其它@${iOther}`)
       } finally {
-        process.env.DSH_TAG_MEMORY_DATA_DIR = savedDir
+        store.setLibraryDir(origDir2)
       }
     }
 
