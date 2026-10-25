@@ -1202,13 +1202,8 @@ function supersedeFrom(body) {
   const targetId = typeof body?.目标id === 'string' ? body.目标id.trim() : (typeof body?.targetId === 'string' ? body.targetId.trim() : '')
   if (targetId === '') return { ok: false, code: 'NO_TARGET', error: '要指明取代哪一条（目标id，形如 M-20261024-001）' }
 
-  // 留档失败就不许动库（S-防-2）
-  let snap
-  try {
-    snap = snapshotOrThrow({ storeDir: STORE_DIR, csvPath: CSV_PATH, label: `界面取代 ${targetId}` }, '取代')
-  } catch (e) {
-    return { ok: false, code: 'PRESNAPSHOT', error: String(e?.message ?? e) }
-  }
+  // 留档已挪进 `core.supersedeEntry` 的写锁内（卡 kmvnul5tz5wht），这里不再自己拍。
+  // 快照名从返回值里取。
 
   const row = {}
   for (const k of ['内容', '环境', '原因', '类型', '深度', '稳定性', '距离', '依据', '项目', '角色', '关键词', '备注', '时间']) {
@@ -1222,7 +1217,7 @@ function supersedeFrom(body) {
   try {
     const r = core.supersedeEntry({ schema, csvPath: CSV_PATH, lockPath: LOCK_PATH, targetId, row })
     if (!r.ok) return { ok: false, code: 'SUPERSEDE', error: r.error }
-    return { ok: true, targetId: r.targetId, id: r.id, version: r.version, snapshot: snap.name, status: backupStatus() }
+    return { ok: true, targetId: r.targetId, id: r.id, version: r.version, snapshot: r.snapshot, status: backupStatus() }
   } catch (e) {
     return { ok: false, code: 'SUPERSEDE', error: String(e?.message ?? e) }
   }

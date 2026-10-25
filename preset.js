@@ -680,13 +680,9 @@ export function apply(ctx, config = {}) {
         const agent = exec?.agent
         const targetId = String(args.目标id ?? '').trim()
 
-        // 改库语义之前先留档（S-防-2）。留档失败就不许动库——「有档可回」这句承诺不能作废。
-        let snap
-        try {
-          snap = snapshotOrThrow({ storeDir: STORE_DIR, csvPath: CSV_PATH, label: `取代 ${targetId}` }, '取代')
-        } catch (e) {
-          throw new Error(String(e?.message ?? e))
-        }
+        // 留档已挪进 `core.supersedeEntry` 的写锁内（卡 kmvnul5tz5wht）——
+        // 这里**不要**再自己拍：锁外拍的话，快照与改库之间有一个时间窗，
+        // 窗口内别人写入，快照就不是「操作前那一刻」的库。留档结果从返回值里取。
 
         const row = {}
         for (const k of ['内容', '环境', '原因', '类型', '深度', '稳定性', '距离', '依据', '项目', '角色', '关键词', '备注', '时间']) {
@@ -707,7 +703,7 @@ export function apply(ctx, config = {}) {
         }
         if (!r.ok) throw new Error(`未取代：${r.error}`)
         // 明确终态（学 mnemon §3.2）：成功回执带 id + 版本 + 快照，失败一律抛异常。
-        return `✓ 已取代：${r.targetId} → ${r.id}（${r.version}）｜旧行未改动，读取层已让它退场｜快照 ${snap.name}`
+        return `✓ 已取代：${r.targetId} → ${r.id}（${r.version}）｜旧行未改动，读取层已让它退场｜快照 ${r.snapshot || '—'}`
       },
     }),
   )
