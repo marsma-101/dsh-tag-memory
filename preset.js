@@ -184,8 +184,13 @@ function snapshotText(config, project) {
   // 顺序固定：**常驻 → 深藏 → 项目匹配**。
   // 常驻在最前是因为「钉住」是更强的承诺（主子的长期偏好，标了就是每轮必读）；
   // 深藏排第二，压过项目匹配；剩下的才按 本项目/通用 分。
-  const isPinned = (e) => get(e.row, '距离') === '常驻'
-  const isDeep = (e) => get(e.row, '距离') === '深藏'
+  // `依据=外部` 的条目**不进全文块**（卡 kmvnul5xkdg1l）：它来自网页/文档/他人经验，
+  // 不是用户说的、也不是我们实测的。系统提示词是高信任区——外部文本里如果混了指令，
+  // 进了全文块就会被当成「该照做的内容」。只给一行索引（带〔外部〕标记），
+  // 要用先 memory_recall 取，取的时候用户/模型能看见来源。
+  const isExternal = (e) => get(e.row, '依据') === '外部'
+  const isPinned = (e) => get(e.row, '距离') === '常驻' && !isExternal(e)
+  const isDeep = (e) => get(e.row, '距离') === '深藏' || isExternal(e)
   const isHere = (e) => {
     const p = get(e.row, '项目')
     return p === '通用' || (project !== '' && p === project)
