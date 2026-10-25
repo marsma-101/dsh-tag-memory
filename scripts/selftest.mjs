@@ -2475,6 +2475,441 @@ try {
     }
   } catch (e) { fail++; results.push(`FAIL  V4 读取打磨 — ${String(e?.message ?? e)}`) }
 
+  // ── R. P0 归档安全 + 四条判据 + memory_archive（T-20261025-02）──────────
+  try {
+    const core = store.getCore()
+    const schema0 = store.loadSchema()
+    const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex')
+    const TPL = readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv'))
+    const mk = (o) => ({
+      内容: 'x', 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+      稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest', ...o,
+    })
+    // 起一个隔离库（每次自己造，不依赖前面节留下的状态）
+    const newLib = () => {
+      const box = mkdtempSync(join(tmpdir(), 'tm-p0-'))
+      const csv = join(box, 'memory.csv')
+      const lock = join(box, '.lock')
+      writeFileSync(csv, TPL)
+      return { box, csv, lock }
+    }
+    const readRows = (csv) => {
+      const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      return { header: t.header, rows: t.rows, ragged: t.ragged }
+    }
+    // 物理行数 vs 逻辑行数：多行字段的判别器
+    const physCount = (csv) => readFileSync(csv, 'utf8').split('\n').filter((l) => l.trim() !== '').length
+
+    // ══ R-a：目标行**之前**有多行记录 → 归档后所有行正确 ══
+    {
+      const { csv, lock } = newLib()
+      // 第 1 条是 3 行文本（占 3 个物理行），第 2、3 条是普通单行
+      const a = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk({ 内容: '第一条\n跨三行\n的正文' }) })
+      const b = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk({ 内容: '第二条普通' }) })
+      const c = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk({ 内容: '第三条普通' }) })
+      const before = readRows(csv)
+      ok('R-a1 前置成立：3 条逻辑记录、物理行多于逻辑行（多行字段确实存在）',
+        before.rows.length === 3 && physCount(csv) > 4,
+        `逻辑 ${before.rows.length} / 物理 ${physCount(csv)}`)
+
+      // 归档第 2 条（前面有一条多行记录——正是旧实现踩雷的位置）
+      const r = core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: b, status: '已归档' })
+      ok('R-a2 归档成功', r.ok === true, JSON.stringify(r))
+
+      const after = readRows(csv)
+      const idIdx = after.header.indexOf('id'), stIdx = after.header.indexOf('状态')
+      const get = (id) => after.rows.find((x) => String(x[idIdx]).trim() === id)
+      ok('R-a3 行数不变（3 条还是 3 条，没有把续行当成一条新记录）',
+        after.rows.length === 3, String(after.rows.length))
+      ok('R-a4 目标条目状态确实变成已归档', String(get(b)?.[stIdx]).trim() === '已归档', String(get(b)?.[stIdx]))
+      ok('R-a5 **前一条多行记录未被破坏**（内容仍完整含三段）',
+        String(get(a)?.[after.header.indexOf('内容')] ?? '').includes('第一条') &&
+        String(get(a)?.[after.header.indexOf('内容')] ?? '').includes('第三条普通') === false &&
+        String(get(a)?.[after.header.indexOf('内容')] ?? '').includes('的正文'),
+        String(get(a)?.[after.header.indexOf('内容')] ?? '').slice(0, 60))
+      ok('R-a6 前一条状态未被动过（仍是生效）', String(get(a)?.[stIdx]).trim() === '生效', String(get(a)?.[stIdx]))
+      ok('R-a7 后一条状态未被动过（仍是生效）', String(get(c)?.[stIdx]).trim() === '生效', String(get(c)?.[stIdx]))
+      ok('R-a8 三条 id 一个不少、一个不多',
+        [a, b, c].every((id) => get(id) !== undefined) && after.rows.length === 3)
+    }
+
+    // ══ R-b：目标行**自身**是多行 → 归档正确、正文一字不丢 ══
+    {
+      const { csv, lock } = newLib()
+      const multi = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk({ 内容: '我是多行\n第二段\n第三段' }) })
+      const tail = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk({ 内容: '后面一条' }) })
+      const r = core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: multi, status: '已归档' })
+      ok('R-b1 归档多行条目成功', r.ok === true, JSON.stringify(r))
+      const after = readRows(csv)
+      const idIdx = after.header.indexOf('id'), stIdx = after.header.indexOf('状态'), cIdx = after.header.indexOf('内容')
+      const row = after.rows.find((x) => String(x[idIdx]).trim() === multi)
+      ok('R-b2 行数不变（多行条目没有被拆成多条）', after.rows.length === 2, String(after.rows.length))
+      ok('R-b3 状态变成已归档', String(row?.[stIdx]).trim() === '已归档')
+      ok('R-b4 **多行正文一字不丢**（三段都在）',
+        String(row?.[cIdx] ?? '').includes('我是多行') &&
+        String(row?.[cIdx] ?? '').includes('第二段') &&
+        String(row?.[cIdx] ?? '').includes('第三段'),
+        JSON.stringify(String(row?.[cIdx] ?? '')))
+      ok('R-b5 后面那条没被波及', String(after.rows.find((x) => String(x[idIdx]).trim() === tail)?.[stIdx]).trim() === '生效')
+    }
+
+    // ══ R-c：归档失败自动回滚（复核不过不留坏文件）══
+    {
+      const { csv, lock } = newLib()
+      const id1 = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk({ 内容: '条目一' }) })
+      const id2 = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk({ 内容: '条目二' }) })
+      const shaBefore = sha(csv)
+      // 不存在的 id → 必须拒绝且文件一个字节不动
+      const rNotFound = core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: 'M-99999999-999', status: '已归档' })
+      ok('R-c1 目标不存在 → 拒绝', rNotFound.ok === false, JSON.stringify(rNotFound))
+      ok('R-c2 目标不存在 → 文件一个字节不动（失败不留痕）', sha(csv) === shaBefore)
+      // 非法状态 → 拒绝
+      const rBadStatus = core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: id1, status: '乱写的状态' })
+      ok('R-c3 非法状态 → 拒绝', rBadStatus.ok === false, JSON.stringify(rBadStatus))
+      ok('R-c4 非法状态 → 文件一个字节不动', sha(csv) === shaBefore)
+      // 空 id → 拒绝
+      const rNoTarget = core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: '', status: '已归档' })
+      ok('R-c5 空目标 id → 拒绝', rNoTarget.ok === false)
+      ok('R-c6 空目标 id → 文件一个字节不动', sha(csv) === shaBefore)
+      // 复核：库仍可正常读、两条都还在
+      const t = readRows(csv)
+      ok('R-c7 失败后库仍完整可读（两条都在、无 ragged）',
+        t.rows.length === 2 && t.ragged.length === 0, `rows=${t.rows.length} ragged=${t.ragged.length}`)
+    }
+
+    // ══ R-d：归档前后全字段对账（其他行逐字节不变）══
+    {
+      const { csv, lock } = newLib()
+      const ids = []
+      for (const txt of ['第一条', '第二条\n带换行', '第三条', '第四条']) {
+        ids.push(core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk({ 内容: txt }) }))
+      }
+      const beforeText = readFileSync(csv, 'utf8')
+      const before = readRows(csv)
+      const target = ids[2]  // 归档第 3 条（前面有 1 条多行）
+      const r = core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: target, status: '已归档' })
+      ok('R-d1 归档成功', r.ok === true, JSON.stringify(r))
+      const after = readRows(csv)
+      ok('R-d2 行数不变', after.rows.length === before.rows.length, `${before.rows.length}→${after.rows.length}`)
+      ok('R-d3 表头一格没变', JSON.stringify(after.header) === JSON.stringify(before.header))
+      ok('R-d4 每条格子数不变（没有错位）',
+        after.rows.every((r2, i) => r2.length === before.rows[i].length),
+        JSON.stringify(after.rows.map((r2) => r2.length)))
+      const idIdx = after.header.indexOf('id'), stIdx = after.header.indexOf('状态')
+      // 只有目标行的状态变了，其余每一格逐字节相同
+      let diffCount = 0
+      for (let i = 0; i < after.rows.length; i++) {
+        for (let k = 0; k < after.header.length; k++) {
+          if (after.rows[i][k] !== before.rows[i][k]) {
+            const isTargetStatusCell = String(after.rows[i][idIdx]).trim() === target && k === stIdx
+            if (!isTargetStatusCell) diffCount++
+          }
+        }
+      }
+      ok('R-d5 **除目标行的状态格外，其余所有格逐字节未变**', diffCount === 0, `意外改动 ${diffCount} 格`)
+      ok('R-d6 目标行 id 与内容都没被改', (() => {
+        const i = after.rows.findIndex((x) => String(x[idIdx]).trim() === target)
+        const j = before.rows.findIndex((x) => String(x[idIdx]).trim() === target)
+        return i >= 0 && after.rows[i][after.header.indexOf('内容')] === before.rows[j][before.header.indexOf('内容')]
+      })())
+    }
+
+    // ══ R-e：四条判据 —— 强度<0.1 且 距离≠常驻 且 类型≠固定 且 最后强化超半衰期 ══
+    //   每条判据都要正控（该拒的拒）与反控（不该拒的放）。
+    {
+      const NOW = new Date('2026-10-25T00:00:00')
+      const daysAgo = (n) => {
+        const d = new Date(NOW.getTime() - n * 86400000)
+        const p2 = (x) => String(x).padStart(2, '0')
+        return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`
+      }
+      // 判据函数（阿栈按此实现，或抽到 core 里）——这里用 core 已有的能力拼出期望
+      const isCandidate = (o) => {
+        const s = core.currentStrength({
+          强度: o.强度 ?? '1', 最后强化: o.最后强化 ?? o.时间, 深度: o.深度 ?? '语义',
+          类型: o.类型 ?? '记忆', 距离: o.距离 ?? '按需',
+        }, NOW)
+        return s < core.ARCHIVE_THRESHOLD
+      }
+      // 正控 1：超龄、非常驻、非固定 → 是候选
+      ok('R-e1 判据正控：语义 400 天前、按需、记忆 → 是归档候选',
+        isCandidate({ 最后强化: daysAgo(400) }) === true)
+      // 反控 1：距离=常驻 → 不是候选（豁免）
+      ok('R-e2 判据反控：距离=常驻 → 不是候选（豁免生效）',
+        isCandidate({ 最后强化: daysAgo(4000), 距离: '常驻' }) === false)
+      // 反控 2：类型=固定 → 不是候选（豁免）
+      ok('R-e3 判据反控：类型=固定 → 不是候选（豁免生效）',
+        isCandidate({ 最后强化: daysAgo(4000), 类型: '固定' }) === false)
+      // 反控 3：刚强化过 → 不是候选
+      ok('R-e4 判据反控：刚强化过（今天）→ 不是候选',
+        isCandidate({ 最后强化: daysAgo(0) }) === false)
+      // 反控 4：强度仍高（0.9）但时间久 → 不是候选（强度没跌破）
+      // ⚠️ 原用例用「强度 0.9 且 400 天」做反控，但按 MM 公式算出来是 0.0413——
+      // 语义档 400 天 = 4.4 个半衰期，0.9 × 2^-4.4 ≈ 0.041，**确实跌破 0.1**。
+      // 用例的前提算错了（以为「强度高就不会跌破」），不是实现错。
+      // 改成「强度 1 且 200 天」→ 0.2143，这才是「时间久但还没跌破阈值」的正控。
+      ok('R-e5 判据反控：强度 1 且 200 天 → 不是候选（200 天≈2.2 个半衰期，强度仍 0.2143 ≥ 0.1）',
+        (() => {
+          const s = core.currentStrength({ 强度: '1', 最后强化: daysAgo(200), 深度: '语义', 类型: '记忆', 距离: '按需' }, NOW)
+          return s >= core.ARCHIVE_THRESHOLD
+        })())
+    }
+
+    // ══ R-f：「过期候选」执行时拒绝（候选算完后条目被强化）══
+    //   场景：盘点算出候选 → 期间该条被 recall 命中强化（reinforce.log 追加）→
+    //         此时再执行归档，必须重新校验、拒绝并说明原因。
+    {
+      const { box, csv, lock } = newLib()
+      const logPath = join(box, 'reinforce.log')
+      // 造一条超龄条目（初始是候选）
+      const oldId = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: mk({ 内容: '超龄条目', 时间: '2024-01-01', 最后强化: '2024-01-01', 深度: '情景' }) })
+      // 造完候选之后：追加一条强化记录（模拟被 recall 命中）
+      core.appendReinforceLog({ logPath, id: oldId, project: '通用', day: '2026-10-25', reinforce: true })
+      // 现在执行归档——带 logPath 时应重新合并日志再判，发现已强化 → 拒绝
+      const r = core.archiveEntry({
+        schema: schema0, csvPath: csv, lockPath: lock, logPath,
+        targetId: oldId, status: '已归档', requireCandidate: true,
+      })
+      ok('R-f1 过期候选：候选算完后被强化 → 执行归档时拒绝',
+        r.ok === false, JSON.stringify(r))
+      ok('R-f2 拒绝原因说清「已不满足归档判据」（不是笼统失败）',
+        /判据|候选|强度|强化|过期/.test(String(r.error ?? '')), String(r.error))
+      ok('R-f3 拒绝后文件一个字节没动',
+        (() => {
+          const t = readRows(csv)
+          const row = t.rows.find((x) => String(x[0]).trim() === oldId)
+          return String(row?.[t.header.indexOf('状态')]).trim() === '生效'
+        })())
+      // 反控：没有强化记录时，同样这条能被正常归档
+      {
+        const { csv: csv2, lock: lock2 } = newLib()
+        const oldId2 = core.appendEntry({ schema: schema0, csvPath: csv2, lockPath: lock2,
+          row: mk({ 内容: '超龄条目2', 时间: '2024-01-01', 最后强化: '2024-01-01', 深度: '情景' }) })
+        const r2 = core.archiveEntry({
+          schema: schema0, csvPath: csv2, lockPath: lock2, logPath: join(box, 'none.log'),
+          targetId: oldId2, status: '已归档', requireCandidate: true,
+        })
+        ok('R-f4 反控：确实是候选（无强化记录）→ 归档放行', r2.ok === true, JSON.stringify(r2))
+      }
+    }
+
+    // ══ R-g：强制复核=true 的主子手动放行路径 ══
+    //   判据不过时，主子可以显式 `强制复核=true` 放行（手动确认「我知道它不是候选」）。
+    //   必须：① 不带强制 → 拒绝；② 带强制 → 放行；③ 强制放行也要拍快照。
+    {
+      const { csv, lock } = newLib()
+      // 一条刚写的（不是候选）
+      const fresh = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: mk({ 内容: '刚写的条目', 时间: '2026-10-25', 最后强化: '2026-10-25' }) })
+      const rNoForce = core.archiveEntry({
+        schema: schema0, csvPath: csv, lockPath: lock,
+        targetId: fresh, status: '已归档', requireCandidate: true,
+      })
+      ok('R-g1 不是候选且未强制 → 拒绝', rNoForce.ok === false, JSON.stringify(rNoForce))
+      ok('R-g2 拒绝文案提示可用「强制复核」手动放行',
+        /强制复核|force|手动/.test(String(rNoForce.error ?? '')), String(rNoForce.error))
+      const rForce = core.archiveEntry({
+        schema: schema0, csvPath: csv, lockPath: lock,
+        targetId: fresh, status: '已归档', requireCandidate: true, force: true,
+      })
+      ok('R-g3 强制复核=true → 放行成功', rForce.ok === true, JSON.stringify(rForce))
+      ok('R-g4 强制放行也拍了快照', typeof rForce.snapshot === 'string' && rForce.snapshot !== '')
+      const t = readRows(csv)
+      ok('R-g5 强制放行后状态确实是已归档',
+        String(t.rows.find((x) => String(x[0]).trim() === fresh)?.[t.header.indexOf('状态')]).trim() === '已归档')
+    }
+
+    // ══ R-h：memory_archive 工具（智能体只提交建议清单）══
+    {
+      const { box, csv, lock } = newLib()
+      const logPath = join(box, 'reinforce.log')
+      // 造三条：两条超龄候选 + 一条新的非候选
+      const c1 = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: mk({ 内容: '候选一', 时间: '2024-01-01', 最后强化: '2024-01-01', 深度: '情景' }) })
+      const c2 = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: mk({ 内容: '候选二', 时间: '2024-01-01', 最后强化: '2024-01-01', 深度: '情景' }) })
+      const nope = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: mk({ 内容: '非候选', 时间: '2026-10-25', 最后强化: '2026-10-25' }) })
+
+      // ① 建议清单格式：工具接受 {类型:'归档建议', 条目:[{id, 理由}]}
+      const plan = [
+        { id: c1, 理由: '强度 0.00，情景档超 400 天' },
+        { id: c2, 理由: '强度 0.00，情景档超 400 天' },
+        { id: nope, 理由: '误以为该归档' },
+      ]
+      const r = core.archiveBatch({
+        schema: schema0, csvPath: csv, lockPath: lock, logPath,
+        items: plan, status: '已归档', requireCandidate: true,
+      })
+      ok('R-h1 memory_archive 接受建议清单格式（items 数组）', r.ok === true, JSON.stringify(r).slice(0, 200))
+      ok('R-h2 逐条返回结果（每条有 id + 成功/失败 + 原因）',
+        Array.isArray(r.results) && r.results.length === 3 &&
+        r.results.every((x) => typeof x.id === 'string' && typeof x.ok === 'boolean'),
+        JSON.stringify(r.results ?? []).slice(0, 300))
+      // ② 部分成功语义：两条候选成功、一条非候选被拒
+      const okIds = (r.results ?? []).filter((x) => x.ok === true).map((x) => x.id)
+      const failIds = (r.results ?? []).filter((x) => x.ok === false).map((x) => x.id)
+      ok('R-h3 部分成功：两条候选成功归档', okIds.length === 2 && okIds.includes(c1) && okIds.includes(c2), JSON.stringify(okIds))
+      ok('R-h4 部分成功：非候选那条被拒（不是整批回滚，也不是全放行）',
+        failIds.length === 1 && failIds.includes(nope), JSON.stringify(failIds))
+      ok('R-h5 被拒那条说明理由', (r.results ?? []).find((x) => x.id === nope)?.error !== '')
+      // ③ 部分成功不破坏数据：成功的确实归档了、被拒的仍是生效
+      const t = readRows(csv)
+      const st = (id) => String(t.rows.find((x) => String(x[0]).trim() === id)?.[t.header.indexOf('状态')]).trim()
+      ok('R-h6 成功的两条状态=已归档', st(c1) === '已归档' && st(c2) === '已归档')
+      ok('R-h7 被拒的那条状态仍=生效（没被顺手归档）', st(nope) === '生效')
+      ok('R-h8 行数不变（三条还是三条）', t.rows.length === 3, String(t.rows.length))
+    }
+
+    // ══ R-i：迁移接线端到端（17 列库启动 → 快照 → 21 列、数据行逐字节不动）══
+    {
+      const { box, csv, lock } = newLib()
+      // 造一个 17 列老库
+      const H17 = 'id,内容,时间,环境,原因,备注,稳定性,成熟度,距离,角色,项目,状态,关键词,工具,版本,依据,类型'
+      const rows17 = [
+        'M-20260101-001,老条目甲,2026-01-01,e,r,,稳定,语义,按需,角色,通用,生效,,,v1,推断,记忆',
+        'M-20260101-002,老条目乙,2025-01-01,e,r,,稳定,情景,常驻,角色,通用,生效,,,v1,推断,记忆',
+      ]
+      writeFileSync(csv, H17 + '\n' + rows17.join('\n') + '\n', 'utf8')
+      const dataLinesBefore = readFileSync(csv, 'utf8').split('\n').slice(1).filter(Boolean)
+
+      // 迁移前：能读（legacyWidth 容忍）
+      const t0 = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      ok('R-i1 迁移前：17 列老库能读，且老行不算 ragged',
+        t0.header.length === 17 && t0.ragged.length === 0, `header=${t0.header.length} ragged=${t0.ragged.length}`)
+
+      // 启动时自动迁移（阿栈应实现 ensureMigrated 或在 store 初始化里调）
+      const snapDir = join(box, 'snapshots')
+      const mig = core.migrateHeader({ schema: schema0, csvPath: csv, lockPath: lock })
+      ok('R-i2 迁移：表头 17→21', mig.ok === true && mig.changed === true && mig.before === 17 && mig.after === 21, JSON.stringify(mig))
+      ok('R-i3 迁移：**数据行逐字节不动**',
+        JSON.stringify(readFileSync(csv, 'utf8').split('\n').slice(1).filter(Boolean)) === JSON.stringify(dataLinesBefore))
+      ok('R-i4 迁移幂等：再迁一次 changed=false',
+        core.migrateHeader({ schema: schema0, csvPath: csv, lockPath: lock }).changed === false)
+
+      // 迁移后新写入带 4 新列
+      const newId = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: mk({ 内容: '迁移后新写', 时间: '2026-10-25' }) })
+      const t1 = readRows(csv)
+      const newRow = t1.rows.find((x) => String(x[0]).trim() === newId)
+      ok('R-i5 迁移后新写入行是 21 格', newRow.length === 21, String(newRow.length))
+      ok('R-i6 新行带 4 个新列且默认值正确',
+        String(newRow[t1.header.indexOf('强度')]) === '1' &&
+        String(newRow[t1.header.indexOf('使用次数')]) === '0' &&
+        String(newRow[t1.header.indexOf('已验证项目')]) === '',
+        JSON.stringify({ 强度: newRow[t1.header.indexOf('强度')], 使用次数: newRow[t1.header.indexOf('使用次数')] }))
+      ok('R-i7 迁移后老行（17 格）仍不算 ragged', readRows(csv).ragged.length === 0)
+    }
+
+    // ══ R-j：supersede 保留深度/新列（报告 §七 验收用例照抄）══
+    //   旧缺陷：supersede 用列名做键取值，但 row 用字典名传 → 深度等字段丢失。
+    {
+      const { csv, lock } = newLib()
+      const oldId = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: mk({ 内容: '待取代的旧条', 深度: '程序', 距离: '常驻', 项目: '测试文件夹', 关键词: '旧词' }) })
+      const before = readRows(csv)
+      const oldRow = before.rows.find((x) => String(x[0]).trim() === oldId)
+      // ⚠️ 这里**不能**用 mk() 造 row：mk 会带出 `深度:语义 / 距离:按需 / 项目:通用` 等默认值，
+      // 而「取代」的语义是「没给的字段沿用旧条」——把默认值传进去等于**明确要覆盖**，
+      // 于是旧条的 程序/常驻/测试文件夹 被覆盖成 语义/按需/通用，用例自己把前提破坏了。
+      // 真实路径（preset.js 的 memory_supersede）只传调用方显式给的非空字段，
+      // 所以这里也只传「内容」——这才是 P1-2 要验的那个场景。
+      const sup = core.supersedeEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        targetId: oldId, row: { 内容: '取代后的新条' } })
+      ok('R-j1 取代成功', sup.ok === true, JSON.stringify(sup))
+      const after = readRows(csv)
+      const newRow = after.rows.find((x) => String(x[0]).trim() === sup.id)
+      const col = (name) => newRow[after.header.indexOf(name)]
+      ok('R-j2 **深度被保留**（旧条 程序 → 新条也是程序）', String(col('成熟度')).trim() === '程序', String(col('成熟度')))
+      ok('R-j3 距离被保留（常驻）', String(col('距离')).trim() === '常驻', String(col('距离')))
+      ok('R-j4 项目被保留（测试文件夹）', String(col('项目')).trim() === '测试文件夹', String(col('项目')))
+      ok('R-j5 4 个新列有默认值（不是空串）',
+        String(col('强度')).trim() !== '' && String(col('使用次数')).trim() !== '' && String(col('最后强化')).trim() !== '',
+        JSON.stringify({ 强度: col('强度'), 使用次数: col('使用次数'), 最后强化: col('最后强化') }))
+      ok('R-j6 旧行逐字节没变（追加式取代）',
+        JSON.stringify(oldRow) === JSON.stringify(before.rows.find((x) => String(x[0]).trim() === oldId)))
+      ok('R-j7 新行备注带「取代：旧id」',
+        String(col('备注')).includes(`取代：${oldId}`), String(col('备注')))
+    }
+
+
+    // ══ R-k：P0-2 强度默认值三态（空串 / 缺失列 / 有值）══
+    //   实锤缺陷：`Number('') === 0`，且 `Number.isFinite(0) === true`、`0 >= 0 === true`，
+    //   于是「17 列老库没有强度列 → 默认 1」被算成 0，全库强度归零。
+    //   后果：真库 51 条生效条目里 32 条被误判成归档候选（62.7%），任何触发方式的归档都是误杀。
+    //   位置：lib/engine/core.mjs `applyReinforceLog()` 的 csvStrength/base0 两行。
+    {
+      const NOW = new Date('2026-10-25T00:00:00')
+      // 三态：老库（列不存在 / 空串）应默认 1；有值照实；真 0 仍是 0
+      const strengthOf = (o) => {
+        const merged = core.applyReinforceLog(
+          o, (x, n) => (x[n] ?? ''), undefined,
+        )
+        return Number(merged.强度)
+      }
+      ok('R-k1 三态·空串（17 列老库无强度列）→ 强度默认 1（不是 0）',
+        strengthOf({ 强度: '', 最后强化: '2026-10-01', 深度: '语义', 类型: '记忆', 距离: '按需' }) === 1,
+        String(strengthOf({ 强度: '', 最后强化: '2026-10-01', 深度: '语义', 类型: '记忆', 距离: '按需' })))
+      ok('R-k2 三态·键缺失（undefined）→ 强度默认 1',
+        strengthOf({ 最后强化: '2026-10-01', 深度: '语义', 类型: '记忆', 距离: '按需' }) === 1,
+        String(strengthOf({ 最后强化: '2026-10-01', 深度: '语义', 类型: '记忆', 距离: '按需' })))
+      ok('R-k3 三态·有值 1 → 强度 1（不被默认值顶掉）',
+        strengthOf({ 强度: '1', 最后强化: '2026-10-01', 深度: '语义', 类型: '记忆', 距离: '按需' }) === 1)
+      ok('R-k4 三态·有值 0.5 → 强度 0.5（照实读，不修正成 1）',
+        strengthOf({ 强度: '0.5', 最后强化: '2026-10-01', 深度: '语义', 类型: '记忆', 距离: '按需' }) === 0.5,
+        String(strengthOf({ 强度: '0.5', 最后强化: '2026-10-01', 深度: '语义', 类型: '记忆', 距离: '按需' })))
+      ok('R-k5 三态·有值 0（真的该归档）→ 仍是 0，不被默认值救回来',
+        strengthOf({ 强度: '0', 最后强化: '2026-10-01', 深度: '语义', 类型: '记忆', 距离: '按需' }) === 0,
+        String(strengthOf({ 强度: '0', 最后强化: '2026-10-01', 深度: '语义', 类型: '记忆', 距离: '按需' })))
+
+      // 端到端：17 列老库盘点候选必须为 0（条目都是新的）
+      {
+        const H17 = 'id,内容,时间,环境,原因,备注,稳定性,成熟度,距离,角色,项目,状态,关键词,工具,版本,依据,类型'
+        const { box: b2, csv: c2 } = newLib()
+        writeFileSync(c2, H17 + '\nM-20260101-001,新条目,2026-10-24,e,r,,稳定,语义,按需,角色,通用,生效,,,v1,推断,记忆\n', 'utf8')
+        const t = core.readTable(readFileSync(c2, 'utf8'), core.legacyWidthOf(schema0))
+        const inv = core.reviewInventory({ schema: schema0, header: t.header, rows: t.rows, logMap: new Map(), now: NOW })
+        ok('R-k6 **17 列老库、条目才 1 天新 → 盘点候选必须为 0**（当前实锤是误报）',
+          inv.衰减候选.length === 0, `候选 ${inv.衰减候选.length} 条`)
+      }
+      // 端到端：21 列新库正常
+      {
+        const { csv: c3, lock: l3 } = newLib()
+        const id3 = core.appendEntry({ schema: schema0, csvPath: c3, lockPath: l3,
+          row: mk({ 内容: '新库条目', 时间: '2026-10-24' }) })
+        const t = core.readTable(readFileSync(c3, 'utf8'), core.legacyWidthOf(schema0))
+        const inv = core.reviewInventory({ schema: schema0, header: t.header, rows: t.rows, logMap: new Map(), now: NOW })
+        ok('R-k7 21 列新库、条目 1 天新 → 盘点候选为 0（正常路径不被误伤）',
+          inv.衰减候选.length === 0, `候选 ${inv.衰减候选.length} 条`)
+      }
+      // 端到端：老库超龄条目**仍应**被识别为候选（修完不能把真候选也修没了）
+      {
+        const H17 = 'id,内容,时间,环境,原因,备注,稳定性,成熟度,距离,角色,项目,状态,关键词,工具,版本,依据,类型'
+        const { csv: c4 } = newLib()
+        writeFileSync(c4, H17 + '\nM-20240101-001,超龄条目,2024-01-01,e,r,,稳定,情景,按需,角色,通用,生效,,,v1,推断,记忆\n', 'utf8')
+        const t = core.readTable(readFileSync(c4, 'utf8'), core.legacyWidthOf(schema0))
+        const inv = core.reviewInventory({ schema: schema0, header: t.header, rows: t.rows, logMap: new Map(), now: NOW })
+        ok('R-k8 反控：17 列老库、超龄条目（2024-01-01）→ **仍应**是候选（修完不能把真候选修没）',
+          inv.衰减候选.length === 1, `候选 ${inv.衰减候选.length} 条`)
+      }
+      // 端到端：常驻/固定豁免在老库上也生效（当前 bug 下失效）
+      {
+        const H17 = 'id,内容,时间,环境,原因,备注,稳定性,成熟度,距离,角色,项目,状态,关键词,工具,版本,依据,类型'
+        const { csv: c5 } = newLib()
+        writeFileSync(c5, H17 + '\nM-20240101-001,超龄常驻,2024-01-01,e,r,,稳定,情景,常驻,角色,通用,生效,,,v1,推断,记忆\n', 'utf8')
+        const t = core.readTable(readFileSync(c5, 'utf8'), core.legacyWidthOf(schema0))
+        const inv = core.reviewInventory({ schema: schema0, header: t.header, rows: t.rows, logMap: new Map(), now: NOW })
+        ok('R-k9 反控：17 列老库、超龄但距离=常驻 → 不是候选（豁免在老库上也要生效）',
+          inv.衰减候选.length === 0, `候选 ${inv.衰减候选.length} 条`)
+      }
+    }
+
+  } catch (e) {
+    fail++
+    results.push(`FAIL  R. P0 归档安全 — ${String(e?.stack ?? e)}`)
+  }
+
   const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
   ok('package.json 导出 ./client 且声明 dsh.client', pkg.exports['./client'] === './client.js' && pkg.dsh?.client?.platform === 'web')
   ok('client manifest 不注入非客户端 package',

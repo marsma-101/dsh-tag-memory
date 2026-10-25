@@ -1239,67 +1239,52 @@ function supersedeFrom(body) {
  * 取代走追加、归档走改状态——两条路分开，是因为语义不同：
  * 取代 = 「这条被一条新的顶掉了」；归档 = 「这条不要了，但也没有新的」。
  */
+/**
+ * 归档：把一条**改状态**成 `已归档`（或复活成 `生效`）。
+ *
+ * ⚠️ 这是 0.3.0 里**唯一**改已有行的操作，与「只追加」有张力，所以规矩写死在这里：
+ *   · 必须先在**写锁内**留快照（留不下来就不许归档）；
+ *   · 只改 `状态` 这一格，其它格一个值都不动；
+ *   · **按「解析后的逻辑记录」整体重建文件**，绝不按物理行定位（见下）；
+ *   · tmp + rename 整体替换（同目录，原子）；
+ *   · 改完复核：逻辑记录数不变、目标状态确实变了、**其它每一条的逻辑字段逐一相等**。
+ *
+ * ── 为什么必须按逻辑记录重建（P0-1 的教训，2026-10-25）──
+ * 旧实现用 `text.split('\n')` 数物理行，拿「第 N 个非空物理行」当第 N 条记录。
+ * 但 CSV 的单元格里可以含换行：一条内容带换行的记录**物理上占两个行**。
+ * 于是「逻辑第 2 条」会落到「第 1 条的续行」上，把那一行换成新内容——
+ * 实测后果：第 1 条被灌进第 2 条的整行文本，两条记录合成一条，还留下 ragged。
+ * **物理行 ≠ 记录**，这条从此按「解析 → 改数组 → 序列化」走，不碰原始文本行。
+ *
+ * ── 为什么序列化整个文件而不是只改那一行 ──
+ * 只改那一行要求「知道它在文本里的确切字节范围」，那就得自己写一个 CSV 分词器
+ * 去记录每个单元格的偏移——等于把 `parseCSV` 再实现一遍，两份实现迟早分叉。
+ * 整体重建的代价是「所有单元格过一遍 `cell()`」，而 `cell()` 与 `parseCSV` 是对称的
+ * （需要时加引号、引号内转义），所以往返不丢信息。复核那一步会逐字段比对，真丢了当场报错。
+ */
+/**
+ * 归档（HTTP 薄壳）：参数解析 + 调 `core.archiveEntry`。
+ *
+ * **判据、定位、写盘、复核全在 core 里**——`memory_archive` 工具走的是同一个函数。
+ * 界面点按钮和智能体提交建议清单，两条路都落到 `archiveEntry`，不存在第二份实现。
+ * （这个库在「盘点清单」上踩过「同一套判据写两遍」的坑，归档这种改库操作更不敢重复。）
+ */
 function archiveFrom(body) {
   const core = getCore()
+  const schema = loadSchema()
   const targetId = typeof body?.目标id === 'string' ? body.目标id.trim() : (typeof body?.targetId === 'string' ? body.targetId.trim() : '')
-  const want = typeof body?.状态 === 'string' ? body.状态.trim() : '已归档'
-  if (targetId === '') return { ok: false, code: 'NO_TARGET', error: '要指明归档哪一条（目标id）' }
-  if (!['已归档', '生效'].includes(want)) {
-    return { ok: false, code: 'BAD_STATUS', error: `只能归档成「已归档」或复活成「生效」，收到「${want}」` }
-  }
+  const status = typeof body?.状态 === 'string' ? body.状态.trim() : '已归档'
+  // `强制复核`：主子手动确认「我知道它不是候选」时放行（主子 2026-10-25 拍板 B）
+  const force = body?.强制复核 === true || body?.force === true
+  const requireCandidate = body?.requireCandidate === true
 
-  let snap
-  try {
-    snap = snapshotOrThrow({ storeDir: STORE_DIR, csvPath: CSV_PATH, label: `归档 ${targetId} → ${want}` }, '归档')
-  } catch (e) {
-    return { ok: false, code: 'PRESNAPSHOT', error: String(e?.message ?? e) }
-  }
-
-  try {
-    return core.withLock(LOCK_PATH, () => {
-      const text = readFileSync(CSV_PATH, 'utf8')
-      const { header, rows } = core.readTable(text, core.legacyWidthOf(loadSchema()))
-      const idIdx = header.indexOf('id')
-      const stIdx = header.indexOf('状态')
-      if (idIdx < 0 || stIdx < 0) return { ok: false, code: 'BAD_HEADER', error: '表头缺 id 或 状态 列' }
-
-      const at = rows.findIndex((r) => String(r[idIdx] ?? '').trim() === targetId)
-      if (at < 0) return { ok: false, code: 'NOT_FOUND', error: `库里没有 id 为 ${targetId} 的条目` }
-      const before = String(rows[at][stIdx] ?? '').trim()
-      if (before === want) return { ok: true, targetId, from: before, to: want, changed: false, snapshot: snap.name }
-
-      // 只改这一格。行是二维数组，改完按原表头重新序列化——**其它格逐字节保留**
-      // （`cell()` 会按需加引号，与 parseCSV 对称，所以往返不丢信息）。
-      const line = rows[at].slice()
-      line[stIdx] = want
-      const newLine = line.map((v) => core.cell(v)).join(',')
-
-      // 整份重写：表头 + 逐行（目标行换新、其余原样）。用 tmp + rename。
-      const lines = text.split('\n')
-      // 找到目标行在**文本**里的位置（数据行序号 at 对应第 at+1 行，第 0 行是表头）
-      let seen = -1
-      let replaced = false
-      for (let i = 0; i < lines.length; i++) {
-        if (i === 0) continue
-        if (lines[i].trim() === '') continue
-        seen++
-        if (seen === at) { lines[i] = newLine; replaced = true; break }
-      }
-      if (!replaced) return { ok: false, code: 'LOCATE', error: '定位到目标行失败，没有改动' }
-      atomicReplace(CSV_PATH, Buffer.from(lines.join('\n'), 'utf8'))
-
-      // 复核：行数不变、目标状态确实变了
-      const after = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(loadSchema()))
-      const at2 = after.rows.findIndex((r) => String(r[after.header.indexOf('id')] ?? '').trim() === targetId)
-      const okRow = at2 >= 0 && String(after.rows[at2][after.header.indexOf('状态')] ?? '').trim() === want
-      if (after.rows.length !== rows.length || !okRow) {
-        return { ok: false, code: 'VERIFY', error: `归档后复核没通过（行数 ${rows.length}→${after.rows.length}），请用快照 ${snap.name} 回退` }
-      }
-      return { ok: true, targetId, from: before, to: want, changed: true, snapshot: snap.name, status: backupStatus() }
-    })
-  } catch (e) {
-    return { ok: false, code: 'ARCHIVE', error: String(e?.message ?? e) }
-  }
+  const r = core.archiveEntry({
+    schema, csvPath: CSV_PATH, lockPath: LOCK_PATH, logPath: REINFORCE_LOG_PATH,
+    targetId, status, requireCandidate, force,
+  })
+  return r.ok === true
+    ? { ok: true, targetId: r.targetId, from: r.from, to: r.to, changed: r.changed, snapshot: r.snapshot, verdict: r.verdict ?? null, status: backupStatus() }
+    : { ok: false, code: r.code || 'ARCHIVE', error: r.error, verdict: r.verdict ?? null }
 }
 
 // ── 允许的排序：时间 / id 的升序降序。未指定或列不存在 → 原序。 ──
