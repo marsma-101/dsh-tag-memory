@@ -31,7 +31,7 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join, dirname, resolve } from 'node:path'
+import { join, dirname, resolve, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -1525,9 +1525,17 @@ try {
 
     // 造一份「源码」：照本仓库的样子带上那些**不该跟着搬**的东西
     const src = join(sandbox, '源码')
+    // ⚠️ `filter` 收到的 `s` 是**绝对路径**。装出来的包路径里本身就含 `node_modules`
+    // （比如 `.../node_modules/插件包名/...`），直接拿绝对路径匹配会把**包根目录**也排除掉，
+    // 于是 cpSync 什么都没拷、后面的安装用例全崩——开发环境路径不含 node_modules，永远发现不了。
+    // 正确做法：只判**相对于包根**的那一段（`relative(PKG, s)`），根目录（空串）永远保留。
     cpSync(PKG, src, {
       recursive: true,
-      filter: (s) => !/(^|[\\/])(node_modules|\.git|privhub|store)([\\/]|$)/.test(s),
+      filter: (s) => {
+        const rel = relative(PKG, s)
+        if (rel === '') return true // 包根本身永远要
+        return !/(^|[\\/])(node_modules|\.git|privhub|store)([\\/]|$)/.test(rel)
+      },
     })
     for (const d of ['.git', 'privhub', 'store']) mkdirSync(join(src, d), { recursive: true })
     writeFileSync(join(src, 'package.json.bak-20260101'), '{"x":1}\n', 'utf8')
@@ -3529,14 +3537,17 @@ try {
         row: mk({ 内容: '深藏记忆内容ABC', 类型: '记忆', 距离: '深藏', 项目: '通用' }) })
       const pinned = core.appendEntry({ schema: schema0, csvPath: c5, lockPath: l5,
         row: mk({ 内容: '常驻内容PIN', 距离: '常驻', 项目: '通用' }) })
-      // 临时把 store 指向这个库，取快照文本
-      const savedDir = process.env.DSH_TAG_MEMORY_DATA_DIR
+      // 临时把 store 指向这个库，取快照文本。
+      // 用 setLibraryDir() 而不是改环境变量：后者依赖「带 query 重载 preset 时
+      // 内部 store.mjs 也会重新求值」这个 ESM 细节，虽然实测成立，但语义不直观。
+      // setLibraryDir 是显式的、不依赖重载语义。
+      const origDirR6 = store.SKILL_DIR
       const skill2 = join(join(c5, '..'), 'skill')
       mkdirSync(join(skill2, 'references'), { recursive: true })
       mkdirSync(join(skill2, 'store'), { recursive: true })
       copyFileSync(c5, join(skill2, 'store', 'memory.csv'))
       copyFileSync(join(PKG, 'lib', 'engine', 'tags.schema.json'), join(skill2, 'references', 'tags.schema.json'))
-      process.env.DSH_TAG_MEMORY_DATA_DIR = skill2
+      store.setLibraryDir(skill2)
       try {
         const preset2 = await import(pathToFileURL(join(PKG, 'preset.js')).href + '?deep=' + Date.now())
         const s2 = []
@@ -3550,7 +3561,7 @@ try {
           /- \[M-\d{8}-\d{3}\] 在「通用」/.test(text), '索引行没找到')
         ok('R+6-4 **常驻仍给全文**（深藏判断不误伤常驻）', /常驻内容PIN[\s\S]{0,120}环境：/.test(text))
       } finally {
-        process.env.DSH_TAG_MEMORY_DATA_DIR = savedDir
+        store.setLibraryDir(origDirR6)
       }
     }
 
@@ -3579,13 +3590,14 @@ try {
       // 不能再自己 basename（那样算出的是旧格式，和 recall 里的 project 对不上）。
       const thisProj = mkSort({ 内容: '本项目', 距离: '按需', 项目: store.projectName(join(sandbox, 'proj')), 时间: '2026-09-01' })
 
-      const savedDir = process.env.DSH_TAG_MEMORY_DATA_DIR
+      // 同上：用 setLibraryDir（显式切库，不依赖 ESM 重载细节）
+      const origDirR7 = store.SKILL_DIR
       const skill3 = join(join(c6, '..'), 'skill')
       mkdirSync(join(skill3, 'references'), { recursive: true })
       mkdirSync(join(skill3, 'store'), { recursive: true })
       copyFileSync(c6, join(skill3, 'store', 'memory.csv'))
       copyFileSync(join(PKG, 'lib', 'engine', 'tags.schema.json'), join(skill3, 'references', 'tags.schema.json'))
-      process.env.DSH_TAG_MEMORY_DATA_DIR = skill3
+      store.setLibraryDir(skill3)
       try {
         const preset3 = await import(pathToFileURL(join(PKG, 'preset.js')).href + '?sort=' + Date.now())
         const t3 = [], ctx3 = { systemPrompt: { section: () => {}, getSectionOrder: () => 50 }, tools: { register: (t) => t3.push(t) } }
@@ -3607,7 +3619,7 @@ try {
         ok('R+7-4 排序稳定：同条件两次召回顺序一致',
           JSON.stringify(order) === JSON.stringify(order2), `${order.join(',')} vs ${order2.join(',')}`)
       } finally {
-        process.env.DSH_TAG_MEMORY_DATA_DIR = savedDir
+        store.setLibraryDir(origDirR7)
       }
     }
 
@@ -4085,6 +4097,54 @@ try {
     fail++
     results.push(`FAIL  R++ 节（0.3.2 批C）— ${String(e?.stack ?? e)}`)
   }
+
+  // ── U. 0.3.3 三件（发版后缺陷收尾）──────────────────────────────
+  try {
+    const core = store.getCore()
+    const schema0 = store.loadSchema()
+
+    // U-1（发版事故回归锚点）：清单与统计数必须一致。
+    // 0.3.2 发版时 `冲突候选: []` 这个**变异残留**被误提交了，而 `统计.冲突候选` 还是真值——
+    // 结果是「统计说有 N 条冲突、清单里一条都没有」，C-2 那张卡在发布版里等于没生效。
+    // 这条断言专门钉「两者一致」，让同类残留无论怎么改都会红。
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-u1-'))
+      const csv = join(box, 'memory.csv')
+      writeFileSync(csv, readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv')))
+      const lock = join(box, '.lock')
+      const mkRow = (c) => ({ 内容: c, 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+        稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest' })
+      // 造一对冲突（同一事实键、不同值）
+      core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mkRow('Python 装在 D:\\Py312') })
+      core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mkRow('Python 装在 D:\\Py311') })
+      const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      const inv = core.reviewInventory({ schema: schema0, header: t.header, rows: t.rows })
+      ok('U-1 冲突候选清单是数组（不是占位符）', Array.isArray(inv.冲突候选))
+      ok('U-1 清单条数与统计数一致（防「统计说有、清单是空」的变异残留）',
+        inv.冲突候选.length === inv.统计.冲突候选,
+        `清单 ${inv.冲突候选.length} / 统计 ${inv.统计.冲突候选}`)
+      ok('U-1 正控：造的这对冲突真被识别出来了', inv.冲突候选.length >= 1)
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // U-2：cpSync filter 必须只判相对路径。
+    // 装出来的包路径里含 `node_modules`，拿绝对路径匹配会把包根也排除——开发环境永远发现不了。
+    {
+      const src = readFileSync(join(PKG, 'scripts', 'selftest.mjs'), 'utf8')
+      ok('U-2 cpSync filter 用 relative(PKG, s) 判相对路径',
+        /relative\(PKG, s\)/.test(src) && /rel === ''/.test(src), '没找到 relative 判据')
+      ok('U-2 不再拿绝对路径 s 直接匹配（那是装包崩的根因）',
+        !/filter: \(s\) => !\/\(\^\|\[\\\\\/\]\)\(node_modules/.test(src))
+    }
+
+    // U-3：js-yaml 必须在 dependencies（install.mjs 与 selftest 都硬用它）
+    {
+      const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
+      ok('U-3 js-yaml 声明在 dependencies（不是只靠开发环境恰好有）',
+        pkg.dependencies !== undefined && typeof pkg.dependencies['js-yaml'] === 'string',
+        JSON.stringify(pkg.dependencies ?? {}))
+    }
+  } catch (e) { fail++; results.push(`FAIL  U. 0.3.3 三件 — ${String(e?.stack ?? e)}`) }
 
   const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
   ok('package.json 导出 ./client 且声明 dsh.client', pkg.exports['./client'] === './client.js' && pkg.dsh?.client?.platform === 'web')
