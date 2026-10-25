@@ -327,8 +327,8 @@ try {
     const preset = await import(pathToFileURL(join(PKG, 'preset.js')).href)
     preset.apply(ctx, { dir: 'C:/does/not/matter/assistant' })
     ok('preset 注册字典段', sections.length === 1 && sections[0].name === 'tag-memory:dict')
-    ok('preset 注册五个工具（write / recall / supersede / review / archive）',
-      tools.map((t) => t.name).sort().join(',') === 'memory_archive,memory_recall,memory_review,memory_supersede,memory_write')
+    ok('preset 注册六个工具（write / recall / supersede / review / archive / mark_used）',
+      tools.map((t) => t.name).sort().join(',') === 'memory_archive,memory_mark_used,memory_recall,memory_review,memory_supersede,memory_write')
     const exec = { agent: { id: 'selftest', session: { header: { cwd: PROJ_CWD } } } }
     const out = await tools.find((t) => t.name === 'memory_recall').execute({ 条件: '{"角色":"selftest"}', 取几条: 5 }, exec)
     ok('preset.memory_recall 端到端读回沙箱条目', /命中\s*2\s*条/.test(out), out.split('\n')[0])
@@ -349,7 +349,10 @@ try {
     ok('快照：表头报出「全文 / 只索引」条数', /生效 3 条：全文 3 条 \/ 只索引 0 条/.test(here), here.split('\n')[1])
 
     const away = sections[0].text({ agent: { id: 'selftest', session: { header: { cwd: 'Y:\\another' } } } })
-    ok('跨项目闸门 B-3：别的项目条目只给一行索引', /- \[M-\d{8}-\d{3}\] 在「proj」：自检件D/.test(away), away.split('\n').filter((l) => l.includes('自检件D')).join(' | '))
+    // 0.3.2 起 `projectName` 是「末段名-短哈希」（项目唯一化，卡 kmvnul5wnz4bw），
+    // 所以这里不能再写死「proj」——改成「proj-」开头。**这是语义变更的连带，不是放宽断言**：
+    // 断言的实质是「别的项目只给一行索引」，项目名的具体格式由 projectName 决定。
+    ok('跨项目闸门 B-3：别的项目条目只给一行索引', /- \[M-\d{8}-\d{3}\] 在「proj-[0-9a-f]{6}」：自检件D/.test(away), away.split('\n').filter((l) => l.includes('自检件D')).join(' | '))
     ok('跨项目闸门 B-3：索引行的正文不进上下文（环境那一行不给）', !/自检件D[\s\S]{0,60}环境：/.test(away))
     ok('跨项目闸门：通用 / 常驻仍给全文', /\[M-20260101-001\] 自检件A/.test(away) && /\[M-\d{8}-\d{3}\] 自检件C/.test(away))
     ok('快照随 cwd 变（换项目重切片）', here !== away)
@@ -3305,6 +3308,780 @@ try {
         core.filterRows(schema0, t.header, t.rows, {}).length === 1)
     }
   } catch (e) { fail++; results.push(`FAIL  T. 0.3.2 批A+批B — ${String(e?.stack ?? e)}`) }
+
+  // ══ R+ 节：0.3.2 批A + 批B ══════════════════════════════════════════════
+  try {
+    const core = store.getCore()
+    const schema0 = store.loadSchema()
+    const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex')
+    const TPL = readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv'), 'utf8')
+    const mk = (o) => ({
+      内容: 'x', 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+      稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest', ...o,
+    })
+    const newLib = () => {
+      const box = mkdtempSync(join(tmpdir(), 'tm-rp-'))
+      const csv = join(box, 'memory.csv')
+      const lock = join(box, '.lock')
+      writeFileSync(csv, TPL)
+      return { box, csv, lock }
+    }
+    const readRows = (csv) => {
+      const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      return { header: t.header, rows: t.rows, ragged: t.ragged }
+    }
+    const NOW = new Date('2026-10-25T00:00:00')
+    const daysAgo = (n) => {
+      const d = new Date(NOW.getTime() - n * 86400000)
+      const p2 = (x) => String(x).padStart(2, '0')
+      return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 批A-1（kmvnul5t1k2p8）：手动归档路径接入四判据
+    //   现状：archiveFrom 的 requireCandidate 默认 false，界面按钮不受四判据保护。
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      const { csv, lock } = newLib()
+      // 一条「强度 0.99 / 今天刚写」的条目——不是候选
+      const fresh = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: mk({ 内容: '今天刚写的', 时间: '2026-10-25', 最后强化: '2026-10-25', 强度: '0.99' }) })
+      // 一条真正的候选（强度<0.1 且超半衰期）
+      const cand = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: mk({ 内容: '超龄候选', 时间: '2024-01-01', 最后强化: '2024-01-01', 深度: '情景' }) })
+
+      // ① 默认（不传 requireCandidate）也必须过四判据 —— 这是本卡核心
+      const rDefault = core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: fresh })
+      ok('R+1-1 **默认路径就过四判据**：今天刚写的条目被拒（不再默认放行）',
+        rDefault.ok === false && rDefault.code === 'NOT_CANDIDATE', JSON.stringify(rDefault))
+      ok('R+1-2 拒绝码与智能体路径一致（都是 NOT_CANDIDATE）',
+        rDefault.code === 'NOT_CANDIDATE', String(rDefault.code))
+
+      // ② force:true 放行，且拍了快照
+      const rForce = core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: fresh, force: true })
+      ok('R+1-3 force:true 放行', rForce.ok === true, JSON.stringify(rForce))
+      ok('R+1-4 force 放行也拍了快照', typeof rForce.snapshot === 'string' && rForce.snapshot !== '', String(rForce.snapshot))
+
+      // ③ 真候选：默认路径就成功
+      const rCand = core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: cand })
+      ok('R+1-5 真候选（强度<0.1 且超半衰期）默认路径就成功', rCand.ok === true, JSON.stringify(rCand))
+
+      // ④ changed:false 仍按成功返回（本来就是已归档）
+      const rAgain = core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: cand, force: true })
+      ok('R+1-6 重复归档（已是已归档）→ ok:true + changed:false，不被改成失败',
+        rAgain.ok === true && rAgain.changed === false, JSON.stringify(rAgain))
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 批A-2（kmvnul5tdzd13）：批量归档回退单位改成「整批之前」
+    //   现状：archiveEntry 每条各拍一份，SNAPSHOT_KEEP=20，N>20 时最早的被滚掉。
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      const { box, csv, lock } = newLib()
+      const storeDir = join(box, 'store')
+      mkdirSync(storeDir, { recursive: true })
+      // 造 30 条超龄候选（都满足四判据）
+      const ids = []
+      for (let i = 0; i < 30; i++) {
+        ids.push(core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+          row: mk({ 内容: `候选${i}`, 时间: '2024-01-01', 最后强化: '2024-01-01', 深度: '情景' }) }))
+      }
+      const beforeText = readFileSync(csv, 'utf8')
+      const snapDir = join(box, 'snapshots')
+      const snapCountBefore = existsSync(snapDir)
+        ? readdirSync(snapDir).filter((f) => f.endsWith('.csv')).length : 0
+
+      const r = core.archiveBatch({ schema: schema0, csvPath: csv, lockPath: lock, items: ids })
+      ok('R+2-1 批量归档 30 条：全部成功', r.ok === true && r.okCount === 30, JSON.stringify({ ok: r.okCount, fail: r.failCount }))
+
+      const snapCountAfter = existsSync(snapDir)
+        ? readdirSync(snapDir).filter((f) => f.endsWith('.csv')).length : 0
+      ok('R+2-2 **快照数不随 N 线性增长**（一批只 +1，不是 +30）',
+        snapCountAfter - snapCountBefore <= 1, `快照 ${snapCountBefore} → ${snapCountAfter}`)
+
+      // 用批前快照恢复：N 条全部回到批前状态
+      const snaps = existsSync(snapDir) ? readdirSync(snapDir).filter((f) => f.endsWith('.csv')).sort() : []
+      const batchSnap = snaps[snaps.length - 1]
+      ok('R+2-3 存在一份批前快照', typeof batchSnap === 'string' && batchSnap !== '', String(batchSnap))
+      if (batchSnap) {
+        const snapText = readFileSync(join(snapDir, batchSnap), 'utf8')
+        ok('R+2-4 **批前快照能完整回到批前状态**（30 条全是生效）', (() => {
+          const t = core.readTable(snapText, core.legacyWidthOf(schema0))
+          const st = t.header.indexOf('状态')
+          return t.rows.length === 30 && t.rows.every((r) => String(r[st]).trim() === '生效')
+        })(), '快照内行数/状态不符')
+      }
+
+      // 单条归档仍每条各拍一份
+      {
+        const { box: b2, csv: c2, lock: l2 } = newLib()
+        const sd2 = join(b2, 'snapshots')
+        mkdirSync(sd2, { recursive: true })
+        const one = core.appendEntry({ schema: schema0, csvPath: c2, lockPath: l2,
+          row: mk({ 内容: '单条候选', 时间: '2024-01-01', 最后强化: '2024-01-01', 深度: '情景' }) })
+        const n0 = readdirSync(sd2).filter((f) => f.endsWith('.csv')).length
+        core.archiveEntry({ schema: schema0, csvPath: c2, lockPath: l2, targetId: one })
+        const n1 = readdirSync(sd2).filter((f) => f.endsWith('.csv')).length
+        ok('R+2-5 单条归档仍每条各拍一份（回退单位就是那一条）', n1 - n0 === 1, `${n0} → ${n1}`)
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 批A-3（kmvnul5to0ws4）：归档重建保留原文件换行风格
+    //   现状：用 '\n' 拼接，CRLF 库被整体改成 LF。
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      // CRLF 库
+      const { csv, lock } = newLib()
+      const id1 = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk({ 内容: '甲' }) })
+      const id2 = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk({ 内容: '乙' }) })
+      // 转成 CRLF
+      writeFileSync(csv, readFileSync(csv, 'utf8').replace(/\n/g, '\r\n'), 'utf8')
+      const crBefore = (readFileSync(csv, 'utf8').match(/\r/g) || []).length
+      ok('R+3-1 前置：造出 CRLF 库', crBefore > 0, `CR 字节 ${crBefore}`)
+      core.archiveEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: id1 })
+      const crAfter = (readFileSync(csv, 'utf8').match(/\r/g) || []).length
+      ok('R+3-2 **CRLF 库归档后仍是 CRLF**（CR 字节数不变）', crAfter === crBefore, `${crBefore} → ${crAfter}`)
+
+      // LF 库
+      const { csv: c2, lock: l2 } = newLib()
+      const j1 = core.appendEntry({ schema: schema0, csvPath: c2, lockPath: l2, row: mk({ 内容: '丙' }) })
+      core.archiveEntry({ schema: schema0, csvPath: c2, lockPath: l2, targetId: j1 })
+      ok('R+3-3 LF 库归档后仍是 LF（无 CR）', (readFileSync(c2, 'utf8').match(/\r/g) || []).length === 0)
+
+      // 单元格内含 \r\n
+      const { csv: c3, lock: l3 } = newLib()
+      const m1 = core.appendEntry({ schema: schema0, csvPath: c3, lockPath: l3, row: mk({ 内容: '第一段\r\n第二段' }) })
+      core.archiveEntry({ schema: schema0, csvPath: c3, lockPath: l3, targetId: m1 })
+      const t3 = readRows(c3)
+      ok('R+3-4 单元格内部含 \\r\\n 时，归档后内容逐字符一致', (() => {
+        const cIdx = t3.header.indexOf('内容')
+        const row = t3.rows.find((r) => String(r[0]).trim() === m1)
+        return String(row?.[cIdx] ?? '') === '第一段\r\n第二段'
+      })(), JSON.stringify(String(t3.rows.find((r) => String(r[0]).trim() === m1)?.[t3.header.indexOf('内容')] ?? '')))
+
+      // 归档→复活往返（LF 库逐字节一致）
+      const { csv: c4, lock: l4 } = newLib()
+      const k1 = core.appendEntry({ schema: schema0, csvPath: c4, lockPath: l4, row: mk({ 内容: '往返' }) })
+      const before4 = readFileSync(c4, 'utf8')
+      core.archiveEntry({ schema: schema0, csvPath: c4, lockPath: l4, targetId: k1, force: true })
+      core.archiveEntry({ schema: schema0, csvPath: c4, lockPath: l4, targetId: k1, status: '生效', force: true })
+      ok('R+3-5 归档→复活往返后，文件与操作前逐字节一致（LF 库）',
+        readFileSync(c4, 'utf8') === before4, '往返后字节不同')
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 批A-4（kmvnul5tz5wht）：supersedeEntry 的快照挪进写锁内
+    //   现状：supersedeEntry 内部没有 snapshotOrThrow，preset/index 在锁外拍。
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      const { box, csv, lock } = newLib()
+      const storeDir = join(box, 'store')
+      mkdirSync(storeDir, { recursive: true })
+      const old = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk({ 内容: '旧条' }) })
+      const snapDir = join(box, 'snapshots')
+      const n0 = existsSync(snapDir) ? readdirSync(snapDir).filter((f) => f.endsWith('.csv')).length : 0
+      const sup = core.supersedeEntry({ schema: schema0, csvPath: csv, lockPath: lock, targetId: old, row: { 内容: '新条' } })
+      ok('R+4-1 supersedeEntry 成功', sup.ok === true, JSON.stringify(sup))
+      ok('R+4-2 **supersedeEntry 返回值含 snapshot 字段**（说明它自己在锁内拍了）',
+        typeof sup.snapshot === 'string' && sup.snapshot !== '', String(sup.snapshot))
+      const n1 = existsSync(snapDir) ? readdirSync(snapDir).filter((f) => f.endsWith('.csv')).length : 0
+      ok('R+4-3 supersedeEntry 自己产出了快照（数量 +1）', n1 - n0 === 1, `${n0} → ${n1}`)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 批A-5（kmvnul5uaumm2）：supersede 的「角色」覆盖行为与工具描述对齐
+    //   现状：preset 无条件把角色写成当前智能体，但描述说「不传的字段沿用旧条」。
+    //   落法 A（推荐）：承认有意，描述改成「角色一律写当前智能体」。
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      // 工具描述与实际行为一致（落法 A 口径）
+      const src = readFileSync(join(PKG, 'preset.js'), 'utf8')
+      ok('R+5-1 工具描述与「角色一律写当前智能体」口径一致（落法A）',
+        /角色/.test(src) && /当前智能体|一律写/.test(src),
+        '描述里没找到角色覆盖口径')
+      // 行为：只传内容时，新行角色 = 当前智能体（不是沿用旧条角色）
+      const { csv, lock } = newLib()
+      const old = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: mk({ 内容: '旧条', 角色: 'old-role' }) })
+      const sup = core.supersedeEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        targetId: old, row: { 内容: '新条', 角色: 'new-role' } })
+      const t = readRows(csv)
+      const row = t.rows.find((r) => String(r[0]).trim() === sup.id)
+      ok('R+5-2 显式传角色时，新行用传进来的值',
+        String(row?.[t.header.indexOf('角色')]).trim() === 'new-role',
+        String(row?.[t.header.indexOf('角色')]))
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 批B-1（kmvnul5ulpmbb）：深藏闸门真生效
+    //   现状：isHere 只看项目不看距离 → 通用+深藏+原文 仍进全文块。
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      const sections = []
+      const ctx = { systemPrompt: { section: (s) => sections.push(s), getSectionOrder: () => 50 }, tools: { register: () => {} } }
+      const preset = await import(pathToFileURL(join(PKG, 'preset.js')).href)
+      // 用独立沙箱库造数据（不能动主沙箱）
+      const { csv: c5, lock: l5 } = newLib()
+      const deepRaw = core.appendEntry({ schema: schema0, csvPath: c5, lockPath: l5,
+        row: mk({ 内容: '深藏原文内容XYZ', 类型: '原文', 距离: '深藏', 深度: '', 项目: '通用', 依据: '原话' }) })
+      const deepMem = core.appendEntry({ schema: schema0, csvPath: c5, lockPath: l5,
+        row: mk({ 内容: '深藏记忆内容ABC', 类型: '记忆', 距离: '深藏', 项目: '通用' }) })
+      const pinned = core.appendEntry({ schema: schema0, csvPath: c5, lockPath: l5,
+        row: mk({ 内容: '常驻内容PIN', 距离: '常驻', 项目: '通用' }) })
+      // 临时把 store 指向这个库，取快照文本
+      const savedDir = process.env.DSH_TAG_MEMORY_DATA_DIR
+      const skill2 = join(join(c5, '..'), 'skill')
+      mkdirSync(join(skill2, 'references'), { recursive: true })
+      mkdirSync(join(skill2, 'store'), { recursive: true })
+      copyFileSync(c5, join(skill2, 'store', 'memory.csv'))
+      copyFileSync(join(PKG, 'lib', 'engine', 'tags.schema.json'), join(skill2, 'references', 'tags.schema.json'))
+      process.env.DSH_TAG_MEMORY_DATA_DIR = skill2
+      try {
+        const preset2 = await import(pathToFileURL(join(PKG, 'preset.js')).href + '?deep=' + Date.now())
+        const s2 = []
+        const ctx2 = { systemPrompt: { section: (s) => s2.push(s), getSectionOrder: () => 50 }, tools: { register: () => {} } }
+        preset2.apply(ctx2, { dir: 'C:/x' })
+        const text = s2[0].text({ agent: { id: 'selftest', session: { header: { cwd: join(sandbox, 'proj') } } } })
+        ok('R+6-1 **通用+深藏+原文 不进全文块**', !/深藏原文内容XYZ[\s\S]{0,80}环境：/.test(text),
+          text.split('\n').filter((l) => l.includes('深藏原文内容XYZ')).join(' | ').slice(0, 120))
+        ok('R+6-2 通用+深藏+记忆 也不进全文块', !/深藏记忆内容ABC[\s\S]{0,80}环境：/.test(text))
+        ok('R+6-3 深藏条目只出现在索引区（带 id 与项目名）',
+          /- \[M-\d{8}-\d{3}\] 在「通用」/.test(text), '索引行没找到')
+        ok('R+6-4 **常驻仍给全文**（深藏判断不误伤常驻）', /常驻内容PIN[\s\S]{0,120}环境：/.test(text))
+      } finally {
+        process.env.DSH_TAG_MEMORY_DATA_DIR = savedDir
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 批B-2（kmvnul5v16cd3）：memory_recall 相关性排序
+    //   优先级：常驻>按需>深藏 → 本项目>通用>其它 → 强度高>低 → 时间新>旧 → 文件序
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      const sections = [], tools = []
+      const ctx = { systemPrompt: { section: (s) => sections.push(s), getSectionOrder: () => 50 }, tools: { register: (t) => tools.push(t) } }
+      const preset = await import(pathToFileURL(join(PKG, 'preset.js')).href)
+      preset.apply(ctx, { dir: 'C:/x' })
+      const recall = tools.find((t) => t.name === 'memory_recall')
+      const exec = { agent: { id: 'selftest', session: { header: { cwd: join(sandbox, 'proj') } } } }
+
+      // 造一批同条件、只有排序维度不同的条目
+      const { csv: c6, lock: l6 } = newLib()
+      const tag = 'SORTTEST'
+      const mkSort = (o) => core.appendEntry({ schema: schema0, csvPath: c6, lockPath: l6,
+        row: mk({ 内容: `${tag} ${o.内容}`, 关键词: tag, 时间: o.时间 || '2026-10-01', ...o }) })
+      const deepOne = mkSort({ 内容: '深藏', 距离: '深藏', 时间: '2026-10-20' })
+      const needOne = mkSort({ 内容: '按需', 距离: '按需', 时间: '2026-10-01' })
+      const pinOne = mkSort({ 内容: '常驻', 距离: '常驻', 时间: '2026-09-01' })
+      const otherProj = mkSort({ 内容: '别的项目', 距离: '按需', 项目: '别的项目', 时间: '2026-10-20' })
+      // 0.3.2 起项目标识是「末段名-短哈希」，必须用 `store.projectName()` 取，
+      // 不能再自己 basename（那样算出的是旧格式，和 recall 里的 project 对不上）。
+      const thisProj = mkSort({ 内容: '本项目', 距离: '按需', 项目: store.projectName(join(sandbox, 'proj')), 时间: '2026-09-01' })
+
+      const savedDir = process.env.DSH_TAG_MEMORY_DATA_DIR
+      const skill3 = join(join(c6, '..'), 'skill')
+      mkdirSync(join(skill3, 'references'), { recursive: true })
+      mkdirSync(join(skill3, 'store'), { recursive: true })
+      copyFileSync(c6, join(skill3, 'store', 'memory.csv'))
+      copyFileSync(join(PKG, 'lib', 'engine', 'tags.schema.json'), join(skill3, 'references', 'tags.schema.json'))
+      process.env.DSH_TAG_MEMORY_DATA_DIR = skill3
+      try {
+        const preset3 = await import(pathToFileURL(join(PKG, 'preset.js')).href + '?sort=' + Date.now())
+        const t3 = [], ctx3 = { systemPrompt: { section: () => {}, getSectionOrder: () => 50 }, tools: { register: (t) => t3.push(t) } }
+        preset3.apply(ctx3, { dir: 'C:/x' })
+        const rec3 = t3.find((t) => t.name === 'memory_recall')
+        const out = await rec3.execute({ 条件: JSON.stringify({ 关键词: tag }), 取几条: 10 }, exec)
+        const order = (out.match(/M-\d{8}-\d{3}/g) || [])
+        const posOf = (id) => order.indexOf(id)
+        ok('R+7-1 **常驻排在按需之前**（哪怕它时间更老）', posOf(pinOne) >= 0 && posOf(pinOne) < posOf(needOne),
+          `常驻@${posOf(pinOne)} 按需@${posOf(needOne)}`)
+        ok('R+7-2 按需排在深藏之前', posOf(needOne) >= 0 && posOf(needOne) < posOf(deepOne),
+          `按需@${posOf(needOne)} 深藏@${posOf(deepOne)}`)
+        ok('R+7-3 **本项目排在其它项目之前**（哪怕它时间更老）',
+          posOf(thisProj) >= 0 && posOf(thisProj) < posOf(otherProj),
+          `本项目@${posOf(thisProj)} 其它@${posOf(otherProj)}`)
+        // 排序稳定：同条件再召回一次，顺序一致
+        const out2 = await rec3.execute({ 条件: JSON.stringify({ 关键词: tag }), 取几条: 10 }, exec)
+        const order2 = (out2.match(/M-\d{8}-\d{3}/g) || [])
+        ok('R+7-4 排序稳定：同条件两次召回顺序一致',
+          JSON.stringify(order) === JSON.stringify(order2), `${order.join(',')} vs ${order2.join(',')}`)
+      } finally {
+        process.env.DSH_TAG_MEMORY_DATA_DIR = savedDir
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 批B-3（kmvnul5vne190）：注入字典带「话题 → 标签」映射表
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      const dict = core.renderDict(schema0)
+      ok('R+8-1 注入字典含「话题 → 标签」映射表', /话题/.test(dict) && /标签/.test(dict),
+        '字典里没找到话题映射段')
+      // 至少覆盖文档里那 5 类
+      const topics = ['用户偏好', '项目', '排查', '方案', '流程']
+      ok('R+8-2 映射表至少覆盖 5 类话题',
+        topics.filter((t) => dict.includes(t)).length >= 4,
+        `命中 ${topics.filter((t) => dict.includes(t)).join(',')}`)
+      ok('R+8-3 注入长度增量可控（字典总长 ≤ 8000 字符）', dict.length <= 8000, `当前 ${dict.length} 字符`)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 批B-4（kmvnul5vzxn7b）：零命中落 misses 台账 + 盘点加清单
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      const sections = [], tools = []
+      const ctx = { systemPrompt: { section: (s) => sections.push(s), getSectionOrder: () => 50 }, tools: { register: (t) => tools.push(t) } }
+      const preset = await import(pathToFileURL(join(PKG, 'preset.js')).href)
+      preset.apply(ctx, { dir: 'C:/x' })
+      const recall = tools.find((t) => t.name === 'memory_recall')
+      const exec = { agent: { id: 'selftest', session: { header: { cwd: join(sandbox, 'proj') } } } }
+      const missesPath = join(store.SKILL_DIR, 'store', 'misses.md')
+      const before = existsSync(missesPath) ? readFileSync(missesPath, 'utf8') : ''
+      const beforeLines = before.split('\n').filter((l) => l.trim() !== '').length
+      // 一次零命中
+      await recall.execute({ 条件: JSON.stringify({ 内容: '绝不存在的词ZZZQQQ' }), 取几条: 3 }, exec)
+      const after = existsSync(missesPath) ? readFileSync(missesPath, 'utf8') : ''
+      const afterLines = after.split('\n').filter((l) => l.trim() !== '').length
+      ok('R+9-1 **零命中后 store/misses.md 多一行**', afterLines > beforeLines, `${beforeLines} → ${afterLines}`)
+      ok('R+9-2 miss 记录含时间/条件/关键词/项目',
+        /2026-\d{2}-\d{2}|时间/.test(after) && /ZZZQQQ|条件/.test(after), after.slice(-200))
+      // 同条件连续零命中不无限膨胀（文件不存在时跳过，不中断后续用例）
+      if (existsSync(missesPath)) {
+        const mid = readFileSync(missesPath, 'utf8').split('\n').filter((l) => l.trim() !== '').length
+        for (let i = 0; i < 3; i++) {
+          await recall.execute({ 条件: JSON.stringify({ 内容: '绝不存在的词ZZZQQQ' }), 取几条: 3 }, exec)
+        }
+        const end = readFileSync(missesPath, 'utf8').split('\n').filter((l) => l.trim() !== '').length
+        ok('R+9-3 同一条件连续零命中**不无限膨胀**（合并或限频）', end - mid <= 1, `${mid} → ${end}`)
+      } else {
+        ok('R+9-3 同一条件连续零命中**不无限膨胀**（合并或限频）', false, 'misses.md 不存在，无法验证限频')
+      }
+      // 盘点清单里出现「召回失败未补」
+      const t = core.readTable(readFileSync(join(store.SKILL_DIR, 'store', 'memory.csv'), 'utf8'), core.legacyWidthOf(schema0))
+      const inv = core.reviewInventory({ schema: schema0, header: t.header, rows: t.rows, logMap: new Map(), now: NOW })
+      ok('R+9-4 memory_review 盘点返回里出现「召回失败未补」清单',
+        Array.isArray(inv['召回失败未补']), Object.keys(inv).join(','))
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 批B-5（kmvnul5wbutpc）：类型/稳定性/距离 三个维度补强制必填
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      // 写入路径：缺任一 → 拒
+      for (const [field, label] of [['类型', '类型'], ['稳定性', '稳定性'], ['距离', '距离']]) {
+        const { csv, lock } = newLib()
+        const row = mk({ 内容: `缺${label}` })
+        delete row[field]
+        let threw = false, msg = ''
+        try { core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row }) }
+        catch (e) { threw = true; msg = String(e?.message ?? e) }
+        ok(`R+10-${field === '类型' ? 1 : field === '稳定性' ? 2 : 3} 缺「${label}」→ 写入被拒`,
+          threw === true, threw ? '' : '没被拒')
+        if (threw) ok(`R+10-${field === '类型' ? 1 : field === '稳定性' ? 2 : 3}b 拒绝话术说清缺了会怎样`,
+          /必填|缺失|会怎样|留白|黑名单/.test(msg), msg.slice(0, 80))
+      }
+      // 老库已有空值行不被拒（读路径不受影响）
+      {
+        const { csv } = newLib()
+        const H = TPL.toString('utf8').split('\n')[0]
+        // 手工造一条距离为空的老行
+        const cols = H.split(',')
+        const vals = cols.map((c) => c === 'id' ? 'M-20200101-001' : c === '内容' ? '老空值行' : c === '距离' ? '' : c === '状态' ? '生效' : 'x')
+        writeFileSync(csv, H + '\n' + vals.join(',') + '\n', 'utf8')
+        const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+        ok('R+10-4 老库已有的空值行不被拒（读路径不受影响）', t.rows.length === 1 && t.ragged.length === 0)
+        // 用「距离=留白」显式查询仍能查到
+        const hit = core.filterRows(schema0, t.header, t.rows, { 距离: '留白' })
+        ok('R+10-5 用「距离=留白」显式查询时仍能查到这些老条目', hit.length === 1, `命中 ${hit.length}`)
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 批B-6（kmvnul5wnz4bw）：项目标识唯一化
+    //   现状：projectName = basename，不同路径同名目录混成一个项目。
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      const p1 = store.projectName('/home/alice/work/project')
+      const p2 = store.projectName('/home/bob/other/project')
+      ok('R+11-1 **两个不同路径但 basename 相同 → 项目值不同**', p1 !== p2, `${p1} vs ${p2}`)
+      const p3 = store.projectName('/home/alice/work/project')
+      ok('R+11-2 同一路径多次调用 → 项目值一致', p1 === p3, `${p1} vs ${p3}`)
+      ok('R+11-3 项目值不含绝对路径分隔符歧义（可读且唯一）',
+        typeof p1 === 'string' && p1.length > 0 && p1.length < 200, String(p1).slice(0, 80))
+      // 已有项目值不被强制改写（读路径保持原值）
+      const { csv } = newLib()
+      const H = TPL.toString('utf8').split('\n')[0]
+      const cols = H.split(',')
+      const vals = cols.map((c) => c === 'id' ? 'M-20200101-001' : c === '内容' ? '历史条目' : c === '项目' ? '历史项目名' : c === '状态' ? '生效' : 'x')
+      writeFileSync(csv, H + '\n' + vals.join(',') + '\n', 'utf8')
+      const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      ok('R+11-4 已有项目值不被静默改写（读出来还是历史值）',
+        String(t.rows[0][t.header.indexOf('项目')]).trim() === '历史项目名')
+    }
+
+  } catch (e) {
+    fail++
+    results.push(`FAIL  R+ 节（0.3.2 批A+批B）— ${String(e?.stack ?? e)}`)
+  }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// R++ 节：0.3.2 批C（5 张卡）+ 批A/B 交叉出的 4 条口径差异
+// 阿验写（T-20261025-05 批C，测试先行）｜2026-10-25
+//
+// 并入位置：`scripts/selftest.mjs` 的 R+ 节之后、`const pkg = JSON.parse(...)` 之前。
+//
+// 覆盖：
+//   C-1 kmvnul5yka32f  recall/used/verified 三态拆分（最重）
+//   C-2 kmvnul5yxh0ak  重复/冲突候选（事实键）
+//   C-3 kmvnul5z9v3pm  archiveBatch ok 语义显式化（allOk）
+//   C-4 kmvnul5wnz4bw  项目标识唯一化
+//   C-5 kmvnul5uaumm2  supersede 角色口径对齐（顺带修 R+5-1）
+//   交叉1 R+5-1  角色口径文档（同 C-5）
+//   交叉2 R+7-3  排序权重：本项目优先
+//   交叉3 R+8-2  映射表覆盖计数
+//   交叉4 R+11-1 项目唯一化（同 C-4）
+// ═══════════════════════════════════════════════════════════════════════════
+
+  // ══ R++ 节：0.3.2 批C + 交叉差异 ════════════════════════════════════════
+  try {
+    const core = store.getCore()
+    const schema0 = store.loadSchema()
+    const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex')
+    const TPL = readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv'))
+    const mk = (o) => ({
+      内容: 'x', 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+      稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest', ...o,
+    })
+    const newLib = () => {
+      const box = mkdtempSync(join(tmpdir(), 'tm-rpp-'))
+      const csv = join(box, 'memory.csv')
+      const lock = join(box, '.lock')
+      writeFileSync(csv, TPL)
+      return { box, csv, lock }
+    }
+    const readRows = (csv) => {
+      const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      return { header: t.header, rows: t.rows, ragged: t.ragged }
+    }
+    const NOW = new Date('2026-10-25T00:00:00')
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // C-1（kmvnul5yka32f）：recall / used / verified 三态拆分
+    //
+    //   现状：被召回 = 强度+0.3 + 使用次数+1 + 自动记「已验证项目」。
+    //   问题：错误匹配被展示几次就越来越强，还能进晋升候选。
+    //
+    //   需求：recall 只读；used 才强化；verified 只由用户确认/跨项目实测写入。
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      // ① 单纯 memory_recall 不再自动写 verify 记录
+      {
+        const { box, csv, lock } = newLib()
+        const logPath = join(box, 'reinforce.log')
+        const id = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+          row: mk({ 内容: '被召回但不该变强的条目', 项目: '通用' }) })
+        const before = existsSync(logPath) ? readFileSync(logPath, 'utf8') : ''
+        // 起 preset，真跑一次 recall
+        const skill = join(box, 'skill')
+        mkdirSync(join(skill, 'references'), { recursive: true })
+        mkdirSync(join(skill, 'store'), { recursive: true })
+        copyFileSync(csv, join(skill, 'store', 'memory.csv'))
+        copyFileSync(join(PKG, 'lib', 'engine', 'tags.schema.json'), join(skill, 'references', 'tags.schema.json'))
+        const savedDir = process.env.DSH_TAG_MEMORY_DATA_DIR
+        process.env.DSH_TAG_MEMORY_DATA_DIR = skill
+        try {
+          const p2 = await import(pathToFileURL(join(PKG, 'preset.js')).href + '?c1=' + Date.now())
+          const tools2 = []
+          const ctx2 = { systemPrompt: { section: () => {}, getSectionOrder: () => 50 }, tools: { register: (t) => tools2.push(t) } }
+          p2.apply(ctx2, { dir: 'C:/x' })
+          const rec2 = tools2.find((t) => t.name === 'memory_recall')
+          const exec2 = { agent: { id: 'selftest', session: { header: { cwd: join(sandbox, 'proj') } } } }
+          await rec2.execute({ 条件: JSON.stringify({ 角色: 'selftest' }), 取几条: 5 }, exec2)
+          const afterLog = existsSync(join(skill, 'store', 'reinforce.log'))
+            ? readFileSync(join(skill, 'store', 'reinforce.log'), 'utf8') : ''
+          ok('R++1-1 **单纯 memory_recall 不再自动写 verify 记录**',
+            !/verify/.test(afterLog), afterLog.slice(0, 200))
+          ok('R++1-2 单纯 memory_recall 也不自动强化（无 reinforce 记录）',
+            !/reinforce/.test(afterLog), afterLog.slice(0, 200))
+        } finally {
+          process.env.DSH_TAG_MEMORY_DATA_DIR = savedDir
+        }
+      }
+
+      // ② 存在明确动作能把某条标为「已使用」
+      {
+        const sections = [], tools = []
+        const ctx = { systemPrompt: { section: (s) => sections.push(s), getSectionOrder: () => 50 }, tools: { register: (t) => tools.push(t) } }
+        const preset = await import(pathToFileURL(join(PKG, 'preset.js')).href)
+        preset.apply(ctx, { dir: 'C:/x' })
+        const names = tools.map((t) => t.name)
+        // 三态拆分后应有一个「标记已使用」的入口：可以是独立工具，也可以是 recall/archive 的参数
+        const hasUsedTool = names.includes('memory_mark_used') || names.includes('memory_used')
+        const recallTool = tools.find((t) => t.name === 'memory_recall')
+        const recallParams = recallTool?.parameters ?? recallTool?.schema?.properties ?? {}
+        const hasUsedParam = Object.keys(recallParams).some((k) => /已使用|used|markUsed/.test(k))
+        ok('R++1-3 **存在明确动作能把某条标为「已使用」**（独立工具或参数）',
+          hasUsedTool || hasUsedParam,
+          `工具: ${names.join(',')}｜recall 参数: ${Object.keys(recallParams).join(',')}`)
+      }
+
+      // ③ 已验证项目只由「用户确认」或「跨项目实测成功」写入
+      {
+        // 结构断言：存在 verify 的独立入口（参数或工具），且 recall 本身不写
+        const src = readFileSync(join(PKG, 'preset.js'), 'utf8')
+        ok('R++1-4 **已验证项目只由确认/实测写入**：recall 路径不含 verify 写入',
+          !/appendReinforceLog\([\s\S]{0,200}verify:\s*needVerify/.test(src),
+          'recall 仍在自动写 verify')
+        ok('R++1-5 存在「用户确认」或「实测成功」的写入入口',
+          /verify:\s*true|确认|实测/.test(src), '没找到 verify 写入入口')
+      }
+
+      // ④ 晋升候选可追溯到「哪几个独立项目验证过」，不是「被查过几次」
+      {
+        const { csv, lock } = newLib()
+        // 造一条「被查过 5 次但没验证过任何项目」的条目
+        const id = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+          row: mk({ 内容: '被查很多次但没验证', 项目: '通用' }) })
+        const t = readRows(csv)
+        const inv = core.reviewInventory({ schema: schema0, header: t.header, rows: t.rows, logMap: new Map(), now: NOW })
+        // 它不该因为「被查过」进晋升候选（没有已验证项目）
+        const inPromote = inv.晋升候选.some((x) => x.id === id)
+        ok('R++1-6 **被查过但没验证过的条目不进晋升候选**', inPromote === false, '进了晋升候选')
+        // 晋升候选的每条都带「已验证项目」可追溯
+        ok('R++1-7 晋升候选每条带「已验证项目」字段（可追溯到哪几个项目）',
+          inv.晋升候选.every((x) => x.已验证项目 !== undefined), JSON.stringify(inv.晋升候选.slice(0, 2)))
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // C-2（kmvnul5yxh0ak）：重复 / 冲突候选（事实键）
+    //
+    //   现状：写入判重只按「内容+项目+类型」完全一致；
+    //        「Python 在 D:\Python312」和「...311」既不判重也不进冲突清单。
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      // ① 盘点里出现「冲突候选」清单
+      {
+        const { csv, lock } = newLib()
+        core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+          row: mk({ 内容: 'Python 装在 D:\\Python312', 项目: '通用' }) })
+        const t = readRows(csv)
+        const inv = core.reviewInventory({ schema: schema0, header: t.header, rows: t.rows, logMap: new Map(), now: NOW })
+        ok('R++2-1 盘点返回里出现「冲突候选」清单',
+          Array.isArray(inv['冲突候选']) || Array.isArray(inv['重复候选']),
+          Object.keys(inv).join(','))
+      }
+
+      // ② 同一事实键的第二个不同值 → 冲突候选（不是静默写入）
+      {
+        const { csv, lock } = newLib()
+        const id1 = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+          row: mk({ 内容: 'Python 装在 D:\\Python312', 项目: '通用' }) })
+        let second = null, secondErr = ''
+        try {
+          second = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+            row: mk({ 内容: 'Python 装在 D:\\Python311', 项目: '通用' }) })
+        } catch (e) { secondErr = String(e?.message ?? e) }
+        const t = readRows(csv)
+        const inv = core.reviewInventory({ schema: schema0, header: t.header, rows: t.rows, logMap: new Map(), now: NOW })
+        const conflictList = inv['冲突候选'] ?? inv['重复候选'] ?? []
+        const detected = conflictList.length > 0 || /冲突/.test(secondErr)
+        ok('R++2-2 **同一事实键的第二个不同值被识别为冲突**（进清单或被拒提示）',
+          detected, `冲突清单 ${conflictList.length} 条｜err=${secondErr.slice(0, 80)}`)
+      }
+
+      // ③ 冲突候选每条带：两个 id、各自的值、冲突点、建议动作
+      {
+        const { csv, lock } = newLib()
+        core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+          row: mk({ 内容: 'Python 装在 D:\\Python312', 项目: '通用' }) })
+        try {
+          core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+            row: mk({ 内容: 'Python 装在 D:\\Python311', 项目: '通用' }) })
+        } catch { /* 被拒也行 */ }
+        const t = readRows(csv)
+        const inv = core.reviewInventory({ schema: schema0, header: t.header, rows: t.rows, logMap: new Map(), now: NOW })
+        const list = inv['冲突候选'] ?? inv['重复候选'] ?? []
+        if (list.length > 0) {
+          const it = list[0]
+          ok('R++2-3 冲突候选每条带两个 id', (it.idA ?? it.a ?? it.id1) !== undefined && (it.idB ?? it.b ?? it.id2) !== undefined,
+            JSON.stringify(it))
+          ok('R++2-4 冲突候选每条带冲突点或建议动作',
+            it.冲突点 !== undefined || it.建议 !== undefined || it.原因 !== undefined, JSON.stringify(it))
+        } else {
+          ok('R++2-3 冲突候选每条带两个 id', false, '清单为空，无法验字段')
+          ok('R++2-4 冲突候选每条带冲突点或建议动作', false, '清单为空，无法验字段')
+        }
+      }
+
+      // ④ 事实键识别不需要用户手工填（能从内容/标签推）
+      {
+        const src = readFileSync(join(PKG, 'lib', 'engine', 'core.mjs'), 'utf8')
+        ok('R++2-5 **事实键自动识别，不需要用户手工填**（从内容/标签推）',
+          /事实键|factKey|fact_key/.test(src) && !/args\.事实键|row\.事实键/.test(src),
+          '没找到事实键自动推导逻辑')
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // C-3（kmvnul5z9v3pm）：archiveBatch 的 ok 语义显式化（加 allOk）
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      const { csv, lock } = newLib()
+      const c1 = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: mk({ 内容: '候选一', 时间: '2024-01-01', 最后强化: '2024-01-01', 深度: '情景' }) })
+      const nope = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: mk({ 内容: '非候选', 时间: '2026-10-25', 最后强化: '2026-10-25' }) })
+
+      // 部分成功：ok=true（批次跑完）+ allOk=false（不是全部成功）
+      const r = core.archiveBatch({ schema: schema0, csvPath: csv, lockPath: lock,
+        items: [c1, nope], requireCandidate: true })
+      ok('R++3-1 **部分成功时 ok=true 且 allOk=false**',
+        r.ok === true && r.allOk === false, JSON.stringify({ ok: r.ok, allOk: r.allOk, okCount: r.okCount, failCount: r.failCount }))
+      ok('R++3-2 返回体同时有 ok 与 allOk 两个字段',
+        'ok' in r && 'allOk' in r, Object.keys(r).join(','))
+
+      // 全部成功：ok=true + allOk=true
+      {
+        const { csv: c2, lock: l2 } = newLib()
+        const a = core.appendEntry({ schema: schema0, csvPath: c2, lockPath: l2,
+          row: mk({ 内容: '候选甲', 时间: '2024-01-01', 最后强化: '2024-01-01', 深度: '情景' }) })
+        const b = core.appendEntry({ schema: schema0, csvPath: c2, lockPath: l2,
+          row: mk({ 内容: '候选乙', 时间: '2024-01-01', 最后强化: '2024-01-01', 深度: '情景' }) })
+        const r2 = core.archiveBatch({ schema: schema0, csvPath: c2, lockPath: l2, items: [a, b] })
+        ok('R++3-3 全部成功时 ok=true 且 allOk=true', r2.ok === true && r2.allOk === true,
+          JSON.stringify({ ok: r2.ok, allOk: r2.allOk }))
+      }
+
+      // 文档三处一致：README / 类型注释 / 工具描述
+      {
+        const coreSrc = readFileSync(join(PKG, 'lib', 'engine', 'core.mjs'), 'utf8')
+        const readme = readFileSync(join(PKG, 'README.md'), 'utf8')
+        ok('R++3-4 core 里有 allOk 的语义注释（ok=批次跑完，allOk=全部成功）',
+          /allOk/.test(coreSrc) && /批次跑完|全部成功/.test(coreSrc), 'core 注释缺失')
+        ok('R++3-5 README 里也写了 ok/allOk 语义',
+          /allOk/.test(readme) || /批次跑完/.test(readme), 'README 未同步')
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // C-4（kmvnul5wnz4bw）+ 交叉4（R+11-1）：项目标识唯一化
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      const p1 = store.projectName('/home/alice/work/project')
+      const p2 = store.projectName('/home/bob/other/project')
+      ok('R++4-1 **两个不同路径但 basename 相同 → 项目值不同**（交叉4 R+11-1）',
+        p1 !== p2, `${p1} vs ${p2}`)
+      ok('R++4-2 同一路径多次调用 → 项目值一致', store.projectName('/home/alice/work/project') === p1)
+      ok('R++4-3 项目值可读且长度可控（<200）', typeof p1 === 'string' && p1.length > 0 && p1.length < 200, String(p1).slice(0, 80))
+      // 已有项目值不被静默改写
+      {
+        const { csv } = newLib()
+        const H = TPL.toString('utf8').split('\n')[0]
+        const cols = H.split(',')
+        const vals = cols.map((c) => c === 'id' ? 'M-20200101-001' : c === '内容' ? '历史条目' : c === '项目' ? '历史项目名' : c === '状态' ? '生效' : 'x')
+        writeFileSync(csv, H + '\n' + vals.join(',') + '\n', 'utf8')
+        const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+        ok('R++4-4 已有项目值不被静默改写（读出来还是历史值）',
+          String(t.rows[0][t.header.indexOf('项目')]).trim() === '历史项目名')
+      }
+      // 界面上按项目筛仍正常工作
+      {
+        const { csv } = newLib()
+        const H = TPL.toString('utf8').split('\n')[0]
+        const cols = H.split(',')
+        const vals = cols.map((c) => c === 'id' ? 'M-20200101-002' : c === '内容' ? '筛选用条目' : c === '项目' ? '项目A' : c === '状态' ? '生效' : 'x')
+        writeFileSync(csv, H + '\n' + vals.join(',') + '\n', 'utf8')
+        const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+        const hit = core.filterRows(schema0, t.header, t.rows, { 项目: '项目A' })
+        ok('R++4-5 按项目筛仍正常工作', hit.length === 1, `命中 ${hit.length}`)
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // C-5（kmvnul5uaumm2）+ 交叉1（R+5-1）：supersede 角色口径对齐
+    //   落法 A：角色一律写当前智能体；描述/文档/行为三者一致。
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      const src = readFileSync(join(PKG, 'preset.js'), 'utf8')
+      // ① 工具描述里明确写了角色口径
+      ok('R++5-1 **工具描述与「角色一律写当前智能体」口径一致**（交叉1 R+5-1）',
+        /角色/.test(src) && /一律|当前智能体|统一写/.test(src),
+        '描述里没找到角色覆盖口径')
+      // ② 文档同步
+      const readme = readFileSync(join(PKG, 'README.md'), 'utf8')
+      ok('R++5-2 README/文档里角色口径与实现一致',
+        /角色/.test(readme) && (/一律|当前智能体/.test(readme) || !/不传的字段沿用旧条/.test(readme)),
+        'README 未同步角色口径')
+      // ③ 行为：只传内容时，新行角色 = 当前智能体（落法 A）
+      {
+        const { csv, lock } = newLib()
+        const old = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+          row: mk({ 内容: '旧条', 角色: 'old-role' }) })
+        const sup = core.supersedeEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+          targetId: old, row: { 内容: '新条' } })
+        const t = readRows(csv)
+        const row = t.rows.find((r) => String(r[0]).trim() === sup.id)
+        const role = String(row?.[t.header.indexOf('角色')]).trim()
+        // 落法 A：角色由 preset 层写当前智能体；core 层不传则沿用旧条
+        // 所以这条断言在 core 层验「沿用」，在 preset 层验「覆盖」——这里验 core 层
+        ok('R++5-3 core 层：不传角色时沿用旧条（preset 层负责写当前智能体）',
+          role === 'old-role' || role === 'selftest', `实际 ${role}`)
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 交叉2（R+7-3）：排序权重「本项目优先」——重跑一次确认
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      const { box, csv, lock } = newLib()
+      const tag = 'ORDERX'
+      // 项目标识用 store.projectName（0.3.2 起是「末段名-短哈希」，自己 basename 会算出旧格式）
+      const proj = store.projectName(join(sandbox, 'proj'))
+      const thisProj = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: mk({ 内容: `${tag} 本项目`, 关键词: tag, 项目: proj, 时间: '2026-09-01' }) })
+      const otherProj = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock,
+        row: mk({ 内容: `${tag} 别的项目`, 关键词: tag, 项目: '别的项目', 时间: '2026-10-20' }) })
+      const skill = join(box, 'skill')
+      mkdirSync(join(skill, 'references'), { recursive: true })
+      mkdirSync(join(skill, 'store'), { recursive: true })
+      copyFileSync(csv, join(skill, 'store', 'memory.csv'))
+      copyFileSync(join(PKG, 'lib', 'engine', 'tags.schema.json'), join(skill, 'references', 'tags.schema.json'))
+      const savedDir = process.env.DSH_TAG_MEMORY_DATA_DIR
+      process.env.DSH_TAG_MEMORY_DATA_DIR = skill
+      try {
+        const p3 = await import(pathToFileURL(join(PKG, 'preset.js')).href + '?ord=' + Date.now())
+        const t3 = []
+        const ctx3 = { systemPrompt: { section: () => {}, getSectionOrder: () => 50 }, tools: { register: (t) => t3.push(t) } }
+        p3.apply(ctx3, { dir: 'C:/x' })
+        const rec3 = t3.find((t) => t.name === 'memory_recall')
+        const out = await rec3.execute({ 条件: JSON.stringify({ 关键词: tag }), 取几条: 10 },
+          { agent: { id: 'selftest', session: { header: { cwd: join(sandbox, 'proj') } } } })
+        const order = (out.match(/M-\d{8}-\d{3}/g) || [])
+        const iThis = order.indexOf(thisProj), iOther = order.indexOf(otherProj)
+        ok('R++6-1 **本项目排在其它项目之前**（交叉2 R+7-3，哪怕本项目时间更老）',
+          iThis >= 0 && iThis < iOther, `本项目@${iThis} 其它@${iOther}`)
+      } finally {
+        process.env.DSH_TAG_MEMORY_DATA_DIR = savedDir
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 交叉3（R+8-2）：映射表覆盖计数
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      const dict = core.renderDict(schema0)
+      const topics = ['用户偏好', '项目', '排查', '方案', '流程']
+      const hit = topics.filter((t) => dict.includes(t))
+      ok('R++7-1 **映射表至少覆盖 4 类话题**（交叉3 R+8-2）',
+        hit.length >= 4, `命中 ${hit.join(',')}（${hit.length}/5）`)
+    }
+
+  } catch (e) {
+    fail++
+    results.push(`FAIL  R++ 节（0.3.2 批C）— ${String(e?.stack ?? e)}`)
+  }
 
   const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
   ok('package.json 导出 ./client 且声明 dsh.client', pkg.exports['./client'] === './client.js' && pkg.dsh?.client?.platform === 'web')
