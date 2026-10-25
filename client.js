@@ -154,6 +154,9 @@ window.__ModuleLoader__.load({
 .tm-mtag{padding:1px 8px;border-radius:999px;font-size:11px;
   color:var(--dsw-alias-label-secondary);box-shadow:inset 0 0 0 1px var(--dsw-alias-separator,rgba(127,127,127,.25))}
 .tm-mtag b{font-weight:600;color:var(--dsw-alias-label-primary)}
+/* 外部来源角标（评审卡 kmvnul5xkdg1l）：它不是「普通标签」，是「这条不是用户说的」的警示。
+   用琥珀色描边+同色字，和灰色普通标签区分开；不铺满底色，免得比正文还抢眼。 */
+.tm-mtag-ext{color:#b8860b;box-shadow:inset 0 0 0 1px rgba(184,134,11,.55);font-weight:600}
 .tm-link{border:none;background:none;padding:0;margin-left:6px;cursor:pointer;
   font:inherit;font-size:12px;color:var(--dsw-alias-label-primary);opacity:.75;text-decoration:underline}
 .tm-link:hover{opacity:1}
@@ -163,6 +166,7 @@ window.__ModuleLoader__.load({
 .tm-detail{margin-top:8px;padding-top:8px;display:grid;grid-template-columns:auto 1fr;gap:4px 12px;
   font-size:12px;line-height:1.6;border-top:1px solid var(--dsw-alias-separator,rgba(127,127,127,.18))}
 .tm-detail-k{color:var(--dsw-alias-label-secondary);white-space:nowrap}
+.tm-detail-note{color:var(--dsw-alias-label-secondary);font-size:11px}
 .tm-detail-v{word-break:break-word}
 .tm-more{display:block;width:100%;height:32px;margin-top:10px;border:none;border-radius:8px;
   cursor:pointer;font:inherit;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary);
@@ -611,6 +615,26 @@ window.__ModuleLoader__.load({
 			const [batch, setBatch] = React.useState(null)
 			/** V4-e 批量归档的收尾话（成功 N / 失败 M + 失败清单）。 */
 			const [batchNote, setBatchNote] = React.useState(null)
+			/**
+			 * 批量归档里「不是候选、被四判据拦下」的那些（评审卡 kmvnul5t1k2p8）。
+			 *
+			 * 后端 `requireCandidate` 默认 true 之后，待整理清单里只要有一条**刚被强化过**
+			 * （用户点刷新之前强度回升），它就会被拒。这些**不该混进「失败」**——
+			 * 不是出错，是「按规矩不该归档」。跑完单独摆出来，用户点头才强制重发。
+			 */
+			const [batchRejected, setBatchRejected] = React.useState(null)
+			/**
+			 * 盘点清单（`GET /review` 的四张 + 批B 的「召回失败未补」）。
+			 *
+			 * 为什么界面上要有：这些清单原先只有智能体通过 `memory_review({类型:'盘点'})`
+			 * 才看得到，用户不打开工具就不知道库里有多少东西该整理。界面给一个入口，
+			 * 让人自己也能盘点。**只读**——动作仍走归档/取代那颗按钮。
+			 *
+			 * `null` = 还没取；`{ok:false}` = 取失败（旧宿主可能没这条路由）。
+			 */
+			const [review, setReview] = React.useState(null)
+			/** 盘点区开没开。默认收起：它是「整理」不是「日常要看的」。 */
+			const [reviewOpen, setReviewOpen] = React.useState(false)
 
 			// 视图偏好落本地，重开设置页还在。
 			// **放在这批 state 之后**：它要用 `columnsPicked`，挪到前面就是「用了还没声明的变量」。
@@ -627,6 +651,19 @@ window.__ModuleLoader__.load({
 					.catch(() => { /* 问不出来就按未知处理，不影响别的 */ })
 				return () => { alive = false }
 			}, [])
+
+			/**
+			 * 盘点清单：只在**展开时才取**（默认收起）。不展开就不发这个请求——
+			 * 它是整理用的，不是每次进页面都要的。`reloadKey` 变了重取（归档后清单要跟着变）。
+			 */
+			React.useEffect(() => {
+				if (!reviewOpen) return undefined
+				let alive = true
+				loadJSON(`${API}/review`)
+					.then((data) => { if (alive) setReview(data) })
+					.catch((failure) => { if (alive) setReview({ ok: false, error: String((failure && failure.message) || failure) }) })
+				return () => { alive = false }
+			}, [reviewOpen, reloadKey])
 
 			/**
 			 * 面板开着时，**「现在存着的地址」一变就摆进格子**。
@@ -1119,8 +1156,12 @@ window.__ModuleLoader__.load({
 				const total = ids.length
 				const failed = []
 				const failedIds = new Set()
+				/** 被四判据拦下的（不是出错，是「不该归档」）——单独收，别混进失败。 */
+				const rejected = []
+				const rejectedIds = new Set()
 				let okCount = 0
 				setBatchNote(null)
+				setBatchRejected(null)
 				setBatch({ done: 0, total })
 				for (let i = 0; i < ids.length; i++) {
 					const id = ids[i]
@@ -1128,7 +1169,15 @@ window.__ModuleLoader__.load({
 						const r = await postJSON(`${API}/archive`, { 目标id: id, 状态: '已归档' })
 						// `changed === false` 也算成功（本来就是已归档，没得改）——不能报成失败。
 						if (r.ok === true) okCount++
-						else { failed.push(`${id}（${r.error ?? r.code ?? '未知原因'}）`); failedIds.add(id) }
+						else if (r.code === 'NOT_CANDIDATE') {
+							// 后端判据说这条不该归档（可能刚被强化过）。**不当失败报**：
+							// 报成失败会让人以为系统坏了，其实规矩正常在工作。
+							const why = r.verdict !== null && r.verdict !== undefined && typeof r.verdict.reason === 'string'
+								? r.verdict.reason
+								: (r.error ?? '')
+							rejected.push({ id, why })
+							rejectedIds.add(id)
+						} else { failed.push(`${id}（${r.error ?? r.code ?? '未知原因'}）`); failedIds.add(id) }
 					} catch (e) {
 						failed.push(`${id}（${String(e?.message ?? e)}）`)
 						failedIds.add(id)
@@ -1138,13 +1187,57 @@ window.__ModuleLoader__.load({
 
 				setBatch(null)
 				setBatchNote({ ok: okCount, failed })
-				// 成功的从勾选里摘掉；失败的留着，用户可以再点一次。
+				setBatchRejected(rejected.length > 0 ? rejected : null)
+				// 成功的从勾选里摘掉；失败与被拒的留着，用户可以再点一次或单独强制。
 				setPendingSel((prev) => {
 					const next = { ...prev }
-					for (const id of ids) if (!failedIds.has(id)) delete next[id]
+					for (const id of ids) if (!failedIds.has(id) && !rejectedIds.has(id)) delete next[id]
 					return next
 				})
 				// 刷新列表与概况：归档的条目该从待整理区消失、列表里也不该再有。
+				setReloadKey((k) => k + 1)
+			}
+
+			/**
+			 * 把批量归档里被四判据拦下的那些**强制归档**（评审卡 kmvnul5t1k2p8 的批量侧）。
+			 *
+			 * 与单条的「强制复核」同一条路：二次确认把理由与条数都摆出来，用户点头才带
+			 * `强制复核:true` 重发。**确认话里必须带条数**——批量强制一次退场 N 条，
+			 * 只问「确认强制归档？」等于没确认（这是阿验对批量归档的同一套要求）。
+			 */
+			async function forceRejectedBatch() {
+				const list = Array.isArray(batchRejected) ? batchRejected : []
+				if (list.length === 0 || batch !== null) return
+				const wording = `这 ${list.length} 条不满足归档判据，确认强制归档？\n\n`
+					+ list.map((it) => `${it.id}：${it.why}`).join('\n')
+					+ '\n\n它们可能刚被用过（强度回升），或者本来就不该归档。强制归档后同样会逐条留快照。'
+				try { if (typeof window !== 'undefined' && !window.confirm(wording)) return } catch { /* 没有 confirm 就直接做 */ }
+
+				const total = list.length
+				const failed = []
+				const failedIds = new Set()
+				let okCount = 0
+				setBatch({ done: 0, total })
+				for (let i = 0; i < list.length; i++) {
+					const id = list[i].id
+					try {
+						const r = await postJSON(`${API}/archive`, { 目标id: id, 状态: '已归档', 强制复核: true })
+						if (r.ok === true) okCount++
+						else { failed.push(`${id}（${r.error ?? r.code ?? '未知原因'}）`); failedIds.add(id) }
+					} catch (e) {
+						failed.push(`${id}（${String(e?.message ?? e)}）`)
+						failedIds.add(id)
+					}
+					setBatch({ done: i + 1, total })
+				}
+				setBatch(null)
+				setBatchNote({ ok: okCount, failed })
+				setBatchRejected(null)
+				setPendingSel((prev) => {
+					const next = { ...prev }
+					for (const it of list) if (!failedIds.has(it.id)) delete next[it.id]
+					return next
+				})
 				setReloadKey((k) => k + 1)
 			}
 
@@ -1174,14 +1267,31 @@ window.__ModuleLoader__.load({
 					{ className: 'tm-detail' },
 					detail.length === 0
 						? React.createElement('span', { className: 'tm-detail-k' }, '（无其它字段）')
-						: detail.map(([name, value]) =>
-								React.createElement(
+						: detail.map(([name, value]) => {
+								// 「距离」「依据」这两格直接决定**这条会不会进系统提示词全文**，
+								// 光显示取值不够——用户得知道「深藏=只给索引」「外部=只给索引」。
+								// 这段说明与后端 snapshotText 的分桶判据是同一套口径。
+								const note = name === '距离'
+									? (String(value) === '深藏'
+										? '（深藏：正文不进上下文，只给一行索引，要用先 memory_recall 取）'
+										: String(value) === '常驻' ? '（常驻：每轮进上下文全文）' : '（按需：命中才给全文）')
+									: name === '依据'
+										? (String(value) === '外部'
+											? '（外部来源：只给带〔外部〕标记的索引，正文不进上下文）'
+											: String(value) === '原话' ? '（用户原话）' : '')
+										: ''
+								return React.createElement(
 									React.Fragment,
 									{ key: name },
 									React.createElement('span', { className: 'tm-detail-k' }, name),
-									React.createElement('span', { className: 'tm-detail-v' }, String(value)),
-								),
-							),
+									React.createElement(
+										'span',
+										{ className: 'tm-detail-v' },
+										String(value),
+										note !== '' ? React.createElement('span', { className: 'tm-detail-note' }, ' ' + note) : null,
+									),
+								)
+							}),
 				)
 			}
 
@@ -1202,6 +1312,11 @@ window.__ModuleLoader__.load({
 				const shown = isLong && !showFull ? content.slice(0, CONTENT_CLIP) + '…' : content
 
 				const tags = []
+				// 外部来源先标（评审卡 kmvnul5xkdg1l）：它是「这条不是用户说的」的第一信号，
+				// 排在所有标签最前面，扫一眼就知道该不该照做。
+				if (row.依据 === '外部') {
+					tags.push(React.createElement('span', { key: '外部', className: 'tm-mtag tm-mtag-ext', title: '依据=外部：从别处抄来的（文档/项目/他人经验），不是用户原话，采信前先核对' }, '外部来源'))
+				}
 				for (const name of ['类型', '深度', '稳定性', '距离', '角色', '项目', '状态']) {
 					if (row[name]) tags.push(React.createElement('span', { key: name, className: 'tm-mtag' }, `${name} `, React.createElement('b', null, row[name])))
 				}
@@ -1435,6 +1550,11 @@ window.__ModuleLoader__.load({
 										},
 										cellText(row[col.key]) || '—',
 									),
+									// 外部来源角标（评审卡 kmvnul5xkdg1l）：表格里「依据」列常被
+									// 收进详情看不见，角标挂在 id 格里，扫一眼就知道这条不是用户说的。
+									col.name === 'id' && row.依据 === '外部'
+										? React.createElement('span', { className: 'tm-mtag tm-mtag-ext', title: '依据=外部：从别处抄来的，不是用户原话，采信前先核对' }, '外部')
+										: null,
 								),
 							),
 							React.createElement(
@@ -1970,6 +2090,23 @@ window.__ModuleLoader__.load({
 								`批量归档完成：成功 ${batchNote.ok} 条${batchNote.failed.length > 0 ? `，失败 ${batchNote.failed.length} 条（${batchNote.failed.join('；')}）` : ''}。`,
 							)
 						: null,
+					// 被四判据拦下的：不是失败，是「按规矩不该归档」。单独一块，理由逐条摆，
+					// 想越过得自己点「强制归档这 N 条」再确认一次（卡 kmvnul5t1k2p8）。
+					batchRejected !== null && batchRejected.length > 0
+						? React.createElement(
+								'div',
+								{ className: 'tm-note tm-warn', style: { marginBottom: '6px' } },
+								`有 ${batchRejected.length} 条不满足归档判据，没有归档（不是出错，是它们不该归档）：`,
+								React.createElement('br'),
+								batchRejected.map((it) => `${it.id}：${it.why}`).join('；'),
+								React.createElement('br'),
+								React.createElement(
+									'button',
+									{ type: 'button', className: 'tm-btn', disabled: running, style: { marginTop: '4px' }, onClick: forceRejectedBatch },
+									`强制归档这 ${batchRejected.length} 条…`,
+								),
+							)
+						: null,
 					decay.length === 0
 						? React.createElement('div', { className: 'tm-note' }, '没有衰减到该处理的条目。')
 						: decay.map((it) => React.createElement(
@@ -2009,6 +2146,76 @@ window.__ModuleLoader__.load({
 							)),
 					React.createElement('div', { className: 'tm-note', style: { marginTop: '8px' } },
 						'这两块都只是候选：归档和晋升都要人点一下才生效。批量归档也是逐条调、每条各留一份快照。'),
+				)
+			}
+
+			/**
+			 * 盘点清单（评审卡 kmvnul5vzxn7b 的界面入口；顺带把 `memory_review` 的四张清单
+			 * 也摆出来——用户不开工具也该看得到库里有多少东西该整理）。
+			 *
+			 * **对后端字段缺失容错**：`召回失败未补` 是批B 新增的，旧宿主没有这一项；
+			 * 没有就不摆那一块（而不是摆一个空壳让人以为「查过了、一条都没有」）。
+			 * 每条清单只读，动作仍走归档/取代按钮——这里不新开写路径。
+			 */
+			function renderReviewPane() {
+				const lists = [
+					['衰减候选', Array.isArray(review?.衰减候选) ? review.衰减候选 : [], '强度低到该处理的（归档要人点）'],
+					['晋升候选', Array.isArray(review?.晋升候选) ? review.晋升候选 : [], '在 3 个以上项目里验证过的（晋升要人点）'],
+					['原文-总结未配对', Array.isArray(review?.原文总结未配对) ? review.原文总结未配对 : [], '总结条缺配套的原文条'],
+					['缺口未补', Array.isArray(review?.缺口未补) ? review.缺口未补 : [], '立了缺口卡但还没补记'],
+					// 批B：零命中落 misses 台账之后才有这一项。旧宿主没这字段 → 整块不出现。
+					['召回失败未补', Array.isArray(review?.召回失败未补) ? review.召回失败未补 : null, '搜过但没命中、还没补标签的'],
+				].filter(([, items]) => items !== null)
+				const total = lists.reduce((n, [, items]) => n + items.length, 0)
+
+				return React.createElement(
+					'div',
+					{ className: 'tm-card' },
+					React.createElement(
+						'button',
+						{ type: 'button', className: 'tm-fold', onClick: () => setReviewOpen((v) => !v) },
+						`${reviewOpen ? '▾' : '▸'} 盘点清单（整理工单）`,
+						React.createElement('span', { className: 'tm-note' },
+							review === null ? '点开才读' : review.ok === false ? '读取失败' : `共 ${total} 条待整理`),
+					),
+					reviewOpen
+						? React.createElement(
+								'div',
+								{ style: { marginTop: '10px' } },
+								review === null
+									? React.createElement('div', { className: 'tm-note' }, '读取盘点清单…')
+									: review.ok === false
+										? React.createElement('div', { className: 'tm-note tm-err' }, `盘点读取失败：${review.error ?? '未知原因'}`)
+										: lists.map(([name, items, hint]) => React.createElement(
+												'div',
+												{ key: name },
+												React.createElement(
+													'div',
+													{ className: 'tm-pane-h' },
+													React.createElement('h2', { className: 'tm-pane-t' }, name),
+													React.createElement('span', { className: 'tm-mtag' }, `${items.length} 条`),
+												),
+												items.length === 0
+													? React.createElement('div', { className: 'tm-note', style: { marginBottom: '8px' } }, `没有${name}。（${hint}）`)
+													: React.createElement(
+															'div',
+															{ className: 'tm-revlist', style: { marginBottom: '10px' } },
+															items.slice(0, 20).map((it) => React.createElement(
+																'div',
+																{ key: `${name}-${it.id}`, className: 'tm-prow' },
+																React.createElement('span', { className: 'tm-mono' }, it.id ?? '—'),
+																React.createElement('span', { className: 'tm-preview', title: String(it.内容 ?? '') }, String(it.内容 ?? '') || '（无内容）'),
+																it.项目 ? React.createElement('span', { className: 'tm-tag' }, it.项目) : null,
+															)),
+															items.length > 20
+																? React.createElement('div', { className: 'tm-note' }, `还有 ${items.length - 20} 条未列出。`)
+																: null,
+														),
+											)),
+								React.createElement('div', { className: 'tm-note', style: { marginTop: '4px' } },
+									'这四张（批B 起五张）清单只是整理工单：归档、晋升都要人点一下才生效。'),
+							)
+						: null,
 				)
 			}
 
@@ -2336,6 +2543,9 @@ window.__ModuleLoader__.load({
 
 				// ── 待整理 / 待晋升（V3，有候选才出现）──
 				renderPending(),
+
+				// ── 盘点清单（次位，默认收起：整理工单，含批B 的「召回失败未补」）──
+				renderReviewPane(),
 
 				// ── 维护与状态（次位，默认收起：托管 + 备份历史）──
 				renderMaintenance(),
