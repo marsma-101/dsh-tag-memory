@@ -1259,9 +1259,17 @@ window.__ModuleLoader__.load({
 			 * 卡片视图铺在卡片底部，表格视图铺在那一行下面——两处共用。
 			 */
 			function renderDetail(row) {
+				/**
+				 * 三态拆分（卡 kmvnul5yka32f）的两个列**空值也要摆**：
+				 * 「已验证项目 = 空」是个有意义的答案（还没有项目验证过它），
+				 * 按「只渲染非空项」的老口径会把它整个吞掉，用户看不到「这条没人验证过」。
+				 * 其余字段仍按「非空才渲染」，免得详情里堆一片空行。
+				 */
+				const ALWAYS_SHOW = ['已验证项目', '使用次数']
 				const detail = DETAIL_FIELDS
 					.map((name) => [name, row[name]])
-					.filter(([, value]) => value !== undefined && value !== null && String(value) !== '')
+					.filter(([name, value]) => ALWAYS_SHOW.includes(name)
+						|| (value !== undefined && value !== null && String(value) !== ''))
 				return React.createElement(
 					'div',
 					{ className: 'tm-detail' },
@@ -1279,7 +1287,18 @@ window.__ModuleLoader__.load({
 										? (String(value) === '外部'
 											? '（外部来源：只给带〔外部〕标记的索引，正文不进上下文）'
 											: String(value) === '原话' ? '（用户原话）' : '')
-										: ''
+										// ── 三态拆分（卡 kmvnul5yka32f）后的字段语义 ──
+										// 这两列以前在界面上只是两个数字/一串项目名，没人知道它们怎么来的。
+										// 现在按三态口径写清：**召回不算使用、更不算验证**。
+										: name === '使用次数'
+											? '（真正用于回答的次数；单纯被召回查出来不算）'
+											: name === '已验证项目'
+												? (String(value) === ''
+													? '（还没有项目验证过它）'
+													: '（用户确认过或跨项目实测成功的项目；被召回查出来不算验证）')
+												: name === '强度'
+													? '（衰减算出来的当前强度；召回不再自动加，只有真正用了才强化）'
+													: ''
 								return React.createElement(
 									React.Fragment,
 									{ key: name },
@@ -2130,22 +2149,28 @@ window.__ModuleLoader__.load({
 							)),
 					React.createElement('h2', { className: 'tm-pane-t', style: { margin: '12px 0 6px' } }, '待晋升'),
 					promote.length === 0
-						? React.createElement('div', { className: 'tm-note' }, '还没有在 3 个以上不同项目里验证过的条目。')
+						? React.createElement('div', { className: 'tm-note' }, '还没有在 3 个以上不同项目里**验证**过的条目。')
 						: promote.map((it) => React.createElement(
 								'div',
 								{ key: it.id, className: 'tm-prow' },
 								React.createElement('span', { className: 'tm-mono' }, it.id),
-								React.createElement('span', { className: 'tm-tag' }, `${it.项目数} 个项目`),
+								React.createElement('span', { className: 'tm-tag', title: '验证过它的独立项目数' }, `${it.项目数} 个项目验证`),
 								React.createElement('span', { className: 'tm-preview', title: String(it.内容 ?? '') }, String(it.内容 ?? '') || '（无内容）'),
-								React.createElement('span', { className: 'tm-note', title: String(it.已验证项目 ?? '') }, String(it.已验证项目 ?? '')),
+								React.createElement('span', { className: 'tm-note', title: `验证过它的项目：${String(it.已验证项目 ?? '') || '（无）'}` }, String(it.已验证项目 ?? '')),
 								React.createElement(
 									'button',
 									{ type: 'button', className: 'tm-link', disabled: busy, onClick: () => markEntry('supersede', it.id, { 项目: '通用' }) },
 									'晋升为通用',
 								),
 							)),
+					// 三态拆分后必须说清「验证」的来路——V4 之前「被召回几次就记一个已验证项目」
+					// 是错的，那句暗示要从界面上彻底拿掉，否则用户会以为被查得多就自动升级。
 					React.createElement('div', { className: 'tm-note', style: { marginTop: '8px' } },
 						'这两块都只是候选：归档和晋升都要人点一下才生效。批量归档也是逐条调、每条各留一份快照。'),
+					promote.length > 0
+						? React.createElement('div', { className: 'tm-note', style: { marginTop: '4px' } },
+								'「已验证项目」= 用户确认过、或跨项目实测成功的项目。**单纯被召回查出来不算验证**，也不会让条目更容易晋升。')
+						: null,
 				)
 			}
 
@@ -2795,6 +2820,14 @@ window.__ModuleLoader__.load({
 											)),
 											metaRow('时间筛', recall.timeFilter),
 											metaRow('没命中', recall.miss),
+											// 三态拆分（卡 kmvnul5yka32f）：召回只是「读」，不写库、不改强度。
+											// 这句是给用户看的，字典文件里没有这一项（那是后端口径），
+											// 所以放在界面层说明，不改字典内容。
+											React.createElement(
+												'div',
+												{ className: 'tm-note', style: { marginTop: '6px' } },
+												'召回只是读：查到一条不会让它变强、也不等于它被验证过。只有真正用它回答了问题才算「使用」，只有用户确认或跨项目实测成功才算「验证」。',
+											),
 										)
 									: null,
 
