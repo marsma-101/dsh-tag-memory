@@ -48,7 +48,7 @@ dsh-tag-memory/                 ← 插件包（代码，可覆盖升级）
 ⑤ 都在                                        → 直接写入
 ```
 
-**⚠️ ③ 为什么必须从 templates 复制**：`lib/engine/templates/memory.csv` 里**带着 17 列表头**。
+**⚠️ ③ 为什么必须从 templates 复制**：`lib/engine/templates/memory.csv` 里**带着 21 列表头**。
 若建 0 字节空文件，**表头就没了**——后续写入没有列名，标签全废。
 （`templates/` 是代码，随包交付；`store/` 是数据，升级时必须保住。）
 
@@ -144,7 +144,7 @@ $enc = New-Object System.Text.UTF8Encoding($false)
 ```
 □ zip 里没有 store/ 目录（插件包里本来就不该有库）
 □ lib/engine/templates/ 三个模板文件在
-□ lib/engine/templates/memory.csv 只有表头、共 17 列（末尾是 `类型`）
+□ lib/engine/templates/memory.csv 只有表头、共 21 列（末尾四列 强度/最后强化/已验证项目/使用次数）
 □ lib/engine/ 下 core.mjs / backup.mjs / tags.schema.json 都在
 □ docs/ 下 13 个规则文档在，且没有残留「技能目录」这类指路
 □ 所有文件无 BOM
