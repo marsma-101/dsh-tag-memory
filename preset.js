@@ -712,6 +712,68 @@ export function apply(ctx, config = {}) {
     }),
   )
 
+  // ⑤ 归档（智能体提交「建议清单」，服务端逐条复核四条判据）
+  ctx.tools.register(
+    defineTool({
+      name: 'memory_archive',
+      description: [
+        '归档一批记忆（把它们标成 `已归档`，默认不再出现在列表与召回里）。',
+        '**你只提交「建议清单」，不直接决定归档谁**——服务端会逐条重新校验四条判据',
+        '（强度 < 0.1、距离≠常驻、类型≠固定、最后强化已超该深度半衰期），不满足的逐条拒绝并说明理由。',
+        '为什么不能由你直接定：盘点出的候选是一份**快照清单**，用户看到它、你提交它之间可能过了很久，',
+        '中间这条可能刚被 recall 命中强化过——归档一条「刚活过来」的记忆是最坏的误杀。',
+        '用法：先调 `memory_review({类型:"盘点"})` 拿「衰减候选」清单（每条都带 id 与判定理由），',
+        '把要归档的那些整理成 `条目:[{id, 理由}]` 提交。**理由写清凭什么**（强度值/多少天没强化）。',
+        '返回逐条结果：成功几条、失败几条、每条失败的原因。失败是正常的（候选过期），不用重试同一条。',
+      ].join(' '),
+      parameters: {
+        条目: {
+          type: 'array',
+          description: '建议归档的条目清单，每项 `{id, 理由}`。id 必须来自盘点候选清单。',
+        },
+        强制复核: {
+          type: 'boolean',
+          description: '仅当用户**明确说**「这条我知道不该归档但我要清掉」时才传 true；默认不传。',
+        },
+      },
+      output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
+      async execute(args) {
+        if (!ready()) return degradedNotice()
+        const core = getCore()
+        const s = loadSchema()
+        const items = Array.isArray(args.条目) ? args.条目 : []
+        if (items.length === 0) {
+          throw new Error('没有要归档的条目。先用 memory_review({类型:"盘点"}) 拿候选清单，再把要归档的那些提交上来。')
+        }
+        const force = args.强制复核 === true
+
+        let r
+        try {
+          r = core.archiveBatch({
+            schema: s, csvPath: CSV_PATH, lockPath: LOCK_PATH, logPath: REINFORCE_LOG_PATH,
+            items, status: '已归档', requireCandidate: !force, force,
+          })
+        } catch (e) {
+          throw new Error(`归档失败：${String(e?.message ?? e)}`)
+        }
+
+        const lines = [`归档结果：成功 ${r.okCount} 条，失败 ${r.failCount} 条。`]
+        const okList = r.results.filter((x) => x.ok)
+        const failList = r.results.filter((x) => !x.ok)
+        if (okList.length > 0) {
+          lines.push('', '✓ 已归档：')
+          for (const x of okList) lines.push(`  ${x.id}${x.changed ? '' : '（本来就是已归档）'}${x.reason ? `｜理由：${x.reason}` : ''}`)
+        }
+        if (failList.length > 0) {
+          lines.push('', '✗ 没归档（逐条原因）：')
+          for (const x of failList) lines.push(`  ${x.id}：${x.error}`)
+          lines.push('', '被拒的那些**没有动过**。若确实要清掉某条，让用户明确同意后用 `强制复核=true` 单独提交它。')
+        }
+        return lines.join('\n')
+      },
+    }),
+  )
+
   // ⑤ 复盘（缺口立卡 + 闲时盘点）
   ctx.tools.register(
     defineTool({

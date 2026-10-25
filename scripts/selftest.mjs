@@ -327,8 +327,8 @@ try {
     const preset = await import(pathToFileURL(join(PKG, 'preset.js')).href)
     preset.apply(ctx, { dir: 'C:/does/not/matter/assistant' })
     ok('preset 注册字典段', sections.length === 1 && sections[0].name === 'tag-memory:dict')
-    ok('preset 注册四个工具（write / recall / supersede / review）',
-      tools.map((t) => t.name).sort().join(',') === 'memory_recall,memory_review,memory_supersede,memory_write')
+    ok('preset 注册五个工具（write / recall / supersede / review / archive）',
+      tools.map((t) => t.name).sort().join(',') === 'memory_archive,memory_recall,memory_review,memory_supersede,memory_write')
     const exec = { agent: { id: 'selftest', session: { header: { cwd: PROJ_CWD } } } }
     const out = await tools.find((t) => t.name === 'memory_recall').execute({ 条件: '{"角色":"selftest"}', 取几条: 5 }, exec)
     ok('preset.memory_recall 端到端读回沙箱条目', /命中\s*2\s*条/.test(out), out.split('\n')[0])
@@ -1799,11 +1799,11 @@ try {
       const r3 = await ask('bash', { args: ['-c', 'ls ' + store.DATA_DIR] })
       ok('V2-01 守卫扫嵌套数组（藏在数组里的路径也拦）', r3.kind === 'deny')
       let exemptOk = true
-      for (const t of ['memory_write', 'memory_recall', 'memory_supersede', 'memory_review']) {
+      for (const t of ['memory_write', 'memory_recall', 'memory_supersede', 'memory_review', 'memory_archive']) {
         const rr = await ask(t, { path: join(store.STORE_DIR, 'memory.csv') })
         if (rr.kind === 'deny') exemptOk = false
       }
-      ok('V2-02 插件自己的四个工具豁免（参数里带库路径也放行）', exemptOk)
+      ok('V2-02 插件自己的五个工具豁免（参数里带库路径也放行；新工具必须一并加进名单）', exemptOk)
       const r4 = await ask('read', { file_path: join(sandbox, 'unrelated.txt') })
       ok('V2-02 不碰记忆库的调用照常放行（守卫不是全拦）', r4.kind === 'allow')
     }

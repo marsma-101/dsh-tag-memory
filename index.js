@@ -78,7 +78,7 @@ function guardDenialReason() {
 }
 
 /** 插件自己的四个工具：合法通道，不经过这条管线，必须豁免。 */
-const GUARD_EXEMPT_TOOLS = ['memory_write', 'memory_recall', 'memory_supersede', 'memory_review']
+const GUARD_EXEMPT_TOOLS = ['memory_write', 'memory_recall', 'memory_supersede', 'memory_review', 'memory_archive']
 
 /**
  * 当前该用哪几条 needle 判定。
