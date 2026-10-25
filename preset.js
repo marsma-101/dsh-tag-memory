@@ -261,6 +261,69 @@ function injectText(config, project) {
 // ── 召回结果渲染 ────────────────────────────────────────
 
 /**
+ * 召回结果排序（卡 kmvnul5v16cd3）。
+ *
+ * 原来直接拿 `filterRows` 的输出顺序——那是**文件顺序**（id 升序，最老的在前），
+ * 于是「查一次记忆」返回的永远是最老的 3 条，跟这次问的东西没关系。
+ *
+ * 排序键（从强到弱，逐级比较）：
+ *   ① 距离：常驻 > 按需 > 深藏（钉住的优先让人看见，深藏的本来就该少露脸）
+ *   ② 项目：本项目 > 通用 > 其它项目（跟当下这活儿相关的先出来）
+ *   ③ 强度：高 > 低（用得多的、还活着的优先）
+ *   ④ 时间：新 > 旧
+ *   ⑤ 文件顺序（id 升序）兜底——保证排序**稳定**，同分时不会每次跑出不同结果
+ *
+ * 为什么「本项目 > 通用」而不是「通用 > 本项目」：通用条目是「哪个项目都成立」，
+ * 本项目条目是「就在这个项目里成立」——后者更贴当下。通用排第二是怕它被彻底埋掉。
+ *
+ * @param {Array} hits      filterRows 的结果
+ * @param {Function} get    取值函数（row, 字典名）→ string
+ * @param {string} project  当前项目名（可为空）
+ * @param {Function} [strengthOf] 现算强度（不传则跳过该维）
+ */
+function sortByRelevance(hits, get, project, strengthOf) {
+  const distRank = (e) => {
+    const d = get(e, '距离')
+    if (d === '常驻') return 0
+    if (d === '按需' || d === '') return 1
+    if (d === '深藏') return 2
+    return 3
+  }
+  const projRank = (e) => {
+    const p = get(e, '项目')
+    if (project !== '' && p === project) return 0
+    if (p === '通用') return 1
+    return 2
+  }
+  const strengthOfRow = (e) => {
+    if (typeof strengthOf !== 'function') return 0
+    try {
+      const st = strengthOf(e)
+      return st === null ? 0 : Number(st.strength) || 0
+    } catch { return 0 }
+  }
+  // 先算一次、排序里复用——每次都现算一遍会把 O(n log n) 变成 O(n log n × 解析)
+  const cache = new Map()
+  const cached = (fn, e) => {
+    if (!cache.has(e)) cache.set(e, fn(e))
+    return cache.get(e)
+  }
+  return hits.slice().sort((a, b) => {
+    const d = cached(distRank, a) - cached(distRank, b)
+    if (d !== 0) return d
+    const p = cached(projRank, a) - cached(projRank, b)
+    if (p !== 0) return p
+    const sa = cached(strengthOfRow, a)
+    const sb = cached(strengthOfRow, b)
+    if (Math.abs(sa - sb) > 1e-9) return sb - sa
+    const ta = String(get(a, '时间') ?? '')
+    const tb = String(get(b, '时间') ?? '')
+    if (ta !== tb) return tb.localeCompare(ta)   // 新的在前
+    return String(get(a, 'id') ?? '').localeCompare(String(get(b, 'id') ?? ''))  // 稳定兜底
+  })
+}
+
+/**
  * 召回结果渲染。
  *
  * `strengthOf(row)` 是可选的：给了就在「详细」模式里多报一行强度（现算，不落盘）。
@@ -639,6 +702,13 @@ export function apply(ctx, config = {}) {
               使用次数: merged.使用次数,
             }
           } catch { return null }
+        }
+        // 排序（卡 kmvnul5v16cd3）：文件顺序 → 相关性顺序。
+        // 必须排在「取前 N 条」之前——否则取出来的还是最老的那几条。
+        {
+          const resolveS = core.makeResolver(s, header)
+          const getS = (row, name) => { const i = resolveS(name); return i >= 0 ? String(row[i] ?? '') : '' }
+          hits = sortByRelevance(hits, getS, project, strengthOf)
         }
         let body = renderHits(core, s, header, hits, { take: expandLimit, full, strengthOf })
         // 上限提示（V4-b）：被截了就要明说「还有 N 条」，不能让人以为库里就这么多。
