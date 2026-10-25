@@ -2802,6 +2802,51 @@ try {
       ok('R-i7 迁移后老行（17 格）仍不算 ragged', readRows(csv).ragged.length === 0)
     }
 
+    // ══ R-i2：**启动路径**真的接线了（不是只有函数能调）══
+    //   上面 R-i 验的是 `migrateHeader()` 这个函数本身；这一条验的是
+    //   「插件启动时会不会自己发现老库、自己快照、自己升表头」——
+    //   P1-1 的原话就是「migrateHeader 只在 selftest 里调，没接启动路径」。
+    //   用子进程起一份全新 store，模拟真实启动。
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v4-mig-'))
+      const skill = join(box, 'skill')
+      mkdirSync(join(skill, 'references'), { recursive: true })
+      mkdirSync(join(skill, 'store'), { recursive: true })
+      copyFileSync(join(PKG, 'lib', 'engine', 'tags.schema.json'), join(skill, 'references', 'tags.schema.json'))
+      const H17 = 'id,内容,时间,环境,原因,备注,稳定性,成熟度,距离,角色,项目,状态,关键词,工具,版本,依据,类型'
+      writeFileSync(join(skill, 'store', 'memory.csv'),
+        H17 + '\nM-20260101-001,老条目甲,2026-01-01,e,r,,稳定,语义,按需,角色,通用,生效,,,v1,推断,记忆\n', 'utf8')
+      writeFileSync(join(skill, 'store', 'index.md'), '# i\n')
+      const beforeLines = readFileSync(join(skill, 'store', 'memory.csv'), 'utf8').split('\n').slice(1)
+
+      const script = `
+        const { pathToFileURL } = require('node:url')
+        ;(async () => {
+          const store = await import(pathToFileURL(${JSON.stringify(join(PKG, 'lib', 'store.mjs'))}).href)
+          console.log('MIG ' + JSON.stringify(store.migrationInfo()))
+        })()
+      `
+      const r = spawnSync(process.execPath, ['-e', script],
+        { env: { ...process.env, DSH_TAG_MEMORY_DATA_DIR: skill }, encoding: 'utf8' })
+      const info = JSON.parse((r.stdout.match(/MIG (\{.*\})/) ?? [])[1] ?? '{}')
+      ok('R-i2 启动时自己检测到 17 列老库（needed=true）', info.needed === true, JSON.stringify(info))
+      ok('R-i2 启动时自动完成迁移（migrated=true）', info.migrated === true, JSON.stringify(info))
+      ok('R-i2 迁移前**自动拍了快照**（不是裸改库）',
+        typeof info.snapshot === 'string' && info.snapshot !== '' &&
+        existsSync(join(skill, 'store', 'snapshots', info.snapshot)), String(info.snapshot))
+      const afterText = readFileSync(join(skill, 'store', 'memory.csv'), 'utf8')
+      ok('R-i2 启动迁移后表头是 21 列', afterText.split('\n')[0].split(',').length === 21)
+      ok('R-i2 启动迁移后数据行逐字节不动',
+        JSON.stringify(afterText.split('\n').slice(1)) === JSON.stringify(beforeLines))
+      // 正控：21 列的库再启动一次不该再迁（幂等）
+      const r2 = spawnSync(process.execPath, ['-e', script],
+        { env: { ...process.env, DSH_TAG_MEMORY_DATA_DIR: skill }, encoding: 'utf8' })
+      const info2 = JSON.parse((r2.stdout.match(/MIG (\{.*\})/) ?? [])[1] ?? '{}')
+      ok('R-i2 正控：已经是 21 列 → 第二次启动不再迁移（needed=false）',
+        info2.needed === false && info2.migrated === false, JSON.stringify(info2))
+      rmSync(box, { recursive: true, force: true })
+    }
+
     // ══ R-j：supersede 保留深度/新列（报告 §七 验收用例照抄）══
     //   旧缺陷：supersede 用列名做键取值，但 row 用字典名传 → 深度等字段丢失。
     {
