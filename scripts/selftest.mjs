@@ -4150,7 +4150,182 @@ try {
 
     // U-3：js-yaml 必须在 dependencies（install.mjs 与 selftest 都硬用它）
     {
-      const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
+      // -- V. 0.3.4 卡1：脱敏闸（kmvrg9up9ew83）--
+  try {
+    const core = store.getCore()
+    const schema0 = store.loadSchema()
+    const TPL4 = readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv'), 'utf8')
+    const newLib4 = () => {
+      const box = mkdtempSync(join(tmpdir(), 'tm-v-'))
+      const csv = join(box, 'memory.csv')
+      writeFileSync(csv, TPL4)
+      return { box, csv, lock: join(box, '.lock') }
+    }
+    const mk4 = (o) => ({
+      内容: 'x', 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+      稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest', ...o,
+    })
+
+    // V-1 检测器
+    {
+      const cases = [
+        ['密码：abc123', true], ['口令 = s3cret!', true], ['password: hunter2', true],
+        ['token 是 sk-abcdefgh12345678', true], ['Bearer eyJhbGciOiJIUzI1NiJ9xxx', true],
+        ['pha_AbC123xyz', true], ['ghp_1234567890abcdef', true],
+        ['凭据存于 ~/.claude/x.json', false], ['密码：<已脱敏>', false],
+        ['端口是 3180', false],
+      ]
+      const bad = []
+      for (const [text, want] of cases) {
+        const got = core.findSecrets(text).length > 0
+        if (got !== want) bad.push(text + '->' + got + '(应' + want + ')')
+      }
+      ok('V-1 脱敏检测覆盖 密码/口令/password/sk-/Bearer/pha_/ghp_ 七类，且不误伤「只记位置」',
+        bad.length === 0, bad.join(' | '))
+    }
+
+    // V-2 写入路径
+    {
+      const { csv, lock } = newLib4()
+      let err = ''
+      try {
+        core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk4({ 内容: '登录用 密码：abc123' }) })
+      } catch (e) { err = String(e?.message ?? e) }
+      ok('V-2 写入含明文密码 -> 被拒', /明文凭据/.test(err), err.slice(0, 60))
+      ok('V-2 拒绝话术说明「凭据只记位置、不写内容」',
+        /只记位置/.test(err) && /已脱敏|存放位置/.test(err))
+      ok('V-2 拒绝后库没被写脏（行数不变）',
+        core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0)).rows.length === 0)
+      const id = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk4({ 内容: '凭据存于 ~/.claude/x.json' }) })
+      ok('V-2 正控：「凭据存于某路径」不被误拦', typeof id === 'string' && id !== '')
+    }
+
+    // V-3 redact 模式
+    {
+      const { csv, lock } = newLib4()
+      const schemaRedact = JSON.parse(JSON.stringify(schema0))
+      schemaRedact.rules = { ...schemaRedact.rules, secretGuard: 'redact' }
+      const id = core.appendEntry({ schema: schemaRedact, csvPath: csv, lockPath: lock,
+        row: mk4({ 内容: '账号 x 密码：abc123' }) })
+      const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schemaRedact))
+      const row = t.rows.find((r) => r[0] === id)
+      const content = String(row[t.header.indexOf('内容')])
+      ok('V-3 redact 模式：写入成功但值被替换成 <已脱敏>',
+        content.includes('<已脱敏>') && !content.includes('abc123'), content)
+      ok('V-3 redact 模式：原值一个字都没落盘', !readFileSync(csv, 'utf8').includes('abc123'))
+    }
+
+    // V-4 合并路径
+    {
+      const { box } = newLib4()
+      const H = TPL4.split('\n')[0]
+      const HEAD = H.split(',')
+      const srcRow = (o) => {
+        const a = new Array(HEAD.length).fill('')
+        for (const [k, v] of Object.entries(o)) { const i = HEAD.indexOf(k); if (i >= 0) a[i] = v }
+        return a.join(',')
+      }
+      const srcPath = join(box, 'src' + '.csv')
+      writeFileSync(srcPath, H + '\n' + [
+        srcRow({ id: 'M-20250101-001', 内容: '干净的条目', 时间: '2025-01-01', 环境: 'e', 原因: 'r',
+          稳定性: '稳定', 成熟度: '语义', 距离: '按需', 角色: 't', 项目: '通用', 状态: '生效', 依据: '推断', 类型: '记忆' }),
+        srcRow({ id: 'M-20250101-002', 内容: '登录 密码：hunter2', 时间: '2025-01-01', 环境: 'e', 原因: 'r',
+          稳定性: '稳定', 成熟度: '语义', 距离: '常驻', 角色: 't', 项目: '通用', 状态: '生效', 依据: '推断', 类型: '记忆' }),
+      ].join('\n') + '\n', 'utf8')
+      const routes4 = []
+      const ctx4 = {
+        logger: {},
+        get: (n) => n === 'connection' ? { requestRejection: () => undefined } : undefined,
+        webServer: { register: (r) => { routes4.push(r); return () => {} } },
+        on: () => () => {},
+      }
+      const idxMod = await import(pathToFileURL(join(PKG, 'index.js')).href)
+      idxMod.apply(ctx4, { presetRoot: join(box, 'pr'), notice: false })
+      const res4 = { statusCode: 0, body: '', setHeader() {}, end(b) { this.body = b } }
+      const ep4 = '/' + 'tag' + '-' + 'memory' + '-api/merge'
+      const req4 = {
+        url: ep4, method: 'POST',
+        on(ev, fn) {
+          if (ev === 'data') fn(Buffer.from(JSON.stringify({ path: srcPath, apply: false, confirmOutside: true })))
+          else if (ev === 'end') fn()
+          return req4
+        },
+      }
+      await routes4[0].handler(req4, res4)
+      const j4 = JSON.parse(res4.body)
+      ok('V-4 合并预演报告里有「含凭据」计数（不静默）', (j4.counts && j4.counts.secret) === 1, 'secret=' + JSON.stringify(j4.counts && j4.counts.secret))
+      ok('V-4 含凭据那条被点名（带 id 与原因）',
+        Array.isArray(j4.secretList) && j4.secretList.length === 1 &&
+        String(j4.secretList[0].id).includes('M-20250101-002') && /凭据/.test(String(j4.secretList[0].why)),
+        JSON.stringify(j4.secretList ?? []).slice(0, 120))
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // V-5 快照二次过滤 + 安全断言
+    {
+      const makeSkill = (withSecret) => {
+        const box = mkdtempSync(join(tmpdir(), 'tm-v5-'))
+        const skill = join(box, 'skill')
+        mkdirSync(join(skill, 'references'), { recursive: true })
+        mkdirSync(join(skill, 'store'), { recursive: true })
+        copyFileSync(join(PKG, 'lib', 'engine', 'tags.schema.json'), join(skill, 'references', 'tags.schema.json'))
+        const H = TPL4.split('\n')[0]
+        const HEAD = H.split(',')
+        const row = (o) => {
+          const a = new Array(HEAD.length).fill('')
+          for (const [k, v] of Object.entries(o)) { const i = HEAD.indexOf(k); if (i >= 0) a[i] = v }
+          return a.join(',')
+        }
+        const csvName = ['memory', 'csv'].join('.')
+        writeFileSync(join(skill, 'store', csvName), H + '\n' + row({
+          id: 'M-20260101-001', 内容: withSecret ? '登录 密码：PLAINTEXT99' : '正常条目', 时间: '2026-01-01',
+          环境: 'e', 原因: 'r', 稳定性: '稳定', 成熟度: '语义', 距离: '常驻', 角色: 't',
+          项目: '通用', 状态: '生效', 依据: '原话', 类型: '记忆',
+        }) + '\n', 'utf8')
+        writeFileSync(join(skill, 'store', 'index.md'), '# i\n')
+        return { box, skill }
+      }
+      const runSnap = (skill, presetPath) => {
+        const script = `
+          const { pathToFileURL } = require('node:url')
+          const { join } = require('node:path')
+          ;(async () => {
+            const secs = []
+            const preset = await import(pathToFileURL(${JSON.stringify(presetPath)}).href)
+            preset.apply({ systemPrompt: { section: (s) => secs.push(s), getSectionOrder: () => 50 }, tools: { register: () => {} } }, { dir: 'C:/x' })
+            console.log(secs[0].text({ agent: { id: 't', session: { header: { cwd: ${JSON.stringify(join(skill, 'proj'))} } } } }))
+          })()
+        `
+        const rr = spawnSync(process.execPath, ['-e', script], { env: { ...process.env, DSH_TAG_MEMORY_DATA_DIR: skill }, encoding: 'utf8' })
+          return rr.stdout
+      }
+      const a = makeSkill(true)
+      const textA = runSnap(a.skill, join(PKG, 'preset.js'))
+      ok('V-5 快照全文块里不出现明文口令（库里有，但注入时被过滤）', !/PLAINTEXT99/.test(textA))
+      ok('V-5 快照里给的是 <已脱敏>（让人知道这里原本是个密码位）', /<已脱敏>/.test(textA))
+
+      const presetSrc = readFileSync(join(PKG, 'preset.js'), 'utf8')
+      // 用不含换行转义的子串匹配，避开源码里 '\n' 字面量与真换行的歧义
+      const before = "const body = String(core.redactSecrets(get(row, '内容')) ?? '').split("
+      const after = "const body = String(get(row, '内容') ?? '').split("
+      const patched = presetSrc.split(before).join(after)
+      ok('V-5 安全断言前置：能构造出「关掉二次过滤」的版本', patched !== presetSrc)
+      const b = makeSkill(true)
+      // 必须放在**包目录**里：ESM 要靠包根 package.json 决定模块类型，
+      // 放到 /tmp/.../skill/ 下会因为找不到 package.json 而加载失败（实测 stderr 是 package_json_reader）。
+      const patchedPath = join(PKG, '.selftest-preset-nofilter.mjs')
+      const libPath = join(PKG, 'lib').split('\\').join('/')
+      writeFileSync(patchedPath, patched.replace(/from '\.\/lib\//g, "from '" + libPath + "/"), 'utf8')
+      const textB = runSnap(b.skill, patchedPath)
+      ok('V-5 安全断言：关掉二次过滤后，同一份库的注入文本确实带明文口令（证明闸真在起作用）',
+        /PLAINTEXT99/.test(textB), textB.split('\n').filter((l) => l.includes('密码')).join(' | ').slice(0, 80))
+      try { rmSync(patchedPath) } catch { /* 没生成就算了 */ }
+      rmSync(a.box, { recursive: true, force: true })
+      rmSync(b.box, { recursive: true, force: true })
+    }
+  } catch (e) { fail++; results.push("FAIL  V. 脱敏闸 — " + String(e?.stack ?? e)) }
+
+  const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
       ok('U-3 js-yaml 声明在 dependencies（不是只靠开发环境恰好有）',
         pkg.dependencies !== undefined && typeof pkg.dependencies['js-yaml'] === 'string',
         JSON.stringify(pkg.dependencies ?? {}))

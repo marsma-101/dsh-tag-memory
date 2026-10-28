@@ -121,12 +121,19 @@ function snapshotConfig(config) {
  * 只在 `依据 != 原话` 时才标，省字数：原话是默认档，标出来的是「需要多看一眼」的。
  */
 function snapshotFull(get, row) {
-  const body = String(get(row, '内容') ?? '').split('\n')
+  // **二次过滤**（卡 kmvrg9up9ew83）：哪怕库里有漏网的凭据（比如手工改库、或闸被关掉），
+  // 也不能原样注入系统提示词——那是每轮都进上下文的高信任区。
+  // 这里在**渲染时**再过一遍，与写入闸是两道独立的防线（写时不进、读时不出）。
+  const core = getCore()
+  const body = String(core.redactSecrets(get(row, '内容')) ?? '').split('\n')
   const lines = [`- [${get(row, 'id')}] ${body[0]}`]
   for (const l of body.slice(1)) if (String(l).trim() !== '') lines.push('  ' + l)
   const tail = []
-  if (get(row, '环境')) tail.push(`环境：${get(row, '环境')}`)
-  if (get(row, '原因')) tail.push(`原因：${get(row, '原因')}`)
+  // 环境/原因同样过一遍脱敏（它们也是自由文本，凭据可能藏在这儿）
+  const envText = core.redactSecrets(get(row, '环境'))
+  const whyText = core.redactSecrets(get(row, '原因'))
+  if (envText) tail.push(`环境：${envText}`)
+  if (whyText) tail.push(`原因：${whyText}`)
   const basis = get(row, '依据')
   if (basis !== '' && basis !== '原话') tail.push(`依据：${basis}（非用户原话，采信前先核对）`)
   if (tail.length) lines.push('  ' + tail.join('｜'))
@@ -135,8 +142,9 @@ function snapshotFull(get, row) {
 
 /** 索引一行：够知道它存在，不够直接照做。外部来源的额外标一笔（同 snapshotFull 的理由）。 */
 function snapshotIndex(get, row) {
+  const core = getCore()
   const where = get(row, '项目') || '未注明项目'
-  const first = String(get(row, '内容') ?? '').split('\n')[0]
+  const first = String(core.redactSecrets(get(row, '内容')) ?? '').split('\n')[0]
   const basis = get(row, '依据')
   const mark = basis === '外部' ? '〔外部〕' : ''
   return `- [${get(row, 'id')}] 在「${where}」：${mark}${first}`

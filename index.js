@@ -1049,6 +1049,21 @@ function mergeFrom(body) {
     const other = hits[0]
     // 预演就得说实话：必填缺项 / 取值不合规的行**现在**标出来，别等真合并才一条条失败——
     // 否则预演说「要加 3 条」、真合并只进去 2 条，用户会以为合并吞了一条。
+    // 脱敏闸（卡 kmvrg9up9ew83）：合并是**外部数据进来的口**，比写入更危险——
+    // 别处的库可能早就存着明文口令。命中就不并入，并在报告里点名（不静默丢）。
+    const sec = core.guardSecrets(fields, { schema })
+    if (sec.hit) {
+      items.push({
+        kind: 'secret',
+        id: fields.id ?? '',
+        why: `含明文凭据（${sec.columns.join('/')}：${sec.secrets.slice(0, 2).join('、')}），未并入`,
+        preview: preview(fields.内容),
+        secrets: sec.secrets,
+        columns: sec.columns,
+      })
+      continue
+    }
+
     const vres = core.validateRow(schema, fields)
     const verr = Array.isArray(vres) ? vres : (vres?.errors ?? [])
     if (verr.length > 0) {
@@ -1108,6 +1123,7 @@ function mergeFrom(body) {
       duplicateOtherProject: dupOtherProject.length,
       idCollision: newItems.filter((i) => i.why !== '').length,
       invalid: items.filter((i) => i.kind === 'invalid').length,
+      secret: items.filter((i) => i.kind === 'secret').length,
       tagDiff: tagDiffs.length,
     },
     newList: newItems.slice(0, 50).map((i) => ({
@@ -1125,6 +1141,10 @@ function mergeFrom(body) {
       local: i.otherProject,
     })),
     invalidList: items.filter((i) => i.kind === 'invalid').slice(0, 50).map((i) => ({ id: i.id, why: i.why, preview: i.preview ?? '' })),
+    // 脱敏闸拦下的那些：**点名**，不静默丢——用户要知道「有 N 条因为含凭据没进来」
+    secretList: items.filter((i) => i.kind === 'secret').slice(0, 50).map((i) => ({
+      id: i.id, why: i.why, preview: i.preview ?? '', secrets: i.secrets ?? [], columns: i.columns ?? [],
+    })),
     tagDiffs: tagDiffs.slice(0, 50),
   }
 
