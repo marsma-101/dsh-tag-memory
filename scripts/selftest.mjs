@@ -329,6 +329,17 @@ try {
     ok('preset 注册字典段', sections.length === 1 && sections[0].name === 'tag-memory:dict')
     ok('preset 注册六个工具（write / recall / supersede / review / archive / mark_used）',
       tools.map((t) => t.name).sort().join(',') === 'memory_archive,memory_mark_used,memory_recall,memory_review,memory_supersede,memory_write')
+    // 守卫豁免关系断言（评审卡 kmvrg9d68cfed）：preset 注册的每个 memory_* 工具都必须在守卫豁免名单里。
+    // 用「注册集合 ⊆ 豁免集合」这条关系钉住，防止下次再加工具又漏。
+    {
+      const guardSrc = readFileSync(join(PKG, 'index.js'), 'utf8')
+      const m = guardSrc.match(/GUARD_EXEMPT_TOOLS = \[([^\]]+)\]/)
+      const exempt = m ? [...m[1].matchAll(/'(memory_[a-z_]+)'/g)].map((x) => x[1]) : []
+      const registered = tools.map((t) => t.name).filter((n) => n.startsWith('memory_'))
+      const missing = registered.filter((n) => !exempt.includes(n))
+      ok('守卫豁免覆盖全部注册工具（注册 ⊆ 豁免）', m !== null && missing.length === 0,
+        missing.length ? '漏了: ' + missing.join(',') : 'exempt=' + exempt.length)
+    }
     const exec = { agent: { id: 'selftest', session: { header: { cwd: PROJ_CWD } } } }
     const out = await tools.find((t) => t.name === 'memory_recall').execute({ 条件: '{"角色":"selftest"}', 取几条: 5 }, exec)
     ok('preset.memory_recall 端到端读回沙箱条目', /命中\s*2\s*条/.test(out), out.split('\n')[0])

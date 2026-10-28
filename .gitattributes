@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.csv  eol=lf
+*.md   eol=lf
+*.json eol=lf
+*.mjs  eol=lf
