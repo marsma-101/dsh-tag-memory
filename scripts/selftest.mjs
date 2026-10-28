@@ -4418,6 +4418,70 @@ try {
     }
   } catch (e) { fail++; results.push("FAIL  W. importMap — " + String(e?.stack ?? e)) }
 
+  // ── X. 0.3.4 卡3：autoFill 建议 + 确认（kmvrga9xgdtij）──────────────
+  try {
+    const core = store.getCore()
+    const schema0 = store.loadSchema()
+
+    // X-1 建议清单结构
+    {
+      const rows = [
+        { id: 'M-20261016-001', 类型: '记忆', 依据: '', 深度: '', 时间: '', 状态: '', 距离: '' },
+        { id: 'M-20261017-002', 类型: '记忆', 依据: '', 深度: '语义', 时间: '2026-01-01', 状态: '生效', 距离: '常驻' },
+      ]
+      const plan = core.suggestAutoFill(rows)
+      ok('X-1 预演报告里有 autoFill 段，每条含 {字段, 条数, 建议值, 依据}',
+        Array.isArray(plan) && plan.length > 0 &&
+        plan.every((s) => s.字段 !== undefined && typeof s.条数 === 'number' && s.建议值 !== undefined && s.依据 !== ''),
+        JSON.stringify(plan.map((s) => s.字段 + '×' + s.条数)))
+      const byField = Object.fromEntries(plan.map((s) => [s.字段, s]))
+      ok('X-1 依据空 → 建议「推断」，条数正确（2 条）', byField['依据']?.条数 === 2 && byField['依据']?.建议值 === '推断')
+      ok('X-1 类型=记忆 且 深度空 → 建议「情景」，只算空的那条（1 条）',
+        byField['深度']?.条数 === 1 && byField['深度']?.建议值 === '情景')
+      ok('X-1 时间空 → 从 id 推日期（M-20261016-001 → 2026-10-16）',
+        byField['时间']?.建议值 === '2026-10-16', byField['时间']?.建议值)
+      ok('X-1 状态空 → 生效；距离空 → 按需',
+        byField['状态']?.建议值 === '生效' && byField['距离']?.建议值 === '按需')
+      ok('X-1 每条建议带 ids（人能对照是哪几条）',
+        plan.every((s) => Array.isArray(s.ids) && s.ids.length === s.条数 || s.ids.length === 20))
+    }
+
+    // X-2 回填只填空值 + 备注留痕
+    {
+      const plan = core.suggestAutoFill([
+        { id: 'M-20261017-002', 类型: '记忆', 依据: '', 深度: '语义', 时间: '2026-01-01', 状态: '生效', 距离: '常驻' },
+      ])
+      const r = core.applyAutoFill({ id: 'M-20261017-002', 类型: '记忆', 依据: '', 深度: '语义',
+        时间: '2026-01-01', 状态: '生效', 距离: '常驻', 备注: '原有备注' }, plan)
+      ok('X-2 空值被回填（依据 → 推断）', r.fields.依据 === '推断')
+      ok('X-2 **只填空值**：已有的深度/距离/时间一个都不覆盖',
+        r.fields.深度 === '语义' && r.fields.距离 === '常驻' && r.fields.时间 === '2026-01-01')
+      ok('X-2 回填在备注里留痕（可追溯）',
+        String(r.fields.备注).includes('导入回填') && String(r.fields.备注).includes('依据=推断'),
+        String(r.fields.备注))
+      ok('X-2 原有备注没被覆盖（接在后面）', String(r.fields.备注).startsWith('原有备注'))
+    }
+
+    // X-3 dateFromId 的边界
+    {
+      ok('X-3 正常 id 能推日期', core.dateFromId('M-20261016-001') === '2026-10-16')
+      ok('X-3 非法日期推不出来（月份 13 / 日期 99）',
+        core.dateFromId('M-20261399-001') === '' && core.dateFromId('M-20260199-001') === '')
+      ok('X-3 不像 id 的串推不出来', core.dateFromId('随便写的') === '' && core.dateFromId('') === '')
+    }
+
+    // X-4 回填后 validateRow 全过
+    {
+      const plan = core.suggestAutoFill([
+        { id: 'M-20261016-001', 类型: '记忆', 依据: '', 深度: '', 时间: '', 状态: '', 距离: '' },
+      ])
+      const r = core.applyAutoFill({ id: 'M-20261016-001', 内容: '内容', 环境: 'e', 原因: 'r',
+        类型: '记忆', 依据: '', 深度: '', 时间: '', 状态: '', 距离: '', 项目: '通用', 角色: 'selftest' }, plan)
+      const v = core.validateRow(schema0, r.fields)
+      ok('X-4 回填后的行能过 validateRow（必填项补齐了）', v.ok === true, (v.errors ?? []).join('；').slice(0, 80))
+    }
+  } catch (e) { fail++; results.push("FAIL  X. autoFill — " + String(e?.stack ?? e)) }
+
   const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
       ok('U-3 js-yaml 声明在 dependencies（不是只靠开发环境恰好有）',
         pkg.dependencies !== undefined && typeof pkg.dependencies['js-yaml'] === 'string',

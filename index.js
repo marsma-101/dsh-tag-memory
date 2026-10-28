@@ -1157,6 +1157,9 @@ function mergeFrom(body) {
     })),
     invalidList: items.filter((i) => i.kind === 'invalid').slice(0, 50).map((i) => ({ id: i.id, why: i.why, preview: i.preview ?? '' })),
     // 脱敏闸拦下的那些：**点名**，不静默丢——用户要知道「有 N 条因为含凭据没进来」
+    // 自动回填建议（卡 kmvrga9xgdtij）：**建议 + 确认**，不是静默改。
+    // 预演时摆出来让人看，正式合并时（applyAutoFill=true）才真填。
+    autoFill: core.suggestAutoFill(newItems.map((i) => i.fields)),
     // 导入映射改造明细：`{ 稳定性: { "固定→稳定": 59 }, 依据: { "(空)→推断": 124 } }`
     // 人能一眼看出「这张表实际改了什么、各多少条」，不用去数。
     importApplied: core.summarizeImportChanges(importChanges),
@@ -1187,18 +1190,27 @@ function mergeFrom(body) {
   }
   const preStamp = pre !== null && typeof pre.stamp === 'string' && pre.stamp !== '' ? pre.stamp : preSnap.stamp
 
+  // 自动回填（卡 kmvrga9xgdtij）：只有显式 `applyAutoFill: true` 才填。
+  // **不确认就不回填**——dryRun 时一个字节都不动，正式合并但没确认时也不填。
+  const doFill = body?.applyAutoFill === true
+  const fillPlan = doFill ? core.suggestAutoFill(newItems.map((i) => i.fields)) : []
+
   const appended = []
   const failed = []
+  let filled = 0
   for (const it of newItems) {
     try {
-      const id = core.appendEntry({ schema, csvPath: CSV_PATH, lockPath: LOCK_PATH, row: it.fields })
+      // 回填只作用于**空值**（applyAutoFill 内部保证），并在 `备注` 留痕
+      const row = doFill ? core.applyAutoFill(it.fields, fillPlan).fields : it.fields
+      if (doFill && row.备注 !== it.fields.备注) filled++
+      const id = core.appendEntry({ schema, csvPath: CSV_PATH, lockPath: LOCK_PATH, row })
       appended.push({ id, from: it.id })
     } catch (e) {
       failed.push({ id: it.id, preview: preview(it.fields.内容), why: String(e?.message ?? e) })
     }
   }
 
-  return { ...report, dryRun: false, preBackup: preStamp, preSnapshot: preSnap.name, appended, failed, note: preBackupNote, status: backupStatus() }
+  return { ...report, dryRun: false, preBackup: preStamp, preSnapshot: preSnap.name, autoFilled: filled, appended, failed, note: preBackupNote, status: backupStatus() }
 }
 
 /**
