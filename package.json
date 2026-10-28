@@ -58,15 +58,15 @@
     }
   },
   "engines": {
-    "dsh": ">=0.2.0 <0.3.0"
+    "dsh": ">=0.2.0"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-tools": ">=0.2.0-0 <0.3.0",
-    "@deepseek-ai/schemastery": ">=3.18.0 <4"
+    "@deepseek-ai/dsh-tools": ">=0.2.0-0",
+    "@deepseek-ai/schemastery": ">=3.18.0"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-tools": ">=0.2.0-0 <0.3.0",
-    "@deepseek-ai/schemastery": ">=3.18.0 <4"
+    "@deepseek-ai/dsh-tools": ">=0.2.0-0",
+    "@deepseek-ai/schemastery": ">=3.18.0"
   },
   "dependencies": {
     "js-yaml": "^4.1.0"
