@@ -4213,6 +4213,43 @@ try {
       ok('V-3 redact 模式：写入成功但值被替换成 <已脱敏>',
         content.includes('<已脱敏>') && !content.includes('abc123'), content)
       ok('V-3 redact 模式：原值一个字都没落盘', !readFileSync(csv, 'utf8').includes('abc123'))
+
+      // V-3b：**非键值类**（sk-/pha_/ghp_）的 redact 替换也要换掉原值。
+      // ⚠️ 2026-10-28 变异自查发现：这一支原来**没有任何断言覆盖**——
+      // 把 redactSecrets 里的 `return '<已脱敏>'` 改成 `return text`（sk-/pha_/ghp_ 走这支），
+      // 620 条 selftest 与 22 项独立断言**全绿**，可原值原样留在输出里（安全漏洞）。
+      // 键值类（密码：xxx）走的是另一个分支，覆盖到了；这三类漏了。补上。
+      for (const [text, secret, label] of [
+        ['token sk-abcdefgh12345', 'sk-abcdefgh12345', 'sk-'],
+        ['key pha_abc123def', 'pha_abc123def', 'pha_'],
+        ['pat ghp_abcdefghij1234567', 'ghp_abcdefghij1234567', 'ghp_'],
+      ]) {
+        const red = core.redactSecrets(text)
+        ok(`V-3b redact·${label}：原值被换掉`, !red.includes(secret), red)
+        ok(`V-3b redact·${label}：结果是占位符`, red.includes('<已脱敏>'), red)
+      }
+    }
+
+    // V-3c：**四个扫描列都要扫**（内容/环境/原因/备注）。
+    // ⚠️ 2026-10-28 变异自查发现：把 SECRET_SCAN_COLUMNS 去掉「备注」列，
+    // 626 条 selftest 全绿——秘密扫描的列覆盖当时完全没测。补上。
+    {
+      const cols = core.SECRET_SCAN_COLUMNS
+      ok('V-3c 扫描列包含 内容/环境/原因/备注 四列',
+        ['内容', '环境', '原因', '备注'].every((c) => cols.includes(c)), JSON.stringify(cols))
+      for (const c of ['内容', '环境', '原因', '备注']) {
+        const row = {}
+        for (const k of cols) row[k] = ''
+        row[c] = '密码：SECRETIN' + c
+        const g = core.guardSecrets(row, { mode: 'reject' })
+        ok(`V-3c **${c} 列里的明文凭据能被扫出来**`, g.hit === true && g.columns.includes(c), JSON.stringify(g.columns))
+      }
+      {
+        const clean = {}
+        for (const k of cols) clean[k] = '普通文字'
+        const g = core.guardSecrets(clean, { mode: 'reject' })
+        ok('V-3c 四列都干净 → 不报命中（反控）', g.hit === false, JSON.stringify(g))
+      }
     }
 
     // V-4 合并路径
