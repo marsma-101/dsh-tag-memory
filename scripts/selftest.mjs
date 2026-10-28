@@ -4325,6 +4325,99 @@ try {
     }
   } catch (e) { fail++; results.push("FAIL  V. 脱敏闸 — " + String(e?.stack ?? e)) }
 
+  // ── W. 0.3.4 卡2：importMap 配置化（kmvrg9upml2dr）──────────────────
+  try {
+    const core = store.getCore()
+    const schema0 = store.loadSchema()
+
+    // W-1 schema 里有 importMap 段，格式对
+    {
+      ok('W-1 tags.schema.json 里有 importMap 段（与 rules 平级）',
+        schema0.importMap !== undefined && typeof schema0.importMap === 'object')
+      ok('W-1 importMap.map 里键是字典名、值是「来源值→目标值」表',
+        (() => {
+          const m = schema0.importMap?.map ?? {}
+          return m['稳定性']?.['固定'] === '稳定' && m['依据']?.[''] === '推断' && m['距离']?.[''] === '按需'
+        })(), JSON.stringify(schema0.importMap?.map ?? {}).slice(0, 120))
+      ok('W-1 onUnknown 有值（keep/blank/reject 三选一）',
+        ['keep', 'blank', 'reject'].includes(String(schema0.importMap?.onUnknown)))
+    }
+
+    // W-2 applyImportMap 基本行为
+    {
+      const a = core.applyImportMap(schema0, { 稳定性: '固定', 依据: '', 距离: '', 深度: '', 状态: '' })
+      ok('W-2 稳定性=固定 → 稳定', a.fields.稳定性 === '稳定')
+      ok('W-2 空值按表补齐（依据/距离/深度/状态）',
+        a.fields.依据 === '推断' && a.fields.距离 === '按需' && a.fields.深度 === '情景' && a.fields.状态 === '生效')
+      ok('W-2 改造记录逐条列出（字段/原值/新值）',
+        a.changes.length === 5 && a.changes.every((c) => c.字段 !== undefined && c.新值 !== undefined))
+      // 全合规 → 零改造（幂等）
+      const b = core.applyImportMap(schema0, { 稳定性: '稳定', 依据: '原话', 距离: '常驻', 深度: '程序', 状态: '被取代' })
+      ok('W-2 已合规的行零改造（幂等，不会二次改）', b.changes.length === 0, JSON.stringify(b.fields))
+    }
+
+    // W-3 onUnknown 三种处置
+    {
+      const mkSchema = (onUnknown) => {
+        const s = JSON.parse(JSON.stringify(schema0))
+        s.importMap = { ...s.importMap, onUnknown }
+        return s
+      }
+      const keep = core.applyImportMap(mkSchema('keep'), { 稳定性: '怪值' })
+      ok('W-3 onUnknown=keep：未知值原样保留', keep.fields.稳定性 === '怪值' && keep.rejected === '')
+      const blank = core.applyImportMap(mkSchema('blank'), { 稳定性: '怪值' })
+      ok('W-3 onUnknown=blank：未知值清空', blank.fields.稳定性 === '' && blank.rejected === '')
+      const rej = core.applyImportMap(mkSchema('reject'), { 稳定性: '怪值' })
+      ok('W-3 onUnknown=reject：未知值拒绝并说明', rej.rejected !== '' && /importMap|来源值/.test(rej.rejected), rej.rejected.slice(0, 60))
+    }
+
+    // W-4 importMap 为空 / 不存在 → 行为与现在一致（向后兼容）
+    {
+      const noMap = JSON.parse(JSON.stringify(schema0))
+      delete noMap.importMap
+      const r = core.applyImportMap(noMap, { 稳定性: '固定', 依据: '' })
+      ok('W-4 importMap 不存在时什么都不做（向后兼容）',
+        r.fields.稳定性 === '固定' && r.fields.依据 === '' && r.changes.length === 0)
+      const emptyMap = JSON.parse(JSON.stringify(schema0))
+      emptyMap.importMap = { map: {}, onUnknown: 'keep' }
+      const r2 = core.applyImportMap(emptyMap, { 稳定性: '固定' })
+      ok('W-4 importMap.map 为空时什么都不做', r2.fields.稳定性 === '固定' && r2.changes.length === 0)
+    }
+
+    // W-5 汇总改造统计
+    {
+      const all = [
+        { 字段: '稳定性', 原值: '固定', 新值: '稳定' },
+        { 字段: '稳定性', 原值: '固定', 新值: '稳定' },
+        { 字段: '依据', 原值: '', 新值: '推断' },
+      ]
+      const sum = core.summarizeImportChanges(all)
+      ok('W-5 汇总能报「改造了哪几列、各多少条」',
+        sum['稳定性']?.['固定→稳定'] === 2 && sum['依据']?.['(空)→推断'] === 1, JSON.stringify(sum))
+    }
+
+    // W-6 **只在导入路径生效**：memory_write 走 appendEntry，不被 importMap 改
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-w6-'))
+      const csv = join(box, 'memory.csv')
+      writeFileSync(csv, readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv')))
+      const lock = join(box, '.lock')
+      // 用一个**映射表里没有的合法值**（观察）来测：如果 importMap 误接到写入路径，
+      // 它不会改「观察」（表里只有 固定→稳定），所以「原样保留」能证明写入路径没走映射。
+      // 用「固定」不行——字典里已经没有这个值了，validateRow 会先拦下来（这本身也说明
+      // 「旧值只能靠导入映射处理，正常写入本来就该被拦」）。
+      const id = core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: {
+        内容: '写入路径不该被导入映射改', 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+        稳定性: '观察', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest' } })
+      const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      const row = t.rows.find((r) => r[0] === id)
+      ok('W-6 memory_write 写入的「稳定性=观察」原样保留（导入映射不碰正常写入）',
+        String(row[t.header.indexOf('稳定性')]).trim() === '观察',
+        String(row[t.header.indexOf('稳定性')]))
+      rmSync(box, { recursive: true, force: true })
+    }
+  } catch (e) { fail++; results.push("FAIL  W. importMap — " + String(e?.stack ?? e)) }
+
   const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
       ok('U-3 js-yaml 声明在 dependencies（不是只靠开发环境恰好有）',
         pkg.dependencies !== undefined && typeof pkg.dependencies['js-yaml'] === 'string',

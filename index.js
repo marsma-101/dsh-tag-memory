@@ -1026,9 +1026,22 @@ function mergeFrom(body) {
 
   // ② 逐行判
   const items = [] // { kind, fields, id, why }
+  /** 导入映射实际发生的改造（逐条），最后汇总进报告 */
+  const importChanges = []
   for (const r of irows) {
     if (!r[0] || String(r[0]).trim() === '') continue // 空行 / 纯空白
     const fields = rowToFields(core, schema, ih, r)
+
+    // 导入期标签映射（卡 kmvrg9upml2dr）：按 `schema.importMap` 改标签。
+    // **只在这里做**——`memory_write` 走 appendEntry，不经过 mergeFrom，
+    // 所以模型正常写记忆时不会被这张表悄悄改掉（用例钉住这一点）。
+    const mapped = core.applyImportMap(schema, fields)
+    if (mapped.rejected !== '') {
+      items.push({ kind: 'invalid', id: fields.id ?? '', why: mapped.rejected, preview: preview(fields.内容) })
+      continue
+    }
+    Object.assign(fields, mapped.fields)
+    for (const c of mapped.changes) importChanges.push({ ...c, id: fields.id ?? '' })
     // 来源库没有 `类型` 列 —— 迁移前的老库（含别的机器上的库）。这类库里的条目
     // 都是「从对话里提炼的结论」，正是 `记忆` 的定义，所以按 `记忆` 落。
     // 不兜这一下的话，并进来的行 `类型` 全是空的 —— 而留白=黑名单，一按 `类型` 筛，
@@ -1124,6 +1137,8 @@ function mergeFrom(body) {
       idCollision: newItems.filter((i) => i.why !== '').length,
       invalid: items.filter((i) => i.kind === 'invalid').length,
       secret: items.filter((i) => i.kind === 'secret').length,
+      // 导入映射改了多少条（卡 kmvrg9upml2dr）——预演时就报出来，别等落库才发现标签被改
+      importMapped: importChanges.length,
       tagDiff: tagDiffs.length,
     },
     newList: newItems.slice(0, 50).map((i) => ({
@@ -1142,6 +1157,9 @@ function mergeFrom(body) {
     })),
     invalidList: items.filter((i) => i.kind === 'invalid').slice(0, 50).map((i) => ({ id: i.id, why: i.why, preview: i.preview ?? '' })),
     // 脱敏闸拦下的那些：**点名**，不静默丢——用户要知道「有 N 条因为含凭据没进来」
+    // 导入映射改造明细：`{ 稳定性: { "固定→稳定": 59 }, 依据: { "(空)→推断": 124 } }`
+    // 人能一眼看出「这张表实际改了什么、各多少条」，不用去数。
+    importApplied: core.summarizeImportChanges(importChanges),
     secretList: items.filter((i) => i.kind === 'secret').slice(0, 50).map((i) => ({
       id: i.id, why: i.why, preview: i.preview ?? '', secrets: i.secrets ?? [], columns: i.columns ?? [],
     })),
