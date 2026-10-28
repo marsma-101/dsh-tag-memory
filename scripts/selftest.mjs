@@ -4482,6 +4482,99 @@ try {
     }
   } catch (e) { fail++; results.push("FAIL  X. autoFill — " + String(e?.stack ?? e)) }
 
+  // ── Y. 0.3.4 卡4：Markdown 导入器（kmvrga9wrqyvd）──────────────────
+  try {
+    const core = store.getCore()
+    const schema0 = store.loadSchema()
+    const importer = await import(pathToFileURL(join(PKG, 'importers', 'memory-md.mjs')).href)
+
+    // Y-1 产物表头与字典表头逐字一致
+    {
+      const tplHeader = readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv'), 'utf8').split('\n')[0].split(',')
+      ok('Y-1 导入器 HEADER 与字典表头逐字一致（21 列）',
+        importer.HEADER.length === 21 && importer.HEADER.join(',') === tplHeader.join(','),
+        `导入器 ${importer.HEADER.length} / 字典 ${tplHeader.length}`)
+    }
+
+    // Y-2 解析 MEMORY.md 各种形态
+    {
+      const md = [
+        '# 标题',
+        '',
+        '## 分节一',
+        '',
+        '- 列表项一 [source: part 1 #24; by: Chief; added: 2026-10-23]',
+        '* 列表项二',
+        '1. 列表项三',
+        '',
+        '无标记的段落文字。',
+        '',
+      ].join('\n')
+      const entries = importer.parseMemoryMd(md)
+      ok('Y-2 能解析列表项（-/星号/数字三种标记）', entries.length >= 3, `解析出 ${entries.length} 条`)
+      const first = entries[0]
+      ok('Y-2 元信息抽取：added: → 时间', first.时间 === '2026-10-23', first.时间)
+      ok('Y-2 元信息抽取：by: → 角色', first.角色 === 'Chief', first.角色)
+      ok('Y-2 source 标记被从正文里剥掉（内容不含 [source:）',
+        !String(first.内容).includes('[source'))
+      ok('Y-2 无标记段落也能成条', entries.some((e) => String(e.内容).includes('无标记的段落')))
+    }
+
+    // Y-3 产物列数正确、能过 validateRow
+    {
+      const entries = importer.parseMemoryMd('- 一条测试记忆\n- 另一条\n')
+      const res = importer.toCsv(entries, { project: '测试项目', now: '2026-10-28' })
+      const lines = res.csv.split('\n').filter((l) => l.trim() !== '')
+      ok('Y-3 产物行数 = 表头 + 条目数', lines.length === entries.length + 1, `${lines.length}`)
+      ok('Y-3 每条数据行的列数与表头一致（21 列）',
+        lines.slice(1).every((l) => l.split(',').length === 21), lines[1]?.split(',').length)
+      // 逐行过 validateRow（卡片判据：输出必须能通过校验）
+      const parsed = core.readTable(res.csv, 0)
+      const resolveY = core.makeResolver(schema0, parsed.header)
+      const bad = []
+      for (const row of parsed.rows) {
+        const fields = {}
+        for (const name of Object.keys({ ...schema0.dimensions, ...schema0.auxiliary })) {
+          const i = resolveY(name)
+          fields[name] = i >= 0 ? String(row[i] ?? '') : ''
+        }
+        for (const col of ['内容', '时间', '环境', '原因', '备注']) {
+          const i = parsed.header.indexOf(col)
+          fields[col] = i >= 0 ? String(row[i] ?? '') : ''
+        }
+        fields.id = String(row[0] ?? '')
+        const v = core.validateRow(schema0, fields)
+        if (!v.ok) bad.push(`${fields.id}: ${v.errors.join('；').slice(0, 40)}`)
+      }
+      ok('Y-3 产物每一行都能通过 validateRow（不合格的行会标出来，不静默丢）',
+        bad.length === 0, bad.slice(0, 2).join(' | '))
+    }
+
+    // Y-4 内容为空的条目不静默丢
+    {
+      const res = importer.toCsv([{ 内容: '正常' }, { 内容: '   ' }], { now: '2026-10-28' })
+      ok('Y-4 空内容条目被记进 skipped（不静默丢）',
+        res.skipped.length === 1 && res.rows === 1, JSON.stringify(res.skipped))
+    }
+
+    // Y-5 **转换器不碰库**：源码里不出现任何写库/落库调用
+    {
+      const raw = readFileSync(join(PKG, 'importers', 'memory-md.mjs'), 'utf8')
+      // 只看**代码**，不看注释与字符串——导入器的注释/提示文案里会提到 mergeFrom（说明分工），
+      // 那不算写库调用。剥注释用「块注释」+「行内 // 到行尾」，再剥单双引号与模板字符串。
+      const src = raw
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(^|[^:])\/\/.*$/gm, '$1')
+        .replace(/'[^'\n]*'/g, "''")
+        .replace(/`[^`]*`/g, '``')
+      const hitLine = (src.match(/.*(appendEntry|mergeFrom).*/) ?? [''])[0]
+      ok('Y-5 导入器不直接写库（代码里无 appendEntry / mergeFrom 调用）',
+        !/appendEntry|supersedeEntry|mergeFrom/.test(src), '代码里出现了写库调用：' + hitLine.slice(0, 60))
+      ok('Y-5 导入器只写 CSV 产物（writeFileSync 仅用于输出文件）',
+        /writeFileSync\(outPath/.test(src))
+    }
+  } catch (e) { fail++; results.push("FAIL  Y. Markdown 导入器 — " + String(e?.stack ?? e)) }
+
   const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
       ok('U-3 js-yaml 声明在 dependencies（不是只靠开发环境恰好有）',
         pkg.dependencies !== undefined && typeof pkg.dependencies['js-yaml'] === 'string',
