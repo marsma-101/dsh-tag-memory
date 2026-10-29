@@ -5108,6 +5108,16 @@ try {
           const iSrc = readFileSync(join(PKG, 'index.js'), 'utf8')
           ok('G-8 强档拒绝话术说明换正门、不需要绕过', /不需要绕过/.test(iSrc) && /正门工具/.test(iSrc))
           ok('G-8 强档拒绝话术说明正门做不到时把需求说出来', /把需求说出来/.test(iSrc))
+
+          // notice 也是每轮随 persona 注入的入口（2026-10-30 补）：正门句必须排在库文件路径之前。
+          // 断言必须落在**真实渲染结果**上：源码里有函数默认参数 tools=[...]、还有注释，
+          // 按源码搜位置会命中默认参数而不是渲染文本——第一版就这么假绿过（变异不红）。
+          const nBody = notice.renderNotice()
+          const iTool = nBody.indexOf('memory_write')
+          const iCsv = nBody.indexOf('store/memory.csv')
+          ok('G-8 notice 里读写正门排在库文件路径之前', iTool > 0 && (iCsv < 0 || iTool < iCsv), JSON.stringify({ iTool, iCsv }))
+          ok('G-8 notice 写明不要用 read/cat/grep 开库', /不要用 read/.test(nBody))
+
         }
 
         // ⑪ G-9 端到端：模拟「新智能体第一次上手」——只给 schema + 工具列表，不给额外上下文。
