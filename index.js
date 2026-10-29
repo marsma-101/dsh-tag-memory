@@ -125,8 +125,9 @@ function pathTokens(text) {
  * @param {unknown} args
  * @param {string[]} bases  规范化后的数据目录（normPath(DATA_DIR)）
  */
-function touchesDataDir(args, bases) {
+function touchesDataDir(args, bases, opts = {}) {
   if (!Array.isArray(bases) || bases.length === 0) return false
+  const skip = Array.isArray(opts.skipKeys) ? opts.skipKeys : []
   // 先找 cwd 字段：工具调用带 cwd 时，相对路径按它解析，不是按进程 cwd
   let cwdBase = ''
   const findCwd = (node, key) => {
@@ -146,6 +147,7 @@ function touchesDataDir(args, bases) {
   const walk = (node, key) => {
     if (typeof node === 'string') {
       if (key === 'cwd') return false
+      if (skip.includes(key)) return false
       if (GUARD_PATH_KEYS.includes(key)) return inBase(node)
       return pathTokens(node).some((t) => inBase(t))
     }
@@ -158,6 +160,78 @@ function touchesDataDir(args, bases) {
 
 /** 插件自己的工具：合法通道，不经过这条管线，必须豁免。 */
 const GUARD_EXEMPT_TOOLS = ['memory_write', 'memory_recall', 'memory_supersede', 'memory_mark_used', 'memory_archive', 'memory_review', 'memory_export']
+
+/**
+ * shell 类工具：命令文本里出现「数据目录唯一特征段」就强拦（子串兜底）。
+ *
+ * 为什么 shell 不用路径解析判据（P1 教训）：shell 的写法是无穷的——变量中转
+ * （`P=数据目录; cat $P/store/memory.csv`）、反斜杠转义、glob 通配，解析式判据
+ * 提取不到路径就放行，而这些命令真执行时照样碰到库。旧子串判据能拦，是因为
+ * 「变量赋值那一行」里就有完整路径串。解析式判据漏在「解析不了」，兜底式子串
+ * 判据只误伤——误伤能靠话术引导，漏拦是安全洞。
+ */
+function globToRegex(tok) {
+  let re = ''
+  for (const ch of tok) {
+    if (ch === '*') re += '.*'
+    else if (ch === '?') re += '.'
+    else if (ch === '[') re += '['
+    else if (ch === ']') re += ']'
+    else re += ch.replace(/[.+^${}()|\\\/]/g, '\\$&')
+  }
+  try { return new RegExp('^' + re + '$') } catch { return null }
+}
+
+function globTokenHits(tok, dataDirText) {
+  if (!/[*?[]/.test(tok)) return false      // 无通配交给子串/解析判据，glob 兜底不管
+  const rx = globToRegex(tok)
+  if (rx === null) return true              // 编译不了 → 保守拦
+  const samples = [dataDirText]
+  for (const seg of ['store', 'store/memory.csv', 'store/.append.lock', 'references', 'references/tags.schema.json']) {
+    samples.push(dataDirText + '/' + seg)
+  }
+  return samples.some((s) => rx.test(s))
+}
+
+/**
+ * 子串兜底里「路径出现处」的边界判定：dataDirText 出现处的后一个字符必须是路径边界
+ * （子路径 /、空白、shell 元字符、引号、行尾）才算命中；紧跟名字字符（字母数字 _ - .）
+ * 说明是同前缀兄弟目录（数据目录名-backup / 数据目录名.md），不算。
+ * 另把 `\/` 归一化成 `/`：bash 里反斜杠转义的斜杠就是斜杠本身，纯读 `cat \/路径`
+ * 文本里不含真实路径子串，必须归一化才抓得住。
+ */
+function subStrHitsPath(text, dataDirText) {
+  const norm = String(text).replace(/\\\//g, '/')
+  let i = norm.indexOf(dataDirText)
+  while (i !== -1) {
+    const after = norm[i + dataDirText.length]
+    if (after === undefined || !/[A-Za-z0-9_.-]/.test(after)) return true
+    i = norm.indexOf(dataDirText, i + dataDirText.length)
+  }
+  return false
+}
+
+function shellCommandTouchesDataDir(args, dataDirText) {
+  if (typeof dataDirText !== 'string' || dataDirText === '') return false
+  const walk = (node) => {
+    if (typeof node === 'string') {
+      // ① 路径子串 + 边界（反斜杠已归一化）：变量赋值那行 P=<完整路径> 兜得住 $P/${P}/export/反斜杠
+      if (subStrHitsPath(node, dataDirText)) return true
+      // ② glob 兜底：通配 token 能匹配到库内路径（tag-*memory、/*/store/memory.csv、mem*.csv）
+      const toks = node.split(/[\s;|&<>()`"']+/).filter(Boolean)
+      return toks.some((t) => globTokenHits(t, dataDirText))
+    }
+    if (Array.isArray(node)) return node.some(walk)
+    if (node && typeof node === 'object') return Object.values(node).some(walk)
+    return false
+  }
+  return walk(args)
+}
+
+/** 是不是 shell 类工具（名字含 shell/bash/exec/run_command/terminal）。 */
+function isShellTool(toolName) {
+  return /(shell|bash|exec|run_command|terminal)/.test(String(toolName ?? '').toLowerCase())
+}
 
 /**
  * 写类工具：参数里出现**任何** needle 都拦（保持现状的严格）。
@@ -408,7 +482,21 @@ export function apply(ctx, config = {}) {
         const args = exec?.arguments
 
         // ① 强档：路径落在数据目录内，无论读写都拦
-        if (touchesDataDir(args, guardN.strong)) {
+        //    shell 类工具：命令文本子串兜底（P1——变量中转/反斜杠/glob 解析不了，只能兜底）；
+        //    非 shell 工具：结构化路径字段做规范化前缀判定（P0——区分「提到名字」和「指向目录」）。
+        //    write/edit 的 content 字段在两条路径上都跳过（正文引库路径是正当写作）。
+        const strongSkip = (toolName === 'write' || toolName === 'edit') ? WRITE_CONTENT_KEYS : []
+        if (isShellTool(toolName)) {
+          // shell 三件套 OR，缺一都有洞（P1 三轮教训）：
+          // ① 子串兜底：抓 $P/${P}/export/反斜杠（变量赋值那行含完整路径）
+          // ② glob 判定：通配 token 能匹配到库内路径（tag-*memory、/*/store/memory.csv）
+          // ③ 路径解析：realpath 解符号链接（命令文本里没有真实路径、只有链接名）
+          // shell 的 command 是命令不是正文 → 不传 skipKeys。
+          if (shellCommandTouchesDataDir(args, guardN.strong[0] ?? '')
+            || touchesDataDir(args, guardN.strong)) {
+            return Promise.resolve({ kind: 'deny', reason: guardDenialReason('strong') })
+          }
+        } else if (touchesDataDir(args, guardN.strong, { skipKeys: strongSkip })) {
           return Promise.resolve({ kind: 'deny', reason: guardDenialReason('strong') })
         }
         // ② 弱 needle：只在写类工具上拦；读类工具（read/glob/grep 等）放行

@@ -4987,6 +4987,71 @@ try {
           store.setLibraryDir(skill)
           rmSync(box6, { recursive: true, force: true })
         }
+
+        // ⑨ G-7 布局 B：shell 三件套（P1 安全回归断言）。
+        //    P0 换判据后，shell 层改回子串兜底 + glob 兜底 + 路径解析（realpath）三件套 OR。
+        //    每件各自抓一类写法，缺一件就漏：
+        //      子串兜底 → 变量中转 $P/${P}/export（赋值行含完整路径）
+        //      子串兜底 + 反斜杠归一 → \/ 转义
+        //      glob 兜底 → tag-*memory / /*/store/memory.csv 通配
+        //      路径解析 → 符号链接（命令文本里没有真实路径，只有链接名）
+        //    同时钉住边界：同前缀兄弟目录不能被子串误伤（P0 同款坑的反向形态）。
+        {
+          const box7 = mkdtempSync(join(tmpdir(), 'tm-g7-'))
+          const skill7 = join(box7, PLUG)
+          mkdirSync(join(skill7, 'references'), { recursive: true })
+          mkdirSync(join(skill7, 'store'), { recursive: true })
+          copyFileSync(join(PKG, 'lib', 'engine', 'tags.schema.json'), join(skill7, 'references', 'tags.schema.json'))
+          writeFileSync(join(skill7, 'store', 'memory.csv'), TPL6)
+          writeFileSync(join(skill7, 'store', 'index.md'), '# i\n')
+
+          store.setLibraryDir(skill7)
+          let listener7 = null
+          const gctx7 = {
+            logger: {},
+            get: () => undefined,
+            webServer: { register: () => () => {} },
+            on: (ev, fn) => { if (ev === 'tools/pre-execute') listener7 = fn; return () => {} },
+          }
+          const idxG7 = await import(pathToFileURL(join(PKG, 'index.js')).href + '?g7=' + Date.now())
+          idxG7.apply(gctx7, { presetRoot: join(box7, 'pr7'), notice: false })
+          ok('G-7 布局 B：守卫挂上了 tools/pre-execute', typeof listener7 === 'function')
+
+          const ask7 = async (name, args) => {
+            const r = await listener7({ name, arguments: args }, () => Promise.resolve({ kind: 'allow' }))
+            return r.kind
+          }
+          const csv7 = join(skill7, 'store', 'memory.csv')
+          const escaped7 = csv7.replace(/\//g, '\\/')
+          const link7 = join(box7, 'lk7')
+          symlinkSync(skill7, link7, 'dir')
+
+          // ① 变量中转：赋值行含完整路径，子串兜底拦
+          ok('G-7 布局 B：变量赋值 $P → 拦', await ask7('bash', { command: 'P=' + skill7 + '; cat $P/store/memory.csv' }) === 'deny')
+          ok('G-7 布局 B：变量赋值 ${P} → 拦', await ask7('bash', { command: 'P=' + skill7 + '; cat ${P}/store/memory.csv' }) === 'deny')
+          ok('G-7 布局 B：export 后引用 → 拦', await ask7('bash', { command: 'export P=' + skill7 + '; cat $P/store/memory.csv' }) === 'deny')
+          // ② 反斜杠转义：纯读形态（无重定向），子串兜底归一化 \/ 拦
+          ok('G-7 布局 B：反斜杠转义纯读 → 拦', await ask7('bash', { command: 'cat ' + escaped7 }) === 'deny')
+          // ③ glob 通配：token 能匹配库内路径
+          ok('G-7 布局 B：glob 取目录 + 重定向写 → 拦',
+            await ask7('bash', { command: 'V=$(ls -d ' + join(box7, 'tag-*memory') + '); echo x >> $V/store/memory.csv' }) === 'deny')
+          ok('G-7 布局 B：命令替换双层 → 拦',
+            await ask7('bash', { command: 'echo x >> $(ls -d ' + join(box7, 'tag-*memory') + ')/store/memory.csv' }) === 'deny')
+          ok('G-7 布局 B：glob 库内文件 → 拦',
+            await ask7('bash', { command: 'cat ' + join(skill7, 'store', 'mem*.csv') }) === 'deny')
+          // ④ 符号链接经 shell：路径解析 realpath 拦
+          ok('G-7 布局 B：符号链接经 shell 读库 → 拦',
+            await ask7('bash', { command: 'cat ' + join(link7, 'store', 'memory.csv') }) === 'deny')
+          // ⑤ 边界：同前缀兄弟目录不能被子串兜底误伤
+          ok('G-7 布局 B：同前缀兄弟目录 ls → 放行（子串兜底有边界，不误伤）',
+            await ask7('bash', { command: 'ls -la ' + join(box7, PLUG + '-backup') }) === 'allow')
+          // ⑥ 兜底不误伤普通命令 / 不指库的通配
+          ok('G-7 布局 B：普通读 /etc/hosts → 放行', await ask7('bash', { command: 'cat /etc/hosts' }) === 'allow')
+          ok('G-7 布局 B：通配不指库 → 放行', await ask7('bash', { command: 'ls /tmp/*.log' }) === 'allow')
+
+          store.setLibraryDir(skill)
+          rmSync(box7, { recursive: true, force: true })
+        }
       } finally {
         store.setLibraryDir(savedDir)
         rmSync(box, { recursive: true, force: true })
