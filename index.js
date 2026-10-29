@@ -304,7 +304,7 @@ export function apply(ctx, config = {}) {
         }
         return next()
       })
-      log(`[tag-memory] 隔离守卫生效（needle ${needles.length} 条；逃生口 DSH_TAG_MEMORY_GUARD=off）`)
+      log(`[tag-memory] 隔离守卫生效（强 needle ${guardN.strong.length} 条 / 弱 needle ${guardN.weak.length} 条；逃生口 DSH_TAG_MEMORY_GUARD=off）`)
     } catch (e) {
       // 挂不上不能装作守住了：这条必须出声，否则用户以为库是保护着的。
       log(`[tag-memory] ⚠ 隔离守卫没挂上，库对 fs/shell 工具是敞开的：${String(e?.message ?? e)}`)

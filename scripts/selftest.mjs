@@ -4806,6 +4806,37 @@ try {
         const weakDeny = await listener({ name: 'bash', arguments: { command: 'ls /' + PLUG } }, () => Promise.resolve({ kind: 'allow' }))
         ok('G-4 弱 needle 拒绝话术提示「读类工具放行」与「内容字段不再扫」',
           /读类工具/.test(weakDeny.reason) || /read/.test(weakDeny.reason))
+
+        // ⑦ **挂载日志不许假警报**（0.3.6 实测抓到的真缺陷）
+        //    背景：守卫挂载成功后那行 log 里变量名漏改（needles → guardN），
+        //    抛 ReferenceError 被下面的 catch 吞掉，于是 catch 里的
+        //    「⚠ 隔离守卫没挂上，库对 fs/shell 工具是敞开的」被打印出来——
+        //    **守卫其实挂上了，日志却说没挂上**。这是安全告警，假警报比没警报更坏：
+        //    运维会去查一个不存在的问题，久了就不信这条告警了。
+        //    而 659 条 selftest 当时全绿，一条都没覆盖到。
+        {
+          const logLines = []
+          let listener2 = null
+          const gctx2 = {
+            logger: {
+              info: (m) => logLines.push(String(m)),
+              warn: (m) => logLines.push(String(m)),
+              error: (m) => logLines.push(String(m)),
+            },
+            get: () => undefined,
+            webServer: { register: () => () => {} },
+            on: (ev, fn) => { if (ev === 'tools/pre-execute') listener2 = fn; return () => {} },
+          }
+          const idxG2 = await import(pathToFileURL(join(PKG, 'index.js')).href + '?g2=' + Date.now())
+          idxG2.apply(gctx2, { presetRoot: join(box, 'pr2'), notice: false })
+          const joined = logLines.join('\n')
+          ok('G-5 守卫挂载成功时，日志里不能出现「没挂上」', !/没挂上/.test(joined), joined.slice(0, 200))
+          ok('G-5 守卫挂载成功时，日志要报出「守卫生效」', /隔离守卫生效/.test(joined), joined.slice(0, 200))
+          ok('G-5 生效日志要报出 needle 条数（强/弱两档）',
+            /强 needle \d+ 条/.test(joined) && /弱 needle \d+ 条/.test(joined), joined.slice(0, 200))
+          ok('G-5 挂载日志里不许出现未定义变量名（ReferenceError 会被 catch 吞成假警报）',
+            !/is not defined/.test(joined), joined.slice(0, 200))
+        }
       } finally {
         store.setLibraryDir(savedDir)
         rmSync(box, { recursive: true, force: true })
