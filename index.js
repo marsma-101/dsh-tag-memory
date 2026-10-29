@@ -101,10 +101,63 @@ const GUARD_EXEMPT_TOOLS = ['memory_write', 'memory_recall', 'memory_supersede',
  *   · 名字含 `shell` / `bash` / `exec` 的工具 —— 命令文本里可以 `> 库文件`、`sed -i`、`rm`
  * 其余一律按读类处理。
  */
-function isWriteTool(toolName) {
+function isWriteTool(toolName, args) {
   const n = String(toolName ?? '').toLowerCase()
   if (n === 'write' || n === 'edit') return true
-  if (/(shell|bash|exec|run_command|terminal)/.test(n)) return true
+  if (/(shell|bash|exec|run_command|terminal)/.test(n)) {
+    // **shell 要按命令本身判读写，不能整个工具一刀切**（谢雨建议2：`ls` / `grep` / `cat`
+    // 是读类，`rm` / `mv` / `sed -i` / 重定向才是写类）。
+    // 一刀切的代价：`ls 看目录结构` 也被拦，而它一个字节都改不了库。
+    return shellCommandIsWrite(args)
+  }
+  return false
+}
+
+/**
+ * 这条 shell 命令**看起来会不会写**？
+ *
+ * 判据是「命令里有没有写意图」，宁可多拦也不放过真正的写：
+ *   · 重定向 `>`（含 `>>`）——注意排除 `2>&1` 这种只重定向文件描述符的
+ *   · 破坏性命令：rm / mv / cp / dd / truncate / chmod / chown / mkdir / rmdir / tee / install / ln
+ *   · 就地编辑：`sed -i` / `perl -i` / `awk -i inplace`
+ *   · 写文件类：`> file`、`tee`、`touch`
+ * 命中任一条 → 按写类工具处理（参数里出现任何 needle 都拦）。
+ * 否则按读类处理（只拦强 needle）。
+ *
+ * **为什么不是「白名单读命令」**：shell 能拼出无穷多种写法，白名单一定漏。
+ * 反过来按「写意图」黑名单，漏的是「我没想到的写命令」——所以这里偏向保守：
+ * 认不出来的、含 shell 元字符的，一律当写。
+ */
+function shellCommandIsWrite(args) {
+  // 取出命令文本：命令可能在 `command` / `cmd` / `args`（数组）里
+  const texts = []
+  const collect = (node) => {
+    if (typeof node === 'string') { texts.push(node); return }
+    if (Array.isArray(node)) { node.forEach(collect); return }
+    if (node && typeof node === 'object') Object.values(node).forEach(collect)
+  }
+  collect(args)
+  const cmd = texts.join(' \n ')
+  if (cmd.trim() === '') return true   // 拿不到命令文本：按写处理（保守）
+
+  // ① 重定向：`>` / `>>`，但排除 `2>&1` / `>&2` 这类 fd 重定向
+  //    先用占位符替换掉 fd 重定向，再找剩下的 `>`
+  const noFd = cmd.replace(/\d?>&\d/g, '').replace(/&>\s*\/dev\/null/g, '')
+  if (/>/.test(noFd)) return true
+
+  // ② 破坏性 / 写类命令
+  const WRITE_CMDS = /(^|[\s;&|()`])(rm|rmdir|mv|cp|dd|truncate|tee|touch|mkdir|ln|install|chmod|chown|chgrp|shred|unlink)\b/
+  if (WRITE_CMDS.test(cmd)) return true
+
+  // ③ 就地编辑
+  if (/\bsed\b[^|;]*\s-i/.test(cmd)) return true
+  if (/\bperl\b[^|;]*\s-i/.test(cmd)) return true
+  if (/\bawk\b[^|;]*-i\s+inplace/.test(cmd)) return true
+
+  // ④ 认不出来的复杂写法：含 `>` 已在上处理；这里再兜一层「命令替换 / eval」
+  if (/\$\(|`|\beval\b/.test(cmd)) return true
+
+  // 其余按读类：`ls` / `grep` / `cat` / `head` / `tail` / `find` / `stat` / `file` / `sha256sum` …
   return false
 }
 
@@ -287,7 +340,7 @@ export function apply(ctx, config = {}) {
         // ── 分级判定（建议2/3）──────────────────────────────
         // 强 needle（真实数据路径）→ 读写都拦：碰到真库就该拦。
         // 弱 needle（插件/目录名）→ 只拦写类工具；读类工具放行。
-        const writeTool = isWriteTool(toolName)
+        const writeTool = isWriteTool(toolName, exec?.arguments)
         const args = exec?.arguments
 
         // ① 强 needle：无论读写，命中就拦

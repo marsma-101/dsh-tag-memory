@@ -4777,8 +4777,24 @@ try {
           await ask('grep', { pattern: PLUG }) === 'allow')
 
         // ③ 弱 needle + 写类工具 → 拦
-        ok('G-4 只出现弱 needle + bash 工具 → 拦',
-          await ask('bash', { command: 'ls /' + PLUG }) === 'deny')
+        //    **shell 按命令本身判读写**（0.3.6）：`ls` 是读类该放行，
+        //    `rm` / 重定向 / `sed -i` 才是写类该拦。所以这里要用真写命令测。
+        ok('G-4 弱 needle + bash 写命令（rm）→ 拦',
+          await ask('bash', { command: 'rm -rf /tmp/' + PLUG }) === 'deny')
+        ok('G-4 弱 needle + bash 写命令（重定向 >）→ 拦',
+          await ask('bash', { command: 'echo x > /tmp/' + PLUG + '.txt' }) === 'deny')
+        ok('G-4 弱 needle + bash 写命令（sed -i）→ 拦',
+          await ask('bash', { command: "sed -i 's/a/b/' /tmp/" + PLUG + '.mjs' }) === 'deny')
+        // shell 读命令在弱 needle 上必须放行——这是谢雨报的核心痛点之一
+        ok('G-4 弱 needle + bash 读命令（ls）→ 放行',
+          await ask('bash', { command: 'ls /opt/dsh/plugins/' + PLUG }) === 'allow')
+        ok('G-4 弱 needle + bash 读命令（grep）→ 放行',
+          await ask('bash', { command: 'grep -n foo /opt/dsh/plugins/' + PLUG + '/index.js' }) === 'allow')
+        ok('G-4 弱 needle + bash 读命令（cat）→ 放行',
+          await ask('bash', { command: 'cat /opt/dsh/plugins/' + PLUG + '/package.json' }) === 'allow')
+        // 但真库路径（强 needle）下，读命令照样拦——保护不能松
+        ok('G-4 强 needle + bash 读命令（cat 真库）→ 拦',
+          await ask('bash', { command: 'cat ' + strongPath }) === 'deny')
 
         // ④ **核心变化**：write 的 content 字段不扫
         ok('G-4 write 的 content 含插件名、file_path 干净 → 放行（核心变化）',
@@ -4803,7 +4819,7 @@ try {
           /memory_recall/.test(strongDeny.reason) && /memory_export/.test(strongDeny.reason))
         ok('G-4 强 needle 拒绝话术提到「要改库」用哪些工具',
           /memory_write/.test(strongDeny.reason) && /memory_archive/.test(strongDeny.reason))
-        const weakDeny = await listener({ name: 'bash', arguments: { command: 'ls /' + PLUG } }, () => Promise.resolve({ kind: 'allow' }))
+        const weakDeny = await listener({ name: 'bash', arguments: { command: 'rm -rf /tmp/' + PLUG } }, () => Promise.resolve({ kind: 'allow' }))
         ok('G-4 弱 needle 拒绝话术提示「读类工具放行」与「内容字段不再扫」',
           /读类工具/.test(weakDeny.reason) || /read/.test(weakDeny.reason))
 
