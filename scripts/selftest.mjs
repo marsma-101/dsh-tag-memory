@@ -327,8 +327,8 @@ try {
     const preset = await import(pathToFileURL(join(PKG, 'preset.js')).href)
     preset.apply(ctx, { dir: 'C:/does/not/matter/assistant' })
     ok('preset 注册字典段', sections.length === 1 && sections[0].name === 'tag-memory:dict')
-    ok('preset 注册六个工具（write / recall / supersede / review / archive / mark_used）',
-      tools.map((t) => t.name).sort().join(',') === 'memory_archive,memory_mark_used,memory_recall,memory_review,memory_supersede,memory_write')
+    ok('preset 注册七个工具（write / recall / supersede / review / archive / mark_used / export）',
+      tools.map((t) => t.name).sort().join(',') === 'memory_archive,memory_export,memory_mark_used,memory_recall,memory_review,memory_supersede,memory_write')
     // 守卫豁免关系断言（评审卡 kmvrg9d68cfed）：preset 注册的每个 memory_* 工具都必须在守卫豁免名单里。
     // 用「注册集合 ⊆ 豁免集合」这条关系钉住，防止下次再加工具又漏。
     {

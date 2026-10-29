@@ -977,6 +977,76 @@ export function apply(ctx, config = {}) {
       },
     }),
   )
+  // ⑥ 导出整库（卡 kmvsqvncp6vwo 建议1：补齐「正门」）
+  //
+  // 为什么需要这个工具：守卫拦住了所有 fs/shell 碰库的调用，但**没有「导出整库」的正门**——
+  // 于是想做迁移/备份的人被迫去碰文件，撞墙后用「字符串拼接」这种脏手段绕行。
+  // 补齐正门比强化拦截更治本。
+  ctx.tools.register(
+    defineTool({
+      name: 'memory_export',
+      description: [
+        '把**整库**导出成文本（CSV 或 JSON），用于迁移、备份、给别的工具做输入。',
+        '与 `memory_recall` 的区别：recall 是**按条件筛出几条**、默认排除被取代/已归档；',
+        'export 是**整库序列化**——一个字节不少，被取代/已归档的行也都在里面。',
+        '【参数】`状态` 默认=全部（导出不排除任何状态，这是「整库导出」的语义，与 recall 不同）；',
+        '`格式` 默认=csv，可选 json。',
+        '【返回值开头】会明确标注这是**导出快照**（时间戳 + 行数 + 库路径）——',
+        '别把导出的内容当成「库里现在生效的东西」去做写入判断，它包含退场的行。',
+        '【不落盘】只返回文本，不写文件——导出本身不该留下一个不受守卫保护的新副本。',
+      ].join(' '),
+      parameters: {
+        状态: { type: 'string', description: "默认=全部。可选：生效 / 被取代 / 已归档（只导这一种状态）" },
+        格式: { type: 'string', description: '默认=csv。可选：json' },
+      },
+      output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
+      async execute(args) {
+        if (!ready()) return degradedNotice()
+        const core = getCore()
+        const s = loadSchema()
+        // **走正规读取路径**：readTable 负责解析（含引号/多行单元格/末尾缺列容忍），
+        // 绝不自己 readFileSync 拼字符串——那样引号、换行、BOM 全得自己处理一遍，迟早和 parseCSV 分叉。
+        const { header, rows } = core.readTable(readFileSync(CSV_PATH, 'utf8'), core.legacyWidthOf(s))
+        const statusWant = String(args.状态 ?? '').trim()
+        const fmt = String(args.格式 ?? 'csv').trim().toLowerCase()
+        if (fmt !== 'csv' && fmt !== 'json') {
+          throw new Error(`格式只能是 csv 或 json，收到「${fmt}」。`)
+        }
+
+        // 状态筛选：**默认全部**（不排除任何状态）——这是「整库导出」与 recall 的核心区别
+        const idIdx = header.indexOf('id')
+        const stIdx = header.indexOf('状态')
+        const picked = statusWant === ''
+          ? rows
+          : rows.filter((r) => (stIdx >= 0 ? String(r[stIdx] ?? '').trim() : '') === statusWant)
+
+        // 快照标注：防止模型把导出内容当成「现在生效的东西」
+        const stamp = core.localDate() + ' ' + new Date().toTimeString().slice(0, 8)
+        const head = [
+          `# 记忆库导出快照`,
+          `> 导出时间：${stamp}｜行数：${picked.length}（库内数据行共 ${rows.length}）｜库：${CSV_PATH}`,
+          `> ⚠ 这是**整库序列化**${statusWant === '' ? '（含被取代/已归档的行）' : `（只含 状态=${statusWant}）`}。`,
+          `> 别把它当成「库里现在生效的东西」——要按条件查生效条目请用 memory_recall。`,
+          '',
+        ].join('\n')
+
+        if (fmt === 'json') {
+          const objs = picked.map((r) => {
+            const o = {}
+            for (let i = 0; i < header.length; i++) o[header[i]] = r[i] ?? ''
+            return o
+          })
+          return head + '```json\n' + JSON.stringify({ header, rows: objs }, null, 2) + '\n```'
+        }
+
+        // CSV：用 core.cell() 做序列化（与 parseCSV 对称，别自写转义）
+        const csvText = header.map((c) => core.cell(c)).join(',') + '\n'
+          + picked.map((r) => r.map((v) => core.cell(v)).join(',')).join('\n') + '\n'
+        return head + '```csv\n' + csvText + '```'
+      },
+    }),
+  )
+
 }
 
 /**
