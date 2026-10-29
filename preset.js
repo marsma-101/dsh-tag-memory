@@ -500,6 +500,7 @@ export function apply(ctx, config = {}) {
     defineTool({
       name: 'memory_write',
       description: [
+        '**写记忆库的唯一正门**（改旧条用 memory_supersede、归档用 memory_archive）：要写记忆就调它，不要用 write / edit / shell 重定向直接改库文件。',
         '往标签记忆库追加一条记忆（只追加，永不改写已有条目）。',
         '写之前先自己过四道门槛：① 环境写不清就别写；② 只记正向结论（失败只记最终正确的做法）；③ 成功经验/用户要求直接记；④ 不记临时进度、一次性中间结果。',
         '【必须写·立刻写·不必问用户】以下任一发生就当场写，不要等被提醒：'
@@ -577,6 +578,7 @@ export function apply(ctx, config = {}) {
     defineTool({
       name: 'memory_recall',
       description: [
+        '**读记忆库的唯一正门**（与 memory_export 并列）：要读记忆就调它，不要用 read / cat / grep 直接打开库文件。',
         '按多维标签召回记忆。**上下文里已经有的不要再来查**——每轮注入的「记忆快照」里能直接看到的，直接用。',
         '这个工具是给「快照里没有的」用的：要展开只给了索引的条目、要按条件跨条筛、要翻本项目之外的历史。',
         '【必须先查再答·不要凭印象】出现下列任一情形，**先查记忆再回答**，不要跳过：'
@@ -986,6 +988,7 @@ export function apply(ctx, config = {}) {
     defineTool({
       name: 'memory_export',
       description: [
+        '**读记忆库的正门之一**（与 memory_recall 并列）：要整库导出才调它，不要用 read / cat / grep 直接打开库文件。',
         '把**整库**导出成文本（CSV 或 JSON），用于迁移、备份、给别的工具做输入。',
         '与 `memory_recall` 的区别：recall 是**按条件筛出几条**、默认排除被取代/已归档；',
         'export 是**整库序列化**——一个字节不少，被取代/已归档的行也都在里面。',

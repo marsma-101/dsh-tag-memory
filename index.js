@@ -329,6 +329,8 @@ function guardDenialReason(hitLevel) {
       + '用 fs / shell / glob 直接读写会绕开校验、判重与写锁，把库改坏（错列、丢行、并发写坏）插件发现不了。'
       + '**要读库**请用 memory_recall（按条件筛）或 memory_export（整库导出）；'
       + '**要改库**请用 memory_write / memory_supersede / memory_archive。'
+      + '**被拦下不等于被挡住**：换上面的正门工具即可，不需要绕过；'
+      + '如果正门工具做不到你要的事，把需求说出来。'
   }
   // 弱 needle：只出现在写类工具里才拦
   return common

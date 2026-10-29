@@ -315,6 +315,44 @@ try {
   ok('store 渲染字典含四维', /类型/.test(dict) && /深度/.test(dict) && /距离/.test(dict))
   ok('renderDictBlock 带标记', core.renderDictBlock(schema).includes(core.DICT_BEGIN) && core.renderDictBlock(schema).includes(core.DICT_END))
 
+  // ── C2. 字典必须**前置**说清怎么访问库（0.3.6 用户指出）──────
+  // 以前的毛病：字典只说「完整规则见 docs/…；库：store/memory.csv」——
+  // 这句话等于把模型往文件系统上引；等它撞上守卫，才从拒绝话术里知道该用哪个工具。
+  // 正确做法是**动手前**就把正门写明，守卫只做兜底。这一组断言守的就是这件事。
+  {
+    const lines = dict.split('\n')
+    const head10 = lines.slice(0, 10).join('\n')
+    const idx = (needle) => lines.findIndex((l) => l.includes(needle))
+
+    ok('C2 字典前 10 行内出现「怎么访问这本库」',
+      idx('怎么访问这本库') !== -1 && idx('怎么访问这本库') < 10)
+
+    ok('C2 读的正门写在前面（memory_recall / memory_export）',
+      /memory_recall/.test(head10) && /memory_export/.test(head10))
+
+    ok('C2 写的正门写在前面（memory_write）',
+      /memory_write/.test(head10))
+
+    ok('C2 明确说不要用 read/cat/grep 直接打开库文件',
+      /不要用 read/.test(head10) && /cat/.test(head10) && /grep/.test(head10))
+
+    ok('C2 明确说不要用 write/edit/shell 重定向改库',
+      /不要用 write/.test(head10) && /重定向/.test(head10))
+
+    ok('C2 说明「被拦下了怎么办：换正门，不需要绕过」',
+      /不需要绕过/.test(head10))
+
+    // 反控：这四段内容必须排在**四维字典之前**——顺序错了就等于没前置。
+    const dimLine = idx('四个维度')
+    const accLine = idx('怎么访问这本库')
+    ok('C2 访问说明排在四维字典之前（顺序断言）',
+      accLine !== -1 && dimLine !== -1 && accLine < dimLine)
+
+    // 回归守：以前那句「库：`store/memory.csv`」会把模型引向文件系统，不该再出现。
+    ok('C2 不再出现「见本插件 docs 等文档」这种把它们引向文件的指引',
+      !/完整规则见本插件的/.test(dict))
+  }
+
   // ── D. preset ─────────────────────────────────────────
   try {
     // 用例里当「当前项目」的路径：用沙箱里的真实目录，别写死盘符。
@@ -5051,6 +5089,67 @@ try {
 
           store.setLibraryDir(skill)
           rmSync(box7, { recursive: true, force: true })
+        }
+
+        // ⑩ G-8 正门前置断言（0.3.7）：工具 description 与守卫拒绝话术都要「先指正门」。
+        //    用户方向：模型在动手前就该知道走哪个门，而不是先撞守卫再从话术里反推。
+        //    字典（C2 已守）之外，模型选工具时看的是 description——这里也得有。
+        {
+          const pSrc = readFileSync(join(PKG, 'preset.js'), 'utf8')
+          const rDesc = (pSrc.match(/name: 'memory_recall',[\s\S]*?description: \[([\s\S]*?)\]\s*\.join\(' '\),/) || [])[1] || ''
+          const wDesc = (pSrc.match(/name: 'memory_write',[\s\S]*?description: \[([\s\S]*?)\]\s*\.join\(' '\),/) || [])[1] || ''
+          const eDesc = (pSrc.match(/name: 'memory_export',[\s\S]*?description: \[([\s\S]*?)\]\s*\.join\(' '\),/) || [])[1] || ''
+          ok('G-8 memory_recall 描述第一句声明它是读库正门', /读记忆库的唯一正门/.test(rDesc), rDesc.slice(0, 60))
+          ok('G-8 memory_recall 描述写明不要用 read/cat/grep 直接打开库', /不要用 read/.test(rDesc) && /cat/.test(rDesc) && /grep/.test(rDesc))
+          ok('G-8 memory_write 描述第一句声明它是写库正门', /写记忆库的唯一正门/.test(wDesc), wDesc.slice(0, 60))
+          ok('G-8 memory_write 描述写明不要用 write/edit/shell 直接改库', /不要用 write/.test(wDesc) && /shell/.test(wDesc))
+          ok('G-8 memory_export 描述第一句声明它是读库正门', /读记忆库的正门之一/.test(eDesc), eDesc.slice(0, 60))
+
+          const iSrc = readFileSync(join(PKG, 'index.js'), 'utf8')
+          ok('G-8 强档拒绝话术说明换正门、不需要绕过', /不需要绕过/.test(iSrc) && /正门工具/.test(iSrc))
+          ok('G-8 强档拒绝话术说明正门做不到时把需求说出来', /把需求说出来/.test(iSrc))
+        }
+
+        // ⑪ G-9 端到端：模拟「新智能体第一次上手」——只给 schema + 工具列表，不给额外上下文。
+        //    守的是用户指出的真实场景：模型有读记忆的需求、动手时不该先撞守卫再学正门。
+        {
+          // ① 字典：动手前就能看出读/写走哪个工具
+          const dict9 = core.renderDict(schema)
+          const head10 = dict9.split('\n').slice(0, 10).join('\n')
+          ok('G-9 第一次上手：字典头 10 行能看出读该用 memory_recall/memory_export',
+            /memory_recall/.test(head10) && /memory_export/.test(head10))
+          ok('G-9 第一次上手：字典头 10 行能看出写该用 memory_write',
+            /memory_write/.test(head10))
+          ok('G-9 第一次上手：字典明确说不要用 read/cat/grep 直接开库',
+            /不要用 read/.test(head10))
+
+          // ② 模拟它真调了 read 指向库文件 → 守卫拒 + 话术指回正门
+          const box9 = mkdtempSync(join(tmpdir(), 'tm-g9-'))
+          const skill9 = join(box9, 'skill')
+          mkdirSync(join(skill9, 'references'), { recursive: true })
+          mkdirSync(join(skill9, 'store'), { recursive: true })
+          copyFileSync(join(PKG, 'lib', 'engine', 'tags.schema.json'), join(skill9, 'references', 'tags.schema.json'))
+          writeFileSync(join(skill9, 'store', 'memory.csv'), TPL6)
+          writeFileSync(join(skill9, 'store', 'index.md'), '# i\n')
+          store.setLibraryDir(skill9)
+          let listener9 = null
+          const gctx9 = {
+            logger: {},
+            get: () => undefined,
+            webServer: { register: () => () => {} },
+            on: (ev, fn) => { if (ev === 'tools/pre-execute') listener9 = fn; return () => {} },
+          }
+          const idxG9 = await import(pathToFileURL(join(PKG, 'index.js')).href + '?g9=' + Date.now())
+          idxG9.apply(gctx9, { presetRoot: join(box9, 'pr9'), notice: false })
+          const r9 = await listener9({ name: 'read', arguments: { file_path: join(skill9, 'store', 'memory.csv') } },
+            () => Promise.resolve({ kind: 'allow' }))
+          const reason9 = String(r9?.reason ?? '')
+          ok('G-9 第一次上手：调 read 指向库文件 → 守卫拒', r9?.kind === 'deny')
+          ok('G-9 第一次上手：拒绝话术报出读/写正门工具名',
+            /memory_recall/.test(reason9) && /memory_write/.test(reason9))
+          ok('G-9 第一次上手：拒绝话术说清「不需要绕过」', /不需要绕过/.test(reason9))
+          store.setLibraryDir(skill)
+          rmSync(box9, { recursive: true, force: true })
         }
       } finally {
         store.setLibraryDir(savedDir)

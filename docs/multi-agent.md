@@ -7,9 +7,14 @@
 
 **装过本插件的智能体就懂四个维度，直接按完整格式写。** 不需要"只填两列等管理员补"。
 
+> ⚠️ **2026-10-30 更新（正门优先）**：装了本插件的智能体**不要直接打开/改写 `memory.csv` 文件**——
+> 读用 `memory_recall` / `memory_export` 工具，写用 `memory_write` / `memory_supersede` / `memory_archive` 工具。
+> 直接碰文件会绕开校验、判重与写锁，而且会被守卫拦下（被拦下换正门即可，不需要绕过）。
+> 下面的文件路径与脚本是**给排查/迁移/无插件宿主**用的等价写法，不是日常读写的入口。
+
 | 场景 | 做法 |
 |---|---|
-| **本机、装了本插件的智能体** | **直接读写库里的 `memory.csv`**（库在 `<DSH_HOME>/tag-memory`） |
+| **本机、装了本插件的智能体** | **走正门工具读写**（读 `memory_recall` / `memory_export`，写 `memory_write` / `memory_supersede` / `memory_archive`）；只有排查问题时才直接看 `<DSH_HOME>` 下数据目录里的库文件 |
 | **别的机器** | 用户要求时打包 `store/` → 交给本机合并（见 `portability.md` 第六节） |
 
 **并发铁律**：

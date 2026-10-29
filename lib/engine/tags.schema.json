@@ -2,6 +2,14 @@
   "$comment": "标签字典 · 机器可读版。人读版见 tags.md；设计总纲见 architecture.md。程序（write/read）照本文件校验与筛选。",
   "name": "marsma101-tag-memory · schema",
   "version": "2026-10-24",
+  "access": {
+    "$comment": "怎么访问这本库。**排在字典最前面**是有意的：模型在动手之前就该知道走哪个门，而不是先碰守卫、再从拒绝话术里反推。守卫只负责挡住误操作，不该当成「怎么用」的教学入口。",
+    "read": "读记忆用 `memory_recall`（按条件筛）或 `memory_export`（整库导出，含退场行）。**不要用 read / cat / grep 直接打开库文件**——绕过校验与判重，读到的可能是错列的。",
+    "write": "写记忆用 `memory_write`；要让旧条退场用 `memory_supersede`；归档用 `memory_archive`；记「用过/验证过」用 `memory_mark_used`。**不要用 write / edit / shell 重定向改库文件**——那会绕开写锁与校验，把库改坏。",
+    "why": "库是只追加的 CSV，写入要过校验、判重和锁；直接改文件这三样全跳过，坏了插件发现不了。守卫拦的就是这类直接文件访问。",
+    "path": "库文件在插件数据目录下的 `store/memory.csv`——**位置是给排查用的参考信息，不是让你去读写它**。日常读写一律走上面的工具。",
+    "ifBlocked": "如果被守卫拦下：说明这次调用在直接碰库文件。换成上面的正门工具即可，**不需要绕过**；若正门工具做不到你要的事，把需求说出来，别硬闯文件系统。"
+  },
   "storage": {
     "file": "store/memory.csv",
     "format": "csv",
