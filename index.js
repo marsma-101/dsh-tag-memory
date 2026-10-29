@@ -14,7 +14,7 @@
 import { readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync, accessSync, appendFileSync, statSync, realpathSync, renameSync, unlinkSync } from 'node:fs'
 import { constants as FS } from 'node:fs'
 import { randomBytes } from 'node:crypto'
-import { basename, dirname, join, isAbsolute, relative, resolve } from 'node:path'
+import { basename, dirname, join, isAbsolute, relative, resolve, sep } from 'node:path'
 import {
   BACKUP_CFG_PATH, CSV_PATH, DATA_DIR, INDEX_PATH, LOCK_PATH, PRESET_ROOT, REINFORCE_LOG_PATH, MISSES_PATH, SCHEMA_PATH, STORE_DIR,
   backupReady, coreStale, getBackupCore, getCore, initInfo, legacyInfo, loadSchema, ready, reloadSchema,
@@ -88,6 +88,72 @@ function touchesNeedles(args, needles, opts = {}) {
     return false
   }
   return walk(args)
+}
+
+// ── 判据（0.3.6 P0 修复）：路径规范化 + 前缀比较 ─────────────────
+// 子串匹配天生分不清「提到名字」和「指向那个目录」：默认安装布局下数据目录末段名
+// 恰好等于插件名，强弱两档重叠、分级被架空（672 全绿却拦掉一切正当读操作）。
+// 强档改为：把参数里的路径类字段（及 shell 命令文本里的路径 token）取出来，
+// resolve + 去尾斜杠 + realpath（失败退回 resolve），与规范化后的数据目录做
+// 前缀比较、边界按路径分段判（p === base || p.startsWith(base + sep)）。
+//   · 落在数据目录内 → 强拦（读写都拦）：ls 数据目录、read 库内文件、.. 穿越、符号链接全覆盖
+//   · 落在目录外 → 不进强档，再走弱档（插件名子串，仅写类）：ls 插件源码目录、正文提到名字放行
+//   · 同前缀兄弟目录（数据目录名 + 后缀）不会误判成库内——前缀按路径分段比，不裸 startsWith
+const GUARD_PATH_KEYS = ['file_path', 'file', 'path', 'dir', 'directory', 'cwd']
+
+/** 规范化一个候选路径：resolve（处理 .. / 相对）→ realpath（解符号链接，失败退回 resolve）。 */
+function normPath(p) {
+  if (typeof p !== 'string' || p.trim() === '') return null
+  try {
+    const r = resolve(p)
+    try { return realpathSync(r) } catch { return r }
+  } catch { return null }
+}
+
+/** 从任意文本里提取「路径形态」的 token：绝对路径、./ ../ 开头、或「成分/…」形相对路径。 */
+function pathTokens(text) {
+  const out = []
+  for (const t of String(text).split(/[\s;|&<>()`"']+/)) {
+    if (t === '') continue
+    if (t.startsWith('/') || /^\.{1,2}\//.test(t) || /^[A-Za-z0-9_.~-]+\//.test(t)) out.push(t)
+  }
+  return out
+}
+
+/**
+ * 参数里有没有「指向数据目录内」的路径？（新强档判据，替换旧的强 needle 子串匹配）
+ * @param {unknown} args
+ * @param {string[]} bases  规范化后的数据目录（normPath(DATA_DIR)）
+ */
+function touchesDataDir(args, bases) {
+  if (!Array.isArray(bases) || bases.length === 0) return false
+  // 先找 cwd 字段：工具调用带 cwd 时，相对路径按它解析，不是按进程 cwd
+  let cwdBase = ''
+  const findCwd = (node, key) => {
+    if (typeof node === 'string') { if (key === 'cwd' && cwdBase === '') cwdBase = node; return }
+    if (Array.isArray(node)) { node.forEach((x) => findCwd(x, key)); return }
+    if (node && typeof node === 'object') Object.entries(node).forEach(([k, v]) => findCwd(v, k))
+  }
+  findCwd(args, '')
+  const inBase = (cand) => {
+    let p = normPath(cand)
+    if (cwdBase !== '' && !isAbsolute(String(cand))) p = normPath(join(cwdBase, String(cand)))
+    if (!p) return false
+    // 边界按路径分段判：p === base 或 p 以 base + 分隔符开头。
+    // 不裸 startsWith(base)：那会把数据目录名后接后缀的同前缀兄弟目录误判成库内。
+    return bases.some((b) => p === b || p.startsWith(b + sep))
+  }
+  const walk = (node, key) => {
+    if (typeof node === 'string') {
+      if (key === 'cwd') return false
+      if (GUARD_PATH_KEYS.includes(key)) return inBase(node)
+      return pathTokens(node).some((t) => inBase(t))
+    }
+    if (Array.isArray(node)) return node.some((x) => walk(x, key))
+    if (node && typeof node === 'object') return Object.entries(node).some(([k, v]) => walk(v, k))
+    return false
+  }
+  return walk(args, '')
 }
 
 /** 插件自己的工具：合法通道，不经过这条管线，必须豁免。 */
@@ -200,31 +266,21 @@ function guardDenialReason(hitLevel) {
 }
 
 /**
- * 当前该用哪几条 needle 判定，**分强弱两档**（建议3）。
+ * 当前该用哪几条 needle 判定，**分强弱两档**（0.3.6 P0 修复后）。
  *
- * 强 needle = 真实的数据路径：数据目录绝对路径、CSV 路径、锁路径、目录末段名（够长时）。
- *   → 读写工具**都拦**（碰到真库就该拦）。
- * 弱 needle = 插件/数据目录的基础名。
- *   → **只拦写类工具**；读类工具（read/glob/grep）放行——排查插件源码、看一眼目录结构是正当操作。
- *
- * 为什么目录末段名也算强：`ls /data/mem` 这种只给目录的，也该按「碰了库目录」拦。
- * 目录名短于 4 字跳过（`mem` 这种词会误伤普通对话内容）。
+ * 强档 = **规范化后的数据目录**（1 条），判定走 touchesDataDir：路径类字段规范化后
+ *   落在目录内 → 读写都拦（碰到真库就该拦）。「目录末段名」不再单独进强档——
+ *   默认安装下末段名==插件名，与弱档重叠会把分级整个架空（P0 根因）。
+ *   裸目录名（末段名）本身仍被覆盖：数据目录本身、库内一切文件都在前缀范围内。
+ * 弱档 = 插件/数据目录的基础名，**只拦写类工具**；读类工具（read/glob/grep）放行。
  */
-function guardNeedles(dataDir, csvPath, lockPath) {
+function guardNeedles(dataDir) {
   const weak = [GUARD_NEEDLE]
-  const strong = []
-  const add = (arr, v) => { if (typeof v === 'string' && v.trim() !== '') arr.push(v.trim()) }
-  add(strong, csvPath)
-  add(strong, lockPath)
-  const base = typeof dataDir === 'string' ? dataDir.trim().replace(/[\\/]+$/, '') : ''
-  if (base !== '') {
-    add(strong, base)
-    const name = base.split(/[\\/]/).pop() ?? ''
-    if (name.length >= 4) add(strong, name)
-  }
+  const base = normPath(dataDir)
   const uniq = (a) => Array.from(new Set(a.filter((n) => n !== '')))
-  return { weak: uniq(weak), strong: uniq(strong) }
+  return { weak: uniq(weak), strong: base ? [base] : [] }
 }
+
 export function apply(ctx, config = {}) {
   // 数据目录：配置优先（`dataDir`，兼容旧名 `libraryDir`）；没配就是推断链
   // （环境变量 → 旧环境变量 → <DSH_HOME>/tag-memory）。空目录会当场按模板建库。
@@ -338,21 +394,21 @@ export function apply(ctx, config = {}) {
   // 逃生口是**模块级常量**（import 时读一次），不在这里读——见文件头 ①。
   let offGuard = null
   if (!GUARD_DISABLED) {
-    const guardN = guardNeedles(DATA_DIR, CSV_PATH, LOCK_PATH)
+    const guardN = guardNeedles(DATA_DIR)
     try {
       offGuard = ctx.on('tools/pre-execute', (exec, next) => {
         // 豁免：插件自己的工具走插件代码，根本不经过这条管线。
         const toolName = typeof exec?.name === 'string' ? exec.name : ''
         if (GUARD_EXEMPT_TOOLS.includes(toolName)) return next()
 
-        // ── 分级判定（建议2/3）──────────────────────────────
-        // 强 needle（真实数据路径）→ 读写都拦：碰到真库就该拦。
-        // 弱 needle（插件/目录名）→ 只拦写类工具；读类工具放行。
+        // ── 分级判定（0.3.6 P0 修复：强档换路径前缀判据）──────
+        // 强档（数据目录路径）→ 读写都拦：规范化后落在数据目录内就是碰真库。
+        // 弱档（插件/目录名子串）→ 只拦写类工具；读类工具放行。
         const writeTool = isWriteTool(toolName, exec?.arguments)
         const args = exec?.arguments
 
-        // ① 强 needle：无论读写，命中就拦
-        if (touchesNeedles(args, guardN.strong)) {
+        // ① 强档：路径落在数据目录内，无论读写都拦
+        if (touchesDataDir(args, guardN.strong)) {
           return Promise.resolve({ kind: 'deny', reason: guardDenialReason('strong') })
         }
         // ② 弱 needle：只在写类工具上拦；读类工具（read/glob/grep 等）放行

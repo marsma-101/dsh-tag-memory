@@ -4905,6 +4905,88 @@ try {
           ok('G-5 挂载日志里不许出现未定义变量名（ReferenceError 会被 catch 吞成假警报）',
             !/is not defined/.test(joined), joined.slice(0, 200))
         }
+
+        // ⑧ G-6 布局 B（0.3.6 P0 断言）：数据目录末段名 == 插件名 —— 默认安装布局。
+        //    P0 根因：selftest 全跑在沙箱布局（末段名 'skill'，与插件名不重叠），
+        //    把「末段名进强 needle → 强弱重叠 → 分级架空」藏住了——672 全绿却拦掉一切正当读操作。
+        //    这里用运行时拼装的插件名当数据目录末段名，把布局 B 钉进用例（不写字面量，守卫拦不了）。
+        {
+          const box6 = mkdtempSync(join(tmpdir(), 'tm-g6-'))
+          const skill6 = join(box6, PLUG)
+          mkdirSync(join(skill6, 'references'), { recursive: true })
+          mkdirSync(join(skill6, 'store'), { recursive: true })
+          copyFileSync(join(PKG, 'lib', 'engine', 'tags.schema.json'), join(skill6, 'references', 'tags.schema.json'))
+          writeFileSync(join(skill6, 'store', 'memory.csv'), TPL6)
+          writeFileSync(join(skill6, 'store', 'index.md'), '# i\n')
+
+          store.setLibraryDir(skill6)
+          let listener6 = null
+          const gctx6 = {
+            logger: {},
+            get: () => undefined,
+            webServer: { register: () => () => {} },
+            on: (ev, fn) => { if (ev === 'tools/pre-execute') listener6 = fn; return () => {} },
+          }
+          const idxG6 = await import(pathToFileURL(join(PKG, 'index.js')).href + '?g6=' + Date.now())
+          idxG6.apply(gctx6, { presetRoot: join(box6, 'pr6'), notice: false })
+          ok('G-6 布局 B：守卫挂上了 tools/pre-execute', typeof listener6 === 'function')
+
+          const ask6 = async (name, args) => {
+            const r = await listener6({ name, arguments: args }, () => Promise.resolve({ kind: 'allow' }))
+            return r.kind
+          }
+          const csv6 = join(skill6, 'store', 'memory.csv')
+          const plugDir6 = '/opt/dsh/plugins/dsh-' + PLUG + '-0.2.0'
+          const sib6 = join(box6, PLUG + '-backup')
+          mkdirSync(sib6, { recursive: true })
+          const link6 = join(box6, 'lk')
+          symlinkSync(skill6, link6, 'dir')
+
+          // 谢雨四场景：真实安装布局下必须全放行（P0 修复的核心验收）
+          ok('G-6 布局 B：谢雨1 read 插件源码 → 放行',
+            await ask6('read', { file_path: plugDir6 + '/index.js' }) === 'allow')
+          ok('G-6 布局 B：谢雨2 ls 插件源码目录 → 放行',
+            await ask6('bash', { command: 'ls -la ' + plugDir6 }) === 'allow')
+          ok('G-6 布局 B：谢雨2b glob 插件源码 → 放行',
+            await ask6('glob', { pattern: '**/*.mjs', path: plugDir6 }) === 'allow')
+          ok('G-6 布局 B：谢雨3 名字只在 content → 放行',
+            await ask6('write', { file_path: join(box6, 'diag.mjs'), content: '// check ' + PLUG }) === 'allow')
+
+          // 边界：数据目录本身 / 库内一切文件仍是强档（读写都拦）——裸目录名被前缀范围覆盖
+          ok('G-6 布局 B：ls 数据目录本身 → 拦（探库不放过）',
+            await ask6('bash', { command: 'ls -la ' + skill6 }) === 'deny')
+          ok('G-6 布局 B：read 数据目录内文件（非 CSV）→ 拦',
+            await ask6('read', { file_path: join(skill6, 'references', 'tags.schema.json') }) === 'deny')
+          ok('G-6 布局 B：.. 穿越 read 库 → 拦（规范化后仍落在目录内）',
+            await ask6('read', { file_path: join(skill6, 'store', '..', 'store', 'memory.csv') }) === 'deny')
+          ok('G-6 布局 B：符号链接指向库 → 拦（realpath 解链接后仍落在目录内）',
+            await ask6('read', { file_path: join(link6, 'store', 'memory.csv') }) === 'deny')
+
+          // 前缀边界：同前缀兄弟目录不是库——强档不误判；其「读」放行、
+          // 「写」仍被弱档按插件名子串拦（写类严格，0.3.6 设计如此，不是误判）
+          ok('G-6 布局 B：同前缀兄弟目录（数据目录名+后缀）ls → 放行（强档不误判成库内）',
+            await ask6('bash', { command: 'ls -la ' + sib6 }) === 'allow')
+          ok('G-6 布局 B：同前缀兄弟目录 write → 拦（弱档：写类+路径含插件名，严格拦）',
+            await ask6('write', { file_path: join(sib6, 'x.txt'), content: 'x' }) === 'deny')
+
+          // 安全全套：布局 B 下照样全拦
+          ok('G-6 布局 B：安全A write 真库 → 拦', await ask6('write', { file_path: csv6, content: 'x' }) === 'deny')
+          ok('G-6 布局 B：安全B read 真库 → 拦', await ask6('read', { file_path: csv6 }) === 'deny')
+          ok('G-6 布局 B：安全C bash 重定向 → 拦', await ask6('bash', { command: 'echo x >> ' + csv6 }) === 'deny')
+          ok('G-6 布局 B：安全D bash sed -i → 拦', await ask6('bash', { command: 'sed -i s/a/b/ ' + csv6 }) === 'deny')
+          ok('G-6 布局 B：安全E bash rm → 拦', await ask6('bash', { command: 'rm -f ' + csv6 }) === 'deny')
+
+          // P0 症状：message_bot 带插件名（非文件工具、正文提到名字）→ 放行
+          ok('G-6 布局 B：message_bot 正文提到插件名 → 放行（旧守卫误拦症状）',
+            await ask6('message_bot', { message: '检查 ' + PLUG + ' 这个插件' }) === 'allow')
+
+          // 弱档写类严格照旧：write 的路径字段含插件名 → 拦
+          ok('G-6 布局 B：write 路径字段含插件名 → 拦（弱档照旧）',
+            await ask6('write', { file_path: '/tmp/' + PLUG + '/x.md', content: 'hi' }) === 'deny')
+
+          store.setLibraryDir(skill)
+          rmSync(box6, { recursive: true, force: true })
+        }
       } finally {
         store.setLibraryDir(savedDir)
         rmSync(box, { recursive: true, force: true })
