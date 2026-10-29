@@ -150,9 +150,17 @@ function shellCommandIsWrite(args) {
   if (WRITE_CMDS.test(cmd)) return true
 
   // ③ 就地编辑
-  if (/\bsed\b[^|;]*\s-i/.test(cmd)) return true
-  if (/\bperl\b[^|;]*\s-i/.test(cmd)) return true
+  // **注意合并短选项**：`perl -pi` 里 `-i` 藏在 `-pi` 中间，`sed -ni` 同理。
+  // 只判 `\s-i` 会漏掉最常见的 `perl -pi -e`（对抗测试实测漏网）。所以判「短选项簇里含 i」。
+  if (/\bsed\b[^|;]*\s-[a-zA-Z]*i[a-zA-Z]*\b/.test(cmd)) return true
+  if (/\bperl\b[^|;]*\s-[a-zA-Z]*i[a-zA-Z]*\b/.test(cmd)) return true
   if (/\bawk\b[^|;]*-i\s+inplace/.test(cmd)) return true
+  // ⑤ find 的破坏性动作（对抗测试发现的漏网：`find / -name x -delete` 会删文件）
+  if (/\bfind\b[^|;]*\s-(delete|exec|execdir|ok|okdir|fprint|fprintf|fls)\b/.test(cmd)) return true
+  // ⑥ 其它「能改文件」的解释器写法：python/node/ruby 里出现写文件 API
+  //    （只判 `-c` / `-e` 这类内联脚本，避免把跑脚本的读操作误判——但保守优先）
+  if (/\b(python3?|node|ruby|php)\b/.test(cmd)
+    && /(open\s*\(|writeFile|appendFile|writeFileSync|appendFileSync|File\.write|file_put_contents|fopen|fwrite)/.test(cmd)) return true
 
   // ④ 认不出来的复杂写法：含 `>` 已在上处理；这里再兜一层「命令替换 / eval」
   if (/\$\(|`|\beval\b/.test(cmd)) return true

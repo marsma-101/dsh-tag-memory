@@ -4796,6 +4796,58 @@ try {
         ok('G-4 强 needle + bash 读命令（cat 真库）→ 拦',
           await ask('bash', { command: 'cat ' + strongPath }) === 'deny')
 
+        // ③b shell 写意图识别：对抗测试过的危险命令必须都拦住
+        //     （每一条都带弱 needle，否则守卫本就不管——它管的是「参数里出现 needle」的调用）
+        const DANGEROUS = [
+          ['rm -rf /tmp/' + PLUG, 'rm'],
+          ['mv /tmp/a /tmp/' + PLUG, 'mv'],
+          ['cp /tmp/a /tmp/' + PLUG, 'cp'],
+          ['echo x > /tmp/' + PLUG + '.t', '重定向 >'],
+          ['echo x >> /tmp/' + PLUG + '.t', '追加重定向 >>'],
+          ['echo x | tee /tmp/' + PLUG + '.t', 'tee'],
+          ['dd if=/dev/zero of=/tmp/' + PLUG, 'dd'],
+          ['truncate -s 0 /tmp/' + PLUG, 'truncate'],
+          ['install -m 644 /tmp/a /tmp/' + PLUG, 'install'],
+          ['ln -sf /tmp/a /tmp/' + PLUG, 'ln'],
+          ['chmod 000 /tmp/' + PLUG, 'chmod'],
+          ["sed -i 's/a/b/' /tmp/" + PLUG, 'sed -i'],
+          ['perl -pi -e "s/a/b/" /tmp/' + PLUG, 'perl -i'],
+          ['awk -i inplace "{print}" /tmp/' + PLUG, 'awk inplace'],
+          ['find /tmp -name ' + PLUG + ' -delete', 'find -delete'],
+          ['find /tmp -name ' + PLUG + ' -exec rm {} \\;', 'find -exec'],
+          ["python3 -c \"open('/tmp/x','a').write('y')\" # " + PLUG, 'python 写文件'],
+          ["node -e \"require('fs').appendFileSync('/tmp/x','y')\" # " + PLUG, 'node 写文件'],
+        ]
+        let allDangerousBlocked = true
+        const leaked = []
+        for (const [c, label] of DANGEROUS) {
+          if (await ask('bash', { command: c }) !== 'deny') { allDangerousBlocked = false; leaked.push(label) }
+        }
+        ok('G-4 shell 写意图：18 类危险命令全部拦下（对抗测试集）', allDangerousBlocked, leaked.join(','))
+
+        // ③c shell 读意图：这些在弱 needle 上必须放行（谢雨报的痛点）
+        const READS = [
+          ['ls /opt/dsh/plugins/' + PLUG, 'ls'],
+          ['grep -n foo /opt/dsh/plugins/' + PLUG + '/index.js', 'grep'],
+          ['cat /opt/dsh/plugins/' + PLUG + '/package.json', 'cat'],
+          ['head -5 /opt/dsh/plugins/' + PLUG + '/CHANGELOG.md', 'head'],
+          ['tail -5 /opt/dsh/plugins/' + PLUG + '/CHANGELOG.md', 'tail'],
+          ['stat /opt/dsh/plugins/' + PLUG + '/index.js', 'stat'],
+          ['wc -l /opt/dsh/plugins/' + PLUG + '/index.js', 'wc'],
+          ['sha256sum /opt/dsh/plugins/' + PLUG + '/index.js', 'sha256sum'],
+          ['find /opt/dsh/plugins/' + PLUG + ' -name "*.js"', 'find（无破坏动作）'],
+        ]
+        let allReadsAllowed = true
+        const blockedReads = []
+        for (const [c, label] of READS) {
+          if (await ask('bash', { command: c }) !== 'allow') { allReadsAllowed = false; blockedReads.push(label) }
+        }
+        ok('G-4 shell 读意图：9 类只读命令全部放行（误伤已解）', allReadsAllowed, blockedReads.join(','))
+
+        // ③d `2>&1` 是 fd 重定向，不是写文件——不该被当成写
+        ok('G-4 `2>&1` fd 重定向不算写（读命令 + 2>&1 → 放行）',
+          await ask('bash', { command: 'ls /opt/dsh/plugins/' + PLUG + ' 2>&1' }) === 'allow')
+
         // ④ **核心变化**：write 的 content 字段不扫
         ok('G-4 write 的 content 含插件名、file_path 干净 → 放行（核心变化）',
           await ask('write', { file_path: '/tmp/diag.mjs', content: "const n = '" + PLUG + "';" }) === 'allow')
