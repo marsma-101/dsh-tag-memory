@@ -63,46 +63,107 @@ const GUARD_NEEDLE = ['tag', 'memory'].join('-')
  * 实测过：`/data/mem/store/memory.csv` 在只有基础 needle 时直接放行。
  * 所以真正生效的 needle 由 `apply()` 把**当前数据目录**拼进去（见 `guardNeedles()`）。
  */
-function argumentsTouchGuard(args, needles) {
-  if (typeof args === 'string') return needles.some((n) => n !== '' && args.includes(n))
-  if (Array.isArray(args)) return args.some((a) => argumentsTouchGuard(a, needles))
-  if (args && typeof args === 'object') return Object.values(args).some((a) => argumentsTouchGuard(a, needles))
-  return false
+/**
+ * 判定一组参数是否碰了某档 needle。**递归扫所有字符串值**。
+ *
+ * @param {unknown} args
+ * @param {string[]} needles
+ * @param {object} [opts]
+ * @param {string[]} [opts.skipKeys]  跳过这些**键名**对应的值（如 write 的 `content`）
+ * @returns {boolean}
+ */
+function touchesNeedles(args, needles, opts = {}) {
+  const skip = Array.isArray(opts.skipKeys) ? opts.skipKeys : []
+  const walk = (node) => {
+    if (typeof node === 'string') return needles.some((n) => n !== '' && node.includes(n))
+    if (Array.isArray(node)) return node.some((a) => walk(a))
+    if (node && typeof node === 'object') {
+      return Object.entries(node).some(([k, v]) => {
+        // **跳过内容字段**：write/edit 的 `content` 是「要写进去的文本」，不是「要碰的路径」。
+        // 谢雨报告里「写一个内容提到插件名的诊断脚本被拒」就是这里被扫导致的（建议2/3）。
+        if (skip.includes(k)) return false
+        return walk(v)
+      })
+    }
+    return false
+  }
+  return walk(args)
 }
 
-/** 拒绝话术：告诉模型**该用什么**，而不只是「不许」。 */
-function guardDenialReason() {
-  return '记忆库只能经插件自己的工具访问：写用 memory_write / 读用 memory_recall / 改旧条用 memory_supersede。'
-    + '参数里出现了记忆库的路径，这次调用已拦下——用 fs / shell / glob 直接读写会绕开校验、判重与写锁，'
-    + '把库改坏（错列、丢行、并发写坏）插件是发现不了的。要改库请走上面三个工具。'
-}
-
-/** 插件自己的四个工具：合法通道，不经过这条管线，必须豁免。 */
+/** 插件自己的工具：合法通道，不经过这条管线，必须豁免。 */
 const GUARD_EXEMPT_TOOLS = ['memory_write', 'memory_recall', 'memory_supersede', 'memory_mark_used', 'memory_archive', 'memory_review', 'memory_export']
 
 /**
- * 当前该用哪几条 needle 判定。
+ * 写类工具：参数里出现**任何** needle 都拦（保持现状的严格）。
  *
- * `dataDir` 可配，所以数据目录不一定叫 `tag-memory`。这里把**实际在用的**目录名、
- * 库文件路径、锁文件路径都收进来——用户在 `dataDir` 下直接写 `memory.csv` 也算碰库。
- * 目录名太短（少于 4 字）时跳过：`mem` 这种词会误伤普通对话内容。
+ * 判据是「这次调用有没有可能把库改坏」：
+ *   · `write` / `edit` —— 直接写文件，可能覆盖库
+ *   · 名字含 `shell` / `bash` / `exec` 的工具 —— 命令文本里可以 `> 库文件`、`sed -i`、`rm`
+ * 其余一律按读类处理。
  */
-function guardNeedles(dataDir, csvPath, lockPath) {
-  const out = [GUARD_NEEDLE]
-  const add = (v) => { if (typeof v === 'string' && v.trim() !== '') out.push(v.trim()) }
-  add(csvPath)
-  add(lockPath)
-  // 目录名单独也收一条（`cat /data/mem/store/memory.csv` 里 csvPath 能中，
-  // 但 `ls /data/mem` 这种只给目录的也得拦）。
-  const base = typeof dataDir === 'string' ? dataDir.trim().replace(/[\\/]+$/, '') : ''
-  if (base !== '') {
-    const name = base.split(/[\\/]/).pop() ?? ''
-    if (name.length >= 4) out.push(name)
-    out.push(base)
-  }
-  return Array.from(new Set(out.filter((n) => n !== '')))
+function isWriteTool(toolName) {
+  const n = String(toolName ?? '').toLowerCase()
+  if (n === 'write' || n === 'edit') return true
+  if (/(shell|bash|exec|run_command|terminal)/.test(n)) return true
+  return false
 }
 
+/**
+ * write/edit 类工具里，哪些键是「内容」而不是「路径」——这些**不扫 needle**。
+ *
+ * 为什么只跳这几个键：`file_path` / `file` / `path` 是路径，出现库路径**必须**拦（那是真会写到库上）；
+ * 而 `content` / `new_string` / `old_string` 是**文本内容**，里面提到插件名再正常不过
+ * （写诊断脚本、写文档、写这插件的测试）。扫它们只会拦掉正当工作。
+ */
+const WRITE_CONTENT_KEYS = ['content', 'new_string', 'old_string', 'text', 'body', 'newText', 'oldText']
+
+/** 拒绝话术：按命中类型给「怎么绕」（建议6）。 */
+function guardDenialReason(hitLevel) {
+  const common = '记忆库只能经插件自己的工具访问：'
+    + '写用 memory_write / 读用 memory_recall / 改旧条用 memory_supersede / '
+    + '归档用 memory_archive / 导出整库用 memory_export。'
+  if (hitLevel === 'strong') {
+    return common
+      + '参数里出现了**记忆库的真实路径**（数据目录 / CSV / 锁文件），这次调用已拦下——'
+      + '用 fs / shell / glob 直接读写会绕开校验、判重与写锁，把库改坏（错列、丢行、并发写坏）插件发现不了。'
+      + '**要读库**请用 memory_recall（按条件筛）或 memory_export（整库导出）；'
+      + '**要改库**请用 memory_write / memory_supersede / memory_archive。'
+  }
+  // 弱 needle：只出现在写类工具里才拦
+  return common
+    + '参数里出现了插件/数据目录名（不是真实路径），写类操作被拦下。'
+    + '**如果这是排查插件源码**：请用读类工具（read / glob / grep），那些在弱 needle 上是放行的。'
+    + '**如果只是文本里提到插件名**：write/edit 的内容字段已不再扫 needle，把插件名写进正文不会拦；'
+    + '被拦的是路径字段（file_path / file）——那里出现插件目录才说明真要写到插件目录去。'
+    + '**非要用 shell 拼路径**：可以把词拼起来避开字面量，但更推荐走上面的正门工具。'
+}
+
+/**
+ * 当前该用哪几条 needle 判定，**分强弱两档**（建议3）。
+ *
+ * 强 needle = 真实的数据路径：数据目录绝对路径、CSV 路径、锁路径、目录末段名（够长时）。
+ *   → 读写工具**都拦**（碰到真库就该拦）。
+ * 弱 needle = 插件/数据目录的基础名。
+ *   → **只拦写类工具**；读类工具（read/glob/grep）放行——排查插件源码、看一眼目录结构是正当操作。
+ *
+ * 为什么目录末段名也算强：`ls /data/mem` 这种只给目录的，也该按「碰了库目录」拦。
+ * 目录名短于 4 字跳过（`mem` 这种词会误伤普通对话内容）。
+ */
+function guardNeedles(dataDir, csvPath, lockPath) {
+  const weak = [GUARD_NEEDLE]
+  const strong = []
+  const add = (arr, v) => { if (typeof v === 'string' && v.trim() !== '') arr.push(v.trim()) }
+  add(strong, csvPath)
+  add(strong, lockPath)
+  const base = typeof dataDir === 'string' ? dataDir.trim().replace(/[\\/]+$/, '') : ''
+  if (base !== '') {
+    add(strong, base)
+    const name = base.split(/[\\/]/).pop() ?? ''
+    if (name.length >= 4) add(strong, name)
+  }
+  const uniq = (a) => Array.from(new Set(a.filter((n) => n !== '')))
+  return { weak: uniq(weak), strong: uniq(strong) }
+}
 export function apply(ctx, config = {}) {
   // 数据目录：配置优先（`dataDir`，兼容旧名 `libraryDir`）；没配就是推断链
   // （环境变量 → 旧环境变量 → <DSH_HOME>/tag-memory）。空目录会当场按模板建库。
@@ -216,15 +277,30 @@ export function apply(ctx, config = {}) {
   // 逃生口是**模块级常量**（import 时读一次），不在这里读——见文件头 ①。
   let offGuard = null
   if (!GUARD_DISABLED) {
-    const needles = guardNeedles(DATA_DIR, CSV_PATH, LOCK_PATH)
+    const guardN = guardNeedles(DATA_DIR, CSV_PATH, LOCK_PATH)
     try {
       offGuard = ctx.on('tools/pre-execute', (exec, next) => {
         // 豁免：插件自己的工具走插件代码，根本不经过这条管线。
         const toolName = typeof exec?.name === 'string' ? exec.name : ''
         if (GUARD_EXEMPT_TOOLS.includes(toolName)) return next()
-        if (argumentsTouchGuard(exec?.arguments, needles)) {
-          // waterfall：返回即截断，后来者翻不了案。
-          return Promise.resolve({ kind: 'deny', reason: guardDenialReason() })
+
+        // ── 分级判定（建议2/3）──────────────────────────────
+        // 强 needle（真实数据路径）→ 读写都拦：碰到真库就该拦。
+        // 弱 needle（插件/目录名）→ 只拦写类工具；读类工具放行。
+        const writeTool = isWriteTool(toolName)
+        const args = exec?.arguments
+
+        // ① 强 needle：无论读写，命中就拦
+        if (touchesNeedles(args, guardN.strong)) {
+          return Promise.resolve({ kind: 'deny', reason: guardDenialReason('strong') })
+        }
+        // ② 弱 needle：只在写类工具上拦；读类工具（read/glob/grep 等）放行
+        if (writeTool) {
+          // write/edit 的**内容字段不扫**（那里提到插件名是正当的）；路径字段照扫
+          const skip = (toolName === 'write' || toolName === 'edit') ? WRITE_CONTENT_KEYS : []
+          if (touchesNeedles(args, guardN.weak, { skipKeys: skip })) {
+            return Promise.resolve({ kind: 'deny', reason: guardDenialReason('weak') })
+          }
         }
         return next()
       })

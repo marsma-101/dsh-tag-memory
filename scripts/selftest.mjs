@@ -4623,6 +4623,196 @@ try {
     }
   } catch (e) { fail++; results.push("FAIL  Y. Markdown 导入器 — " + String(e?.stack ?? e)) }
 
+  // ── G. 0.3.6：memory_export 正门 + 守卫分级（卡 kmvsqvncp6vwo）──────
+  try {
+    const core = store.getCore()
+    const schema0 = store.loadSchema()
+    const TPL6 = readFileSync(join(PKG, 'lib', 'engine', 'templates', 'memory.csv'), 'utf8')
+    const newLib6 = () => {
+      const box = mkdtempSync(join(tmpdir(), 'tm-g-'))
+      const csv = join(box, 'memory.csv')
+      writeFileSync(csv, TPL6)
+      return { box, csv, lock: join(box, '.lock') }
+    }
+    const mk6 = (o) => ({
+      内容: 'x', 环境: 'e', 原因: 'r', 类型: '记忆', 深度: '语义',
+      稳定性: '稳定', 距离: '按需', 依据: '推断', 项目: '通用', 角色: 'selftest', ...o,
+    })
+
+    // G-1 memory_export：**真调工具**验证整库导出含退场行
+    //     ⚠️ 早先这里只读 readTable 的结果做断言，没经过工具本身——
+    //     变异「把导出默认改成排除退场行」时**不红**，证明那样测不到工具行为。
+    //     现在真跑 memory_export.execute()，工具改坏必红。
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-g1-'))
+      const skill = join(box, 'skill')
+      mkdirSync(join(skill, 'references'), { recursive: true })
+      mkdirSync(join(skill, 'store'), { recursive: true })
+      copyFileSync(join(PKG, 'lib', 'engine', 'tags.schema.json'), join(skill, 'references', 'tags.schema.json'))
+      writeFileSync(join(skill, 'store', 'memory.csv'), TPL6)
+      writeFileSync(join(skill, 'store', 'index.md'), '# i\n')
+
+      const savedDir = process.env.DSH_TAG_MEMORY_DATA_DIR
+      store.setLibraryDir(skill)
+      try {
+        const csv2 = join(skill, 'store', 'memory.csv')
+        const lock2 = join(skill, 'store', '.append.lock')
+        core.appendEntry({ schema: schema0, csvPath: csv2, lockPath: lock2, row: mk6({ 内容: '生效条' }) })
+        core.appendEntry({ schema: schema0, csvPath: csv2, lockPath: lock2, row: mk6({ 内容: '归档条', 状态: '已归档' }) })
+        const oldId = core.appendEntry({ schema: schema0, csvPath: csv2, lockPath: lock2, row: mk6({ 内容: '将被取代' }) })
+        core.supersedeEntry({ schema: schema0, csvPath: csv2, lockPath: lock2, targetId: oldId, row: { 内容: '新条' } })
+
+        // 真跑工具
+        const toolsG = []
+        const ctxG = { systemPrompt: { section: () => {}, getSectionOrder: () => 50 }, tools: { register: (t) => toolsG.push(t) } }
+        const pG = await import(pathToFileURL(join(PKG, 'preset.js')).href + '?g1=' + Date.now())
+        pG.apply(ctxG, { dir: 'C:/x' })
+        const exp = toolsG.find((t) => t.name === 'memory_export')
+        ok('G-1 memory_export 工具已注册', exp !== undefined)
+
+        const out = await exp.execute({}, { agent: { id: 'selftest' } })
+        const dataPart = out.split('```csv')[1] ?? ''
+        // 数据部分 = 表头 1 行 + 数据 4 行。**要排除结尾的 ``` 围栏**（它会被算成一行）。
+        const dataLines = dataPart.split('\n')
+          .filter((l) => l.trim() !== '' && !l.trim().startsWith('```'))
+        ok('G-1 整库导出包含全部 4 条数据行（含被取代/已归档）',
+          dataLines.length === 5, `表头+数据 = ${dataLines.length} 行（应 5）`)
+        ok('G-1 被取代的旧行在导出里（recall 会排除它，export 不排除）',
+          dataPart.includes('将被取代'))
+        ok('G-1 已归档的行在导出里', dataPart.includes('归档条'))
+        ok('G-1 导出返回值开头有快照标注（时间戳 + 行数 + 库路径）',
+          /导出快照/.test(out) && /行数：4/.test(out) && /库：/.test(out),
+          out.split('\n')[0])
+        ok('G-1 快照标注明确提醒「别当成库里现在生效的东西」',
+          /别把它当成/.test(out) && /memory_recall/.test(out))
+
+        // 状态筛选：只导已归档
+        const outArch = await exp.execute({ 状态: '已归档' }, { agent: { id: 'selftest' } })
+        const archData = outArch.split('```csv')[1] ?? ''
+        ok('G-1 `状态=已归档` 只导那一条（不含生效条）',
+          archData.includes('归档条') && !archData.includes('生效条'), archData.slice(0, 60))
+
+        // json 格式
+        const outJson = await exp.execute({ 格式: 'json' }, { agent: { id: 'selftest' } })
+        const m = outJson.match(/```json\n([\s\S]*?)\n```/)
+        ok('G-1 `格式=json` 输出可解析且含 header/rows', (() => {
+          if (m === null) return false
+          try { const j = JSON.parse(m[1]); return Array.isArray(j.header) && Array.isArray(j.rows) && j.rows.length === 4 } catch { return false }
+        })())
+      } finally {
+        store.setLibraryDir(savedDir)
+        rmSync(box, { recursive: true, force: true })
+      }
+    }
+
+    // G-2 CSV 导出能被 parseCSV 读回（往返一致）
+    {
+      const { box, csv, lock } = newLib6()
+      core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk6({ 内容: '含,逗号' }) })
+      core.appendEntry({ schema: schema0, csvPath: csv, lockPath: lock, row: mk6({ 内容: '含"引号' }) })
+      const t = core.readTable(readFileSync(csv, 'utf8'), core.legacyWidthOf(schema0))
+      // 用 core.cell 序列化（与工具内部一致）
+      const csvText = t.header.map((c) => core.cell(c)).join(',') + '\n'
+        + t.rows.map((r) => r.map((v) => core.cell(v)).join(',')).join('\n') + '\n'
+      const back = core.parseCSV(csvText)
+      ok('G-2 CSV 导出能被 parseCSV 读回，header 一致',
+        back[0].join(',') === t.header.join(','))
+      ok('G-2 CSV 导出往返后行数一致', back.length - 1 === t.rows.length, `${back.length - 1} vs ${t.rows.length}`)
+      ok('G-2 含逗号/引号的内容往返后逐字一致',
+        String(back[1][t.header.indexOf('内容')]) === '含,逗号' &&
+        String(back[2][t.header.indexOf('内容')]) === '含"引号')
+      rmSync(box, { recursive: true, force: true })
+    }
+
+    // G-3 memory_export 在豁免名单里（守卫改完后它必须能用）
+    {
+      const src = readFileSync(join(PKG, 'index.js'), 'utf8')
+      ok('G-3 memory_export 在 GUARD_EXEMPT_TOOLS 豁免名单里',
+        /GUARD_EXEMPT_TOOLS\s*=\s*\[[^\]]*'memory_export'/.test(src))
+    }
+
+    // G-4 守卫分级：构造 exec 直接调判定逻辑
+    {
+      const box = mkdtempSync(join(tmpdir(), 'tm-g4-'))
+      const skill = join(box, 'skill')
+      mkdirSync(join(skill, 'references'), { recursive: true })
+      mkdirSync(join(skill, 'store'), { recursive: true })
+      copyFileSync(join(PKG, 'lib', 'engine', 'tags.schema.json'), join(skill, 'references', 'tags.schema.json'))
+      writeFileSync(join(skill, 'store', 'memory.csv'), TPL6)
+      writeFileSync(join(skill, 'store', 'index.md'), '# i\n')
+
+      const savedDir = process.env.DSH_TAG_MEMORY_DATA_DIR
+      store.setLibraryDir(skill)
+      try {
+        let listener = null
+        const gctx = {
+          logger: {},
+          get: () => undefined,
+          webServer: { register: () => () => {} },
+          on: (ev, fn) => { if (ev === 'tools/pre-execute') listener = fn; return () => {} },
+        }
+        const idxG = await import(pathToFileURL(join(PKG, 'index.js')).href + '?g=' + Date.now())
+        idxG.apply(gctx, { presetRoot: join(box, 'pr'), notice: false })
+        ok('G-4 守卫挂上了 tools/pre-execute', typeof listener === 'function')
+
+        const ask = async (name, args) => {
+          const r = await listener({ name, arguments: args }, () => Promise.resolve({ kind: 'allow' }))
+          return r.kind
+        }
+        const PLUG = ['tag', 'memory'].join('-')
+        const strongPath = join(skill, 'store', 'memory.csv')
+
+        // ① 强 needle：读写都拦
+        ok('G-4 强 needle 出现在 read 工具 → 拦',
+          await ask('read', { file_path: strongPath }) === 'deny')
+        ok('G-4 强 needle 出现在 write 工具 → 拦',
+          await ask('write', { file_path: strongPath, content: 'x' }) === 'deny')
+
+        // ② 弱 needle + 读类工具 → 放行
+        ok('G-4 只出现弱 needle（插件名）+ read 工具 → 放行',
+          await ask('read', { file_path: '/' + PLUG + '/index.js' }) === 'allow')
+        ok('G-4 只出现弱 needle + glob 工具 → 放行',
+          await ask('glob', { pattern: '/' + PLUG + '/**/*.js' }) === 'allow')
+        ok('G-4 只出现弱 needle + grep 工具 → 放行',
+          await ask('grep', { pattern: PLUG }) === 'allow')
+
+        // ③ 弱 needle + 写类工具 → 拦
+        ok('G-4 只出现弱 needle + bash 工具 → 拦',
+          await ask('bash', { command: 'ls /' + PLUG }) === 'deny')
+
+        // ④ **核心变化**：write 的 content 字段不扫
+        ok('G-4 write 的 content 含插件名、file_path 干净 → 放行（核心变化）',
+          await ask('write', { file_path: '/tmp/diag.mjs', content: "const n = '" + PLUG + "';" }) === 'allow')
+        ok('G-4 反控：write 的 file_path 含插件名 → 拦（路径字段照扫）',
+          await ask('write', { file_path: '/' + PLUG + '/x.md', content: 'hi' }) === 'deny')
+        ok('G-4 edit 的 new_string 含插件名 → 放行',
+          await ask('edit', { file_path: '/tmp/a.mjs', old_string: 'a', new_string: PLUG }) === 'allow')
+        ok('G-4 反控：edit 的 file_path 含插件名 → 拦',
+          await ask('edit', { file_path: '/' + PLUG + '/a.mjs', old_string: 'a', new_string: 'b' }) === 'deny')
+
+        // ⑤ 豁免工具全放行
+        let exemptOk = true
+        for (const t of ['memory_write', 'memory_recall', 'memory_export', 'memory_archive', 'memory_review', 'memory_supersede', 'memory_mark_used']) {
+          if (await ask(t, { file_path: strongPath }) !== 'allow') exemptOk = false
+        }
+        ok('G-4 七个插件工具全部豁免（含新增的 memory_export）', exemptOk)
+
+        // ⑥ 拒绝话术按类型给「怎么绕」
+        const strongDeny = await listener({ name: 'read', arguments: { file_path: strongPath } }, () => Promise.resolve({ kind: 'allow' }))
+        ok('G-4 强 needle 拒绝话术指向 memory_recall / memory_export',
+          /memory_recall/.test(strongDeny.reason) && /memory_export/.test(strongDeny.reason))
+        ok('G-4 强 needle 拒绝话术提到「要改库」用哪些工具',
+          /memory_write/.test(strongDeny.reason) && /memory_archive/.test(strongDeny.reason))
+        const weakDeny = await listener({ name: 'bash', arguments: { command: 'ls /' + PLUG } }, () => Promise.resolve({ kind: 'allow' }))
+        ok('G-4 弱 needle 拒绝话术提示「读类工具放行」与「内容字段不再扫」',
+          /读类工具/.test(weakDeny.reason) || /read/.test(weakDeny.reason))
+      } finally {
+        store.setLibraryDir(savedDir)
+        rmSync(box, { recursive: true, force: true })
+      }
+    }
+  } catch (e) { fail++; results.push("FAIL  G. 0.3.6 — " + String(e?.stack ?? e)) }
+
   const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'))
       ok('U-3 js-yaml 声明在 dependencies（不是只靠开发环境恰好有）',
         pkg.dependencies !== undefined && typeof pkg.dependencies['js-yaml'] === 'string',
