@@ -1,0 +1,13 @@
+host-dev 补三处归属注释（替代 tidy/schedule/migrate 的实现说明）
+
+L775  取代/归档（对应 tidy.mjs）
+L944  导出/备份/恢复/合并/搬家（对应 migrate.mjs）
+L1206 定时任务（对应 schedule.mjs）
+
+每处标注「归属说明，请勿搬去 engine」，统一判定标准：
+纯判定与纯复制归 engine；跨步骤编排与 ctx 相关的归宿主
+
+另澄清易混点：engine 侧 tick.mjs 的 createTickQueue 是纯队列（无 timer），
+由宿主喂 flush 回调；与「定时任务在宿主」是队列 vs 触发器的分工，不是遗漏
+
+复跑 host.m 9/9 + host.no 10/10，无回归
