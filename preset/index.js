@@ -37,13 +37,25 @@ export const name = 'dsh-tag-memory-preset';
 export const inject = ['tools', 'systemPrompt'];
 
 /**
- * 插件 Config。
+ * ⚠️ **故意不导出 `Config`**（2026-11-05 装进真容器后发现的 bug）。
  *
- * 可调值放 Config，用户在 `cordis.patch.yml` 改（官方：用户的补丁层跨升级保留）。
- * 这里的字段都是**取值域覆盖**，出厂值来自 engine 的 `templates/schema.json`；
- * 不传就完全走 engine 出厂值（不在 preset 里硬编码第二份）。
+ * Cordis 的 `resolveConfig`（cordis/lib/index.js:958）逻辑是：
+ * ```js
+ * if (!runtime.Config) return config;                    // 没有就放行
+ * const result = runtime.Config['~standard'].validate(config);  // 有就必须是标准 schema
+ * ```
+ * 所以 `export const Config = {}`（空对象）**不等于"没有 schema"**——
+ * 它过了第一道判断，然后 `Config['~standard']` 是 undefined，
+ * 直接抛 `TypeError: Cannot read properties of undefined (reading 'validate')`，
+ * 整个插件行 activation 失败。
+ *
+ * **当前选择：不导出 Config。** 可调值一律走 engine 的 `templates/*.json`
+ * （`schema.json` / `scoring.json` / `tag-equivalence.json`），
+ * 它们是运行时从磁盘读的，改完即生效，不需要 Config 中转。
+ *
+ * 若将来确实需要"用户可在 cordis.patch.yml 里覆盖"的字段，
+ * 必须导出真正的 Schemastery schema（带 `~standard`），**不能是普通对象**。
  */
-export const Config = {};
 
 /**
  * Cordis 插件入口。

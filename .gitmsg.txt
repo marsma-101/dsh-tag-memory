@@ -1,11 +1,29 @@
-流程纪律：判据必须能判失败（采纳 host-dev 建议）
+真容器首次安装：修掉 3 个只有真实环境才暴露的缺陷
 
-教训1 补硬性纪律：
-任何声称"验证通过"的判据，必须先构造反例确认它能判失败。
-做不到则该判据的结论不得用于交付。
+在 Docker 容器 dsh-text-codeing (DSH 0.2.1-rc.2) 里真实安装后暴露：
 
-具体操作：写判据时同时写一个"应该失败"的对照组，
-跑一遍确认它真失败——尺子先量已知长度，才可信。
+1. preset/index.js 导出空 Config = {} 导致整个插件行激活失败
+   cordis resolveConfig: if (!runtime.Config) return config;
+                         runtime.Config['~standard'].validate(config)
+   空对象过了第一道判断但无 '~standard' -> TypeError: reading 'validate'
+   -> 改为不导出 Config（可调值走 engine templates/*.json）
 
-样板：tests/gate3/timer.test.mjs 第一条用例即判据自检
-（先证明 hasRef 能区分 ref/unref，再用它量被测对象）
+2. bindIdentity 只返回不存储，identityOf 恒为 null
+   投影依赖 tool/call、command/run 事件，宿主方法被直接调用时投影为空
+   -> 所有写入被拒（bind ok 但 write UNBOUND_IDENTITY）
+   -> 增加 WeakMap 进程内兜底，投影有值时投影优先
+
+3. writeEntry / recall 不自动填当前绑定值
+   writeEntry: 模型省略 项目/智能体 时被 engine 判 PROJECT_EMPTY/AGENT_EMPTY
+   recall:     只兜底 智能体 不兜底 项目 -> 硬筛用空串匹配，filtered 归零
+   -> 两处都改为"绑定值兜底，显式值优先"
+
+容器内实测通过：
+- 未绑定拒写 UNBOUND_IDENTITY
+- 写入 M-20261105-001，CSV 9 列 + 引号包裹正文
+- 召回命中 分=90，时距 1->2
+- 浏览模式正常
+- 查空识别 false_but_near
+- 跨项目隔离查不到
+- 标签含 | 拒写 TAG_CONTAINS_PIPE
+- 重启后零激活报错

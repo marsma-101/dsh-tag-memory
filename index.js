@@ -227,6 +227,19 @@ function createHostService(ctx, config) {
   }
 
   /**
+   * 身份兜底缓存（进程内，WeakMap keyed by agent 对象）。
+   *
+   * 为什么需要：正常路径下身份由 session 投影从既有事件（`tool/call` / `command/run`）
+   * fold 出来，resume/fork 都能重建。但投影**只对真正走过会话事件流的调用**有效；
+   * 宿主方法被直接调用（或工具调用尚未在投影中体现）时投影恒为空，
+   * 会导致 `identityOf` 永远 null、**所有写入被拒**。
+   * 装进真容器后实测到过这个缺陷（bindIdentity 返回 ok，但 writeEntry 报 UNBOUND_IDENTITY）。
+   *
+   * 用 WeakMap：不污染会话日志、agent 回收即失效；投影有值时**投影优先**。
+   */
+  const identityFallback = new WeakMap();
+
+  /**
    * 确保数据目录骨架存在（store / records / backup）。
    *
    * ⚠️ 必须在 `withFileLock` **之前**调用：锁是 `open(lockPath,'wx')`，
@@ -296,10 +309,22 @@ function createHostService(ctx, config) {
   /**
    * 绑定身份。
    *
-   * ⚠️ 这里**不 append 任何 session 事件**——`practices.md:21` 明确禁止自造新
-   * event type（`Session.append()` 无法设置 `ignorable: true`，会话会拒绝重开）。
-   * 身份由投影从**既有**事件 fold 出来：工具侧是 `tool/call`（name='dtm_bind'），
-   * UI 侧是 `command/run`（name='dtm-bind'）。所以这里只校验 + 返回。
+   * ⚠️ **不 append 任何自造的 session 事件**——`practices.md:21` 明确禁止新 event type
+   * （`Session.append()` 无法设置 `ignorable: true`，会话会拒绝重开）。
+   *
+   * 身份的两条来源：
+   *   1. **投影优先**（正路）：工具侧的 `tool/call`(name='dtm_bind') 与
+   *      UI 侧的 `command/run`(name='dtm-bind') 都是**既有**事件，投影从中 fold 出身份，
+   *      resume/fork 可重建。工具/命令调用时事件已经进日志，所以正常路径不需要这里写任何东西。
+   *   2. **进程内兜底**（本函数的职责）：当调用方**不是**经由 tool/command 进来时
+   *      （例如宿主方法被直接调用、或工具调用尚未在投影里体现），投影读不到身份。
+   *      这时必须有一条进程内的绑定记录，否则 `identityOf` 恒为 null，
+   *      **所有写入都会被拒**——这是装进真容器后实测到的缺陷
+   *      （`bindIdentity` 返回 ok:true，但紧接着 `writeEntry` 报 UNBOUND_IDENTITY）。
+   *
+   * 兜底用 WeakMap keyed by agent 对象：不污染会话日志、进程退出即失效，
+   * 与"session log 是唯一真相源"不冲突——它只是投影不可用时的**同进程缓存**。
+   * 一旦投影能读到身份，投影值优先（见 identityOfSync）。
    */
   function bindIdentity(agent, { 智能体, 项目 } = {}) {
     const who = str(智能体);
@@ -311,7 +336,10 @@ function createHostService(ctx, config) {
         message: '智能体 不能为空：不知道“我是谁”就不读写记忆。先问用户这次会话以什么名字负责。',
       };
     }
-    // 绑定本身不落盘：授权/确认类状态由会话日志承载（resume/fork 可重建）。
+    // 进程内兜底：key 是 agent 对象本身；没有 agent 时不缓存（无从归属）。
+    if (agent && typeof agent === 'object') {
+      identityFallback.set(agent, { 智能体: who, 项目: project });
+    }
     return { ok: true, 智能体: who, 项目: project };
   }
 
@@ -323,13 +351,23 @@ function createHostService(ctx, config) {
    */
   function identityOfSync(agent) {
     try {
+      // 1) 投影优先：能读到就以投影为准（resume/fork 可重建，是正路）
       const session = agent?.session;
-      if (!session) return null;
-      const projections = ctx.get?.('sessionProjections');
-      if (!projections || typeof projections.stateOf !== 'function') return null;
-      const state = projections.stateOf(session, IDENTITY_KEY);
-      if (!state || !state.智能体) return null;
-      return { 智能体: state.智能体, 项目: state.项目 ?? '' };
+      if (session) {
+        const projections = ctx.get?.('sessionProjections');
+        if (projections && typeof projections.stateOf === 'function') {
+          const state = projections.stateOf(session, IDENTITY_KEY);
+          if (state && state.智能体) {
+            return { 智能体: state.智能体, 项目: state.项目 ?? '' };
+          }
+        }
+      }
+      // 2) 进程内兜底：投影读不到（宿主方法被直接调用 / 事件还没进投影）时用它
+      if (agent && typeof agent === 'object') {
+        const cached = identityFallback.get(agent);
+        if (cached && cached.智能体) return { ...cached };
+      }
+      return null;
     } catch {
       return null; // 注入渲染用，绝不能抛
     }
@@ -394,19 +432,29 @@ function createHostService(ctx, config) {
     const { schema, scoring } = await loadConfigs();
     await ensureDirs(layout);
 
+    // 已绑定：用绑定身份兜底填 `项目`/`智能体`，模型显式给的值优先。
+    // （与 `recall` 的 effective 处理一致；《流程_写入》§二：这两个字段可省略=取当前绑定值）
+    // ⚠️ 装进真容器后实测到：不做这一步，preset 省略传值时会被 engine 判 PROJECT_EMPTY/AGENT_EMPTY 拒写。
+    const effectiveInput = {
+      ...input,
+      项目: str(input['项目']) || identity.项目,
+      智能体: str(input['智能体']) || identity.智能体,
+    };
+
     let built;
     const lockResult = await withFileLock(layout.lockFile, async () => {
       const { records } = await readLibraryCsv(layout.libraryCsv, schema);
       const existingIds = records.map((r) => r['编号']);
-      built = buildNewRecord({ input, existingIds, schema, now: new Date() });
+      built = buildNewRecord({ input: effectiveInput, existingIds, schema, now: new Date() });
       if (!built.ok) return { ok: false, errors: built.errors };
       await appendRecordCsv(layout.libraryCsv, built.record, schema);
       return { ok: true };
     });
 
     // 台账：成功与失败都记（失败是整理阶段定位“字典问题 vs 程序误伤”的素材）
+    // 用 effectiveInput：台账里记的应是**实际落盘的**项目/智能体，不是模型省略后的空值。
     const log = buildWriteLog({
-      input,
+      input: effectiveInput,
       identity: { who: identity.智能体 },
       result: built?.ok ? { ok: true, record: built.record } : { ok: false, errors: built?.errors },
       schema,
@@ -466,8 +514,10 @@ function createHostService(ctx, config) {
       const { records } = await readLibraryCsv(layout.libraryCsv, schema);
 
       // 已绑定：用绑定身份兜底填充，模型显式给的值优先（《流程_读取》§一 第 0 步）
+      // ⚠️ 两个维度都要兜底。装进真容器后实测到：只兜 `智能体` 不兜 `项目` 时，
+      // 省略传 `项目` 会让硬筛用空字符串去匹配，`filtered` 直接归零、查不到自己刚写的记忆。
       const effective = {
-        项目: str(query['项目']),
+        项目: str(query['项目']) || identity.项目,
         智能体: str(query['智能体']) || identity.智能体,
         形态: str(query['形态']),
         自由标签: arr(query['自由标签']),
