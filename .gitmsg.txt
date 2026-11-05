@@ -1,27 +1,26 @@
-整理链路端到端打通 + 端点统一
+UI 接入整理：设置页加「预览要改什么」「立即整理」
 
-修复：
-  registerRemote 内部有两套数据（旧 METHODS 数组 + 新 REMOTE_SIGNATURES），
-  METHODS 里没有 runTidy，导致端点 404。
-  -> 重写为单一数据源：REMOTE_SIGNATURES 定参数名，
-     marker 和纯标识符包装器都从它派生，不可能再漏。
-  同时删掉死代码（noParamMethod / oneParamMethod，已无引用）。
+client.js:
+  · Remote spec 加 tagMemory/runTidy（参数 request）
+  · createApi 加 runTidy(payload)
+  · createLazyApi methods 列表加 runTidy
+  · SettingsPage 加 tidyMsg/tidyErr state + onTidy handler
+  · 整理卡片加两个按钮（data-dtm-action: tidy-preview / tidy-apply）
+  · 中英文案各 5 条（tidyPreview/tidyApply/tidyNoChange/tidyPreviewResult/tidyApplied）
 
-定时任务增强：
-  1. 自动备份：用 schedule.mjs 的 isBackupDue 纯判定，不再无脑按间隔跑
-  2. 整理提醒：用 isTidyDue 判定，**只记日志提示不自作主张改库**
-     —— 整理必须由模型参与判断（《流程_整理》引言），定时器不能代替
-  setInterval + .unref() 保持官方硬规矩；dispose 里两个 timer 都清理
+设计要点：
+  · 预览走 dryRun（只算不写），避免用户点一下就把库改了
+  · 实跑后自动 load() 刷新计数
+  · 整理必须模型参与判断（《流程_整理》引言），UI 只负责发起
 
-端点实测（容器内真实 HTTP）：
-  POST /api/tagMemory/getOverview  -> 200 OK
-  POST /api/tagMemory/getSettings  -> 200 OK
-  POST /api/tagMemory/runTidy      -> 200 OK   ← 新端点
+踩坑记录：
+  第一次把 tidyMsg state 插到了 EntriesPage（anchor 匹配到了错误的
+  React.useState(null)），结果 SettingsPage 渲染报 "tidyMsg is not defined"。
+  -> 改为锚定 SettingsPage 独有的 migrateOpen 才算对。
+  这类 bug 只有真渲染才暴露，静态检查和语法检查全程都是过的。
 
-完整生命周期实测（容器内）：
-  写 1 条 + 造 4 次 ok feedback
-  -> dryRun 识别"稳定性 观察→稳定"
-  -> 执行 applied=1，库中变"稳定"
-  -> 再追加 1 次 wrong
-  -> 整理 applied=1，库中变"易变"
-  -> tidy.jsonl 累计 2 条动作记录（含 before/after/basis）
+无头浏览器实测：
+  设置页无错误         ✅
+  预览按钮存在         ✅
+  整理按钮存在         ✅
+  点预览 -> "没有需要改的地方。"（169 条老数据无 feedback，逻辑正确）✅

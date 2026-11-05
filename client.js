@@ -378,6 +378,20 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
             ],
             result: { mode: 'src-json' },
           },
+          'tagMemory/runTidy': {
+            service: REMOTE_NS,
+            description: '执行整理：据 read.jsonl 的 feedback 演进稳定性（观察/稳定/易变）。dryRun 只算不写。',
+            invocation: { kind: 'direct' },
+            parameters: [
+              {
+                name: 'request',
+                source: 'json',
+                wire: 'request',
+                codec: passthroughCodec(PACKAGE_NAME + '/types#TidyPayload'),
+              },
+            ],
+            result: { mode: 'src-json' },
+          },
         },
       }
     }
@@ -543,6 +557,9 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
         listBackups: function () { return call('listBackups') },
         restore: function (payload) { return call('restore', payload || {}) },
         mergeLibrary: function (payload) { return call('mergeLibrary', payload || {}) },
+
+        // 整理（dryRun 只算不写，给 UI 预览用）
+        runTidy: function (payload) { return call('runTidy', payload || {}) },
       }
     }
 
@@ -573,7 +590,7 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
         const lazy = { ready: function () { return hasApi(nsRef) } }
       const methods = [
         'getOverview', 'listEntries', 'getFacets', 'getSettings',
-        'retagEntry', 'migrateDataDir', 'backupNow', 'listBackups', 'restore', 'mergeLibrary',
+        'retagEntry', 'migrateDataDir', 'backupNow', 'listBackups', 'restore', 'mergeLibrary', 'runTidy',
       ]
       methods.forEach(function (name) {
         lazy[name] = function () {
@@ -1740,6 +1757,9 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       const [error, setError] = React.useState(null)
       const [migrateTarget, setMigrateTarget] = React.useState('')
       const [migrateOpen, setMigrateOpen] = React.useState(false)
+      // 整理：干跑预览 + 实跑，都走宿主 runTidy（与 dtm 侧共用同一实现）
+      const [tidyMsg, setTidyMsg] = React.useState(null)
+      const [tidyErr, setTidyErr] = React.useState(false)
       const [notice, setNotice] = React.useState(null)
 
       const load = React.useCallback(function () {
@@ -1758,6 +1778,39 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       }, [api])
 
       React.useEffect(function () { return load() }, [load])
+
+      /** 触发整理：dryRun=true 只预览改什么，false 才真改库。 */
+      const onTidy = React.useCallback(function (dryRun) {
+        if (!api) return
+        setBusy(true)
+        setTidyErr(false)
+        setTidyMsg(null)
+        Promise.resolve()
+          .then(function () { return api.runTidy({ dryRun: dryRun, who: '（用户手动）' }) })
+          .then(function (r) {
+            const changes = (r && r.changes) || []
+            if (dryRun) {
+              if (changes.length === 0) {
+                setTidyMsg(t('tidyNoChange'))
+              } else {
+                const lines = changes.slice(0, 8).map(function (c) {
+                  return c['编号'] + ' ' + c.field + ': ' + c.before + ' → ' + c.after
+                })
+                const more = changes.length > 8 ? ' …共 ' + changes.length + ' 项' : ''
+                setTidyMsg(t('tidyPreviewResult') + ': ' + lines.join('; ') + more)
+              }
+            } else {
+              setTidyMsg(t('tidyApplied').replace('{n}', String((r && r.applied) || 0)))
+              // 真改过库，刷新设置里的计数与列表
+              load()
+            }
+          })
+          .catch(function (err) {
+            setTidyErr(true)
+            setTidyMsg(err && err.message ? err.message : String(err))
+          })
+          .then(function () { setBusy(false) })
+      }, [api, load, t])
 
       // `api` 是惰性代理（永远非 null），用 `api.ready()` 判断命名空间是否真挂上
       const wired = !!(api && typeof api.ready === 'function' && api.ready())
@@ -2004,6 +2057,41 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
             : null,
           // 《功能说明》§10.2 原文「频率与开关待定稿，开发期细化」——如实标注，不假装已定
           h('p', { className: 'dtm-caption' }, t('tidyPending')),
+
+          // ---- 立即整理（手动触发）----
+          // 整理需要模型参与判断（《流程_整理》引言），所以 UI 只负责**发起**，
+          // 真正的演进逻辑在宿主 runTidy（读 feedback → 状态机 → 改库 → 记台账）。
+          // dryRun 先预览改什么，避免用户点一下就把库改了。
+          h(
+            'div',
+            { className: 'dtm-row', style: { marginTop: '8px', gap: '8px', display: 'flex', alignItems: 'center' } },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dtm-btn dtm-btn-sm',
+                'data-dtm-action': 'tidy-preview',
+                disabled: !!busy,
+                onClick: function () { onTidy(true) },
+              },
+              t('tidyPreview'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dtm-btn dtm-btn-sm dtm-btn-primary',
+                'data-dtm-action': 'tidy-apply',
+                disabled: !!busy,
+                onClick: function () { onTidy(false) },
+              },
+              t('tidyApply'),
+            ),
+            null,
+          ),
+          tidyMsg
+            ? h('p', { className: tidyErr ? 'dtm-error-text' : 'dtm-caption', 'data-dtm-tidy-msg': '1' }, tidyMsg)
+            : null,
         ),
 
         // ---- ④ 标签字典只读预览 ----
@@ -2525,6 +2613,11 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       tidyEnabled: '自动整理',
       tidyFrequency: '频率',
       tidyPending: '频率与开关的取值域仍在细化中（《功能说明》§10.2 标注为待定稿），此处先如实显示宿主当前值。',
+      tidyPreview: '预览要改什么',
+      tidyApply: '立即整理',
+      tidyNoChange: '没有需要改的地方。',
+      tidyPreviewResult: '将修改',
+      tidyApplied: '已整理，共修改 {n} 项。',
 
       // 字典
       cardDictTitle: '标签字典（只读）',
@@ -2652,6 +2745,11 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       tidyEnabled: 'Auto-tidy',
       tidyFrequency: 'Frequency',
       tidyPending: 'The frequency and switch value domain is still being finalized (marked as pending in the spec); this shows the host value as-is.',
+      tidyPreview: 'Preview changes',
+      tidyApply: 'Run tidy now',
+      tidyNoChange: 'Nothing to change.',
+      tidyPreviewResult: 'Would change',
+      tidyApplied: 'Tidy done, {n} item(s) changed.',
 
       cardDictTitle: 'Tag dictionary (read-only)',
       cardDictDesc: 'Value domain of the fixed tags. Free tags have no vocabulary; the model decides them per the tag dictionary.',
