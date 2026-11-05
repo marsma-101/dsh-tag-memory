@@ -38,15 +38,9 @@ $ErrorActionPreference = 'Stop'
 $PluginDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'dsh-tag-memory'
 if (-not (Test-Path $PluginDir)) { throw "找不到插件目录：$PluginDir" }
 
-# 当前 v2 设计文档清单（站内平铺，无子目录前缀）。
+# 只推「插件运行/对外」需要的文件。内部文档（内部文档/）**绝不推**。
 $Manifest = @(
-  '功能说明.md',
-  '架构说明.md',
-  '标签字典.md',
-  '流程_写入.md',
-  '流程_读取.md',
-  '流程_整理.md',
-  '待查证问题.md'
+  '标签字典.md'
 )
 
 function Say($tag, $msg, $color) {
@@ -97,12 +91,13 @@ foreach ($name in $Manifest) {
   }
 }
 
-# 站内多出来的（不在清单里）= 旧文件，待删除（除非 -NoDelete / -DryRun）
+# 只清「曾经推过的内部文档」——内部文档已改为不上传，站内若残留就删掉；不碰别的文件。
 try {
   $q = "?project=$([uri]::EscapeDataString($Project))"
   $listing = Invoke-RestMethod -Uri "$BaseUrl/privhub/api/list$q" -Headers $H -WebSession $sess -TimeoutSec 15
   $onServer = @($listing.entries | Where-Object { -not $_.isDir -and $_.name -like '*.md' } | ForEach-Object { $_.name })
-  $toDelete = @($onServer | Where-Object { $Manifest -notcontains $_ })
+  $LegacyInternal = @('功能说明.md','架构说明.md','流程_写入.md','流程_读取.md','流程_整理.md','待查证问题.md')
+  $toDelete = @($onServer | Where-Object { $LegacyInternal -contains $_ })
 } catch { $toDelete = @() }
 
 Write-Host ''

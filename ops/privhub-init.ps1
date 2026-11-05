@@ -34,9 +34,9 @@ $ErrorActionPreference = 'Stop'
 $PluginDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'dsh-tag-memory'
 if (-not (Test-Path $PluginDir)) { throw "找不到插件目录：$PluginDir" }
 
+# 只推「插件运行/对外」需要的文件。内部文档（内部文档/）**绝不推**。
 $Manifest = @(
-  '功能说明.md', '架构说明.md', '标签字典.md',
-  '流程_写入.md', '流程_读取.md', '流程_整理.md', '待查证问题.md'
+  '标签字典.md'
 )
 
 function Say($tag, $msg, $color) { Write-Host ("  [{0}] {1}" -f $tag, $msg) -ForegroundColor $color }
@@ -81,7 +81,10 @@ if (-not $NoUpload) {
   try {
     $listing = Invoke-RestMethod -Uri "$BaseUrl/privhub/api/list?project=$([uri]::EscapeDataString($Project))" -Headers $H -WebSession $sess -TimeoutSec 15
     $onServer = @($listing.entries | Where-Object { -not $_.isDir -and $_.name -like '*.md' } | ForEach-Object { $_.name })
-    $toDelete = @($onServer | Where-Object { $Manifest -notcontains $_ })
+    # 只删「曾经推过的内部文档」——内部文档已改为不上传，站内若残留就清掉。
+    # 不删别的（站内可能有别人放的文件）。
+    $LegacyInternal = @('功能说明.md','架构说明.md','流程_写入.md','流程_读取.md','流程_整理.md','待查证问题.md')
+    $toDelete = @($onServer | Where-Object { $LegacyInternal -contains $_ })
   } catch { $toDelete = @() }
   Say 'SUM' ("待推文档 {0} · 站内旧文件待删 {1}" -f $toPush.Count, $toDelete.Count) Yellow
   foreach ($it in $toPush)  { Say 'PUSH' "将推 $($it.name)" DarkGray }

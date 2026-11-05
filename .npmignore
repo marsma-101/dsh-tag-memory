@@ -1,0 +1,19 @@
+# .npmignore —— 确保内部文档绝不进 npm 包 / 插件发布物
+#
+# 内部文档是开发备忘与需求说明书，只服务内部开发与版本追溯。
+# 它们留在 git 里（版本控制），但这里明确排除出发布物。
+
+内部文档/
+ops/
+
+# 开发辅助
+.gitignore
+.npmignore
+*.log
+node_modules/
+dist/
+
+# 运行时数据
+store/
+records/
+data/
