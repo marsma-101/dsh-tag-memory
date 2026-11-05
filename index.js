@@ -1458,23 +1458,50 @@ function createHostService(ctx, config) {
    * 自动整理（tidy）依赖模型参与，只在配置开启时由工具链触发，定时器不代劳。
    */
   function startTimer() {
-    const hours = Number(config?.autoBackupIntervalHours);
-    if (!Number.isFinite(hours) || hours <= 0) return;
+    const backupHours = Number(config?.autoBackupIntervalHours);
 
-    const everyMs = Math.max(60_000, hours * 3600_000);
-    timer = setInterval(() => {
-      backupNow().catch((err) => {
-        ctx.logger?.warn?.('[dsh-tag-memory] 定时备份失败：%s', err?.message ?? err);
-      });
-    }, everyMs);
-    // 不阻塞进程退出
-    if (typeof timer.unref === 'function') timer.unref();
+    // ---- 定时任务 1：自动备份 ----
+    // setInterval + .unref()：官方硬规矩，不阻塞进程退出。
+    if (Number.isFinite(backupHours) && backupHours > 0) {
+      const everyMs = Math.max(60_000, backupHours * 3600_000);
+      let lastAt = null;
+      timer = setInterval(() => {
+        // 用 schedule.mjs 的纯判定决定该不该跑（而不是无脑每隔 N 小时跑一次）
+        const due = isBackupDue({ intervalMs: everyMs, lastAt, now: Date.now() });
+        if (!due.due) return;
+        backupNow()
+          .then((r) => { if (r && r.ok) lastAt = Date.now(); })
+          .catch(() => {});
+      }, Math.min(everyMs, 3600_000));
+      if (typeof timer.unref === 'function') timer.unref();
+    }
+
+    // ---- 定时任务 2：整理提醒 ----
+    // ⚠️ 整理**必须由模型参与判断**（《流程_整理》引言），定时器不能代替模型改库。
+    // 所以这里只做"该整理了"的判定并在日志里提示，不自动执行 runTidy。
+    // 真正的整理由用户/模型在对话里触发（dtm_retag / runTidy）。
+    const tidyHours = Number(config?.autoTidyIntervalHours);
+    if (Number.isFinite(tidyHours) && tidyHours > 0) {
+      const everyMs = Math.max(60_000, tidyHours * 3600_000);
+      let lastTidyAt = null;
+      tidyTimer = setInterval(() => {
+        const due = isTidyDue({ intervalMs: everyMs, lastAt: lastTidyAt, now: Date.now() });
+        if (due.due) {
+          ctx.logger?.info?.('[dsh-tag-memory] 建议整理：' + due.reason);
+        }
+      }, Math.min(everyMs, 3600_000));
+      if (typeof tidyTimer.unref === 'function') tidyTimer.unref();
+    }
   }
 
   function dispose() {
     if (timer) {
       clearInterval(timer);
       timer = null;
+    }
+    if (tidyTimer) {
+      clearInterval(tidyTimer);
+      tidyTimer = null;
     }
     cfgCache = null;
   }
@@ -1541,6 +1568,7 @@ function createHostService(ctx, config) {
     migrateDataDir: ['request'],
     restore: ['request'],
     mergeLibrary: ['request'],
+    runTidy: ['request'],
   };
   for (const name of Object.keys(REMOTE_SIGNATURES)) {
     const impl = serviceObj[name];
@@ -1712,40 +1740,49 @@ const oneParamMethod = (method, description, paramName) => ({
 
 async function registerRemote(ctx, service) {
   /*
-   * ⚠️ 千万不要用 ctx.typert.register({package, face, invocations}) ——
-   * 那不是 Remote 的注册入口。真实机制（dsh-typert-protocol + dsh-api-gateway）是：
+   * ⚠️ 这里是 Remote 端点注册的**唯一正确做法**，踩过四个坑：
    *
-   *   1) service 实例上挂 typertRemote 绑定，字段必须恰好是
-   *      { service, serviceKey, namespace }，且 service 必须是实例本身
-   *      （gateway 严格校验这三个字段，错了抛 gateway/binding-invalid）
-   *   2) service 的 class prototype 上要有
-   *      符号键 "@deepseek-ai/dsh-typert-protocol/remote-methods" 描述符：
-   *      { version: 1, methods: [{ method, invocation: {kind:'direct'} }] }
-   *      （protocol 的 remoteMethods() 只从 prototype 读，不从实例读）
+   *  ① 不能用 ctx.typert.register({package, face, invocations})
+   *     —— 那是 lookup 注册，签名完全不同
+   *  ② 服务必须是「class 实例」形态：protocol 的 remoteMethods() 只从
+   *     Object.getPrototypeOf(service) 读符号描述符；普通对象字面量的
+   *     prototype 是 Object.prototype，永远读不到 → 端点不存在 → 404
+   *  ③ 方法必须同时存在于 prototype 链上：gateway 的 methodParameterNames()
+   *     用 Object.getOwnPropertyDescriptor 沿原型链找实现，找不到就抛
+   *     "Remote marker has no prototype method"
+   *  ④ 方法签名必须是**纯标识符**：gateway 用 Function.toString() 解析参数名，
+   *     解构 / 默认值 / rest 一律拒绝
    *
-   * 满足这两条，gateway 的 collectSrcClaims() 才会把
-   * namespace/method 登记成合法端点；否则客户端 $mount 成功但请求 404。
+   * 满足这四条，gateway 的 collectSrcClaims() 才会把 <namespace>/<method>
+   * 登记成合法端点。
+   *
+   * REMOTE_SIGNATURES 是唯一数据源：参数名在这里定，marker 和包装器都从它派生。
+   * client 侧 spec 的参数名必须与这里逐字一致（曾发生 payload/request 漂移，
+   * 装上后整个编辑功能不可用，而双方自测都查不出）。
    */
-  const PARAM = {
-    listEntries: 'query',
-    retagEntry: 'request',
-    migrateDataDir: 'request',
-    restore: 'request',
-    mergeLibrary: 'request',
+  const REMOTE_SIGNATURES = {
+    getOverview: [],
+    getFacets: [],
+    getSettings: [],
+    backupNow: [],
+    listBackups: [],
+    listEntries: ['query'],
+    retagEntry: ['request'],
+    migrateDataDir: ['request'],
+    restore: ['request'],
+    mergeLibrary: ['request'],
+    runTidy: ['request'],
   };
-  const METHODS = [
-    'getOverview', 'listEntries', 'getFacets', 'getSettings',
-    'retagEntry', 'migrateDataDir', 'backupNow', 'listBackups', 'restore', 'mergeLibrary',
-  ];
+  const NAMES = Object.keys(REMOTE_SIGNATURES);
 
-  // ---- 1) 绑定：字段必须是这三个，且 service 指向实例本身 ----
+  // ---- 1) 绑定：字段必须恰好这三个，service 指向实例本身 ----
   service.typertRemote = Object.freeze({
     service,
     serviceKey: SERVICE_NAME,
     namespace: REMOTE_NAMESPACE,
   });
 
-  // ---- 2) prototype 描述符：gateway 只认这里 ----
+  // ---- 2) prototype 描述符 + 纯标识符签名包装 ----
   const prototype = Object.getPrototypeOf(service);
   if (!prototype || prototype === Object.prototype) {
     ctx.logger?.warn?.(
@@ -1753,20 +1790,38 @@ async function registerRemote(ctx, service) {
     );
     return;
   }
+
+  // 2a) 先放包装器（纯标识符签名，内部转调真实实现）
+  for (const name of NAMES) {
+    const impl = service[name];
+    if (typeof impl !== 'function') continue;
+    const params = REMOTE_SIGNATURES[name];
+    const wrapper =
+      params.length === 0
+        ? new Function('impl', 'return function ' + name + '() { return impl.apply(this, arguments) }')(impl)
+        : new Function(
+            'impl',
+            'return function ' + name + '(' + params.join(', ') + ') { return impl.apply(this, arguments) }',
+          )(impl);
+    Object.defineProperty(prototype, name, {
+      configurable: true,
+      writable: true,
+      value: wrapper,
+    });
+  }
+
+  // 2b) 再写符号描述符（marker 与包装器一一对应）
   const KEY = '@deepseek-ai/dsh-typert-protocol/remote-methods';
   const existing = Object.getOwnPropertyDescriptor(prototype, KEY);
-  const methods = METHODS.map(function (m) {
-    const marker = { method: m, invocation: Object.freeze({ kind: 'direct' }) };
-    if (PARAM[m]) marker.parameters = Object.freeze([{ name: PARAM[m], required: true }]);
-    return Object.freeze(marker);
-  });
-  const merged =
-    existing && existing.value && Array.isArray(existing.value.methods)
-      ? existing.value.methods.concat(methods)
-      : methods;
+  const existingMethods =
+    existing && existing.value && Array.isArray(existing.value.methods) ? existing.value.methods : [];
+  const byMethod = new Map(existingMethods.map((m) => [m.method, m]));
+  for (const name of NAMES) {
+    byMethod.set(name, Object.freeze({ method: name, invocation: Object.freeze({ kind: 'direct' }) }));
+  }
   Object.defineProperty(prototype, KEY, {
     configurable: true,
-    value: Object.freeze({ version: 1, methods: Object.freeze(merged) }),
+    value: Object.freeze({ version: 1, methods: Object.freeze([...byMethod.values()]) }),
   });
 }
 

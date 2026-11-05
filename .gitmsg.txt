@@ -1,40 +1,27 @@
-补齐整理链路：tidy.mjs + schedule.mjs + migrate.mjs + 宿主 runTidy
+整理链路端到端打通 + 端点统一
 
-新增三个引擎模块（纯逻辑，零 Cordis 依赖）：
+修复：
+  registerRemote 内部有两套数据（旧 METHODS 数组 + 新 REMOTE_SIGNATURES），
+  METHODS 里没有 runTidy，导致端点 404。
+  -> 重写为单一数据源：REMOTE_SIGNATURES 定参数名，
+     marker 和纯标识符包装器都从它派生，不可能再漏。
+  同时删掉死代码（noParamMethod / oneParamMethod，已无引用）。
 
-1. lib/engine/tidy.mjs
-   foldFeedback     从 read.jsonl 调用序列反推 ok/wrong/unused
-                    （显式 feedback 优先；near 反复出现未被采纳记 wrong）
-   nextStability    状态机：观察→稳定(ok≥阈值且无wrong) / 任意→易变(wrong>0)
-                    / 易变→观察(安静自愈)；已到目标态不重复改
-   planPromote      升通用：≥4 个不同身份/项目 + 模型判定的同一簇
-                    每次只升一个维度（不做连升两级）
-   planInduction    归纳：≥3 个独立场合（按 ts 日期分组近似）
-   validateTidyPatch 越界校验：编号/主要内容/时距 不可改
-   planTidy         汇总 changes（有依据可执行）+ proposals（只提议）
+定时任务增强：
+  1. 自动备份：用 schedule.mjs 的 isBackupDue 纯判定，不再无脑按间隔跑
+  2. 整理提醒：用 isTidyDue 判定，**只记日志提示不自作主张改库**
+     —— 整理必须由模型参与判断（《流程_整理》引言），定时器不能代替
+  setInterval + .unref() 保持官方硬规矩；dispose 里两个 timer 都清理
 
-2. lib/engine/schedule.mjs
-   isBackupDue / isTidyDue / formatInterval
-   注意与 tick.mjs 分工：tick 的 createTickQueue 是纯队列（无 timer），
-   schedule 是纯判定 —— 都不持有 timer，host 用 setInterval 驱动
+端点实测（容器内真实 HTTP）：
+  POST /api/tagMemory/getOverview  -> 200 OK
+  POST /api/tagMemory/getSettings  -> 200 OK
+  POST /api/tagMemory/runTidy      -> 200 OK   ← 新端点
 
-3. lib/engine/migrate.mjs
-   canMigrate      ①② 优先级(config/env)锁定时明确拒绝 + 告诉用户改哪一行
-   verifyMigration 字节数 + 记录数双校验
-
-宿主新增 runTidy({dryRun, promoteCandidates, who})
-  编排：备份 → 锁内读库+台账 → planTidy → 锁内写回 → 记 tidy 台账
-  dryRun 只算不写（UI 预览用）
-
-修复一个实测才发现的 bug：
-  readJsonl 返回 { items, errors } 而非数组，我直接当数组用
-  -> 台账永远读成空，整理永远不会改任何东西
-  这个 bug 静态检查和单测都发现不了，必须真跑
-
-容器实测通过：
-  写 1 条 + 造 3 次 ok feedback
-  dryRun  -> 识别"稳定性 观察→稳定，依据连续 ok 3 次"
-  real    -> applied=1，库中稳定性列变"稳定"
-  tidy.jsonl 记 1 行 action=stability，含 before/after/basis
-
-引擎冒烟：tidy 13/13、schedule+migrate 11/11
+完整生命周期实测（容器内）：
+  写 1 条 + 造 4 次 ok feedback
+  -> dryRun 识别"稳定性 观察→稳定"
+  -> 执行 applied=1，库中变"稳定"
+  -> 再追加 1 次 wrong
+  -> 整理 applied=1，库中变"易变"
+  -> tidy.jsonl 累计 2 条动作记录（含 before/after/basis）
