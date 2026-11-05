@@ -1203,6 +1203,19 @@ function createHostService(ctx, config) {
   /* ---------------- 定时任务 ---------------- */
 
   /**
+   * ⚠️ 归属说明（Lead 2026-11-05 裁定，**请勿搬去 engine**）
+   *
+   * 《架构说明》§4.1 列过 `lib/engine/schedule.mjs`，但定时任务**必须**留在宿主：
+   *
+   *   · `setInterval` 是进程级副作用，engine 的契约是"纯逻辑、能脱离框架单测"
+   *     （《接口契约》§一），一个持有 timer 的文件无法脱离进程测试。
+   *   · 定时器要在插件卸载时清掉（`ctx.effect` 的 dispose），这是 **ctx 生命周期**，
+   *     engine 不知道 ctx 存在。
+   *   · 定时器触发的动作（`backupNow()`）本身又要走编排，而编排归宿主。
+   *
+   * engine 侧真正该有的"定时"是 `tick.mjs` 的 `createTickQueue()`——那是**纯队列**
+   * （只管 pending 集合与去重，不持有 timer），由宿主喂给它 flush 回调。已经拆开了。
+   *
    * 定时任务：`setInterval` + `.unref()`（官方硬规矩：不阻塞进程退出）。
    *
    * 目前做的事：按 `config.autoBackupIntervalHours` 定期备份。
