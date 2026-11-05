@@ -1,13 +1,11 @@
-host-dev 补三处归属注释（替代 tidy/schedule/migrate 的实现说明）
+流程纪律：判据必须能判失败（采纳 host-dev 建议）
 
-L775  取代/归档（对应 tidy.mjs）
-L944  导出/备份/恢复/合并/搬家（对应 migrate.mjs）
-L1206 定时任务（对应 schedule.mjs）
+教训1 补硬性纪律：
+任何声称"验证通过"的判据，必须先构造反例确认它能判失败。
+做不到则该判据的结论不得用于交付。
 
-每处标注「归属说明，请勿搬去 engine」，统一判定标准：
-纯判定与纯复制归 engine；跨步骤编排与 ctx 相关的归宿主
+具体操作：写判据时同时写一个"应该失败"的对照组，
+跑一遍确认它真失败——尺子先量已知长度，才可信。
 
-另澄清易混点：engine 侧 tick.mjs 的 createTickQueue 是纯队列（无 timer），
-由宿主喂 flush 回调；与「定时任务在宿主」是队列 vs 触发器的分工，不是遗漏
-
-复跑 host.m 9/9 + host.no 10/10，无回归
+样板：tests/gate3/timer.test.mjs 第一条用例即判据自检
+（先证明 hasRef 能区分 ref/unref，再用它量被测对象）
