@@ -497,7 +497,12 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
         // `assertExactArguments` 要求 args 是 plain object，传 `undefined` 会被拒：
         //   "gateway/arguments-invalid: args must be a plain object"
         // （实测确认；不是可选的风格问题，是硬要求）
-        const outer = await fn.apply(ns, args.length === 0 ? [{}] : args)
+        // ⚠️ 无参方法**不能**传 {}：
+        // 宿主侧的签名是真的零参数（getOverview() 等），gateway 会按 Function.length
+        // 校验实参个数，多传一个就报：
+        //   tagMemory/getSettings expected 0 argument(s), got 1
+        // 之前的 "无参也传 {}" 写法是误信了 assertExactArguments 的旧假设。
+        const outer = await fn.apply(ns, args)
         if (!outer || outer.ok !== true) {
           const err = (outer && outer.error) || {}
           throw transportError(method, err.code, err.message)

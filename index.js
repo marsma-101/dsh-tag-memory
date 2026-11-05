@@ -1393,6 +1393,47 @@ function createHostService(ctx, config) {
   // 符号键描述符；普通对象字面量的 prototype 是 Object.prototype，永远读不到，
   // 结果就是客户端 $mount 成功、请求却 404。
   // 这里给一个专属原型（不改任何方法实现），让 gateway 能发现端点。
+  // ⚠️ 方法必须同时出现在 prototype 上！
+  // gateway 的 methodParameterNames() 只从 Object.getPrototypeOf(service) 的
+  // 原型链上找方法实现（OwnPropertyDescriptor），找不到就抛
+  //   Remote marker has no prototype method \"xxx\"
+  // 所以不能只让 marker 存在于 prototype、方法却留在实例上。
+  // 这里把 10 个 Remote 方法镜像到 proto（不改实例上的实现，二者指向同一函数）。
+  // gateway 用 Function.prototype.toString() 解析方法源码来提取参数名，
+  // 要求「唯一标识符参数，不许解构 / 默认值 / rest」——
+  // 而我们的实现大量用 `fn(x = {})` 和 `fn({ a, b } = {})`，直接镜像会报：
+  //   SRC method "xxx" must use unique identifier parameters without destructuring...
+  // 所以在 proto 上放一层**纯标识符签名**的薄包装，内部转调真实实现。
+  const REMOTE_SIGNATURES = {
+    getOverview: [],
+    getFacets: [],
+    getSettings: [],
+    backupNow: [],
+    listBackups: [],
+    listEntries: ['query'],
+    retagEntry: ['request'],
+    migrateDataDir: ['request'],
+    restore: ['request'],
+    mergeLibrary: ['request'],
+  };
+  for (const name of Object.keys(REMOTE_SIGNATURES)) {
+    const impl = serviceObj[name];
+    if (typeof impl !== 'function') continue;
+    const params = REMOTE_SIGNATURES[name];
+    // 用 Function 构造器生成「纯标识符参数」的函数，
+    // 这样 toString() 得到的形如 function (query) { ... }，满足 gateway 的解析要求。
+    const wrapper = params.length === 0
+      ? new Function('impl', 'return function ' + name + '() { return impl.apply(this, arguments) }')(impl)
+      : new Function(
+          'impl',
+          'return function ' + name + '(' + params.join(', ') + ') { return impl.apply(this, arguments) }',
+        )(impl);
+    Object.defineProperty(HostServiceProto, name, {
+      configurable: true,
+      writable: true,
+      value: wrapper,
+    });
+  }
   return Object.setPrototypeOf(serviceObj, HostServiceProto);
 }
 
@@ -1613,7 +1654,7 @@ async function registerRemote(ctx, service) {
  *
  * 只为满足 dsh-typert-protocol 的 Remote 端点发现：它的 remoteMethods() 读的是
  * `Object.getPrototypeOf(service)` 上的符号键描述符。用 Object.prototype 会读不到。
- * 方法实现全部在 serviceObj 自身上（Object.setPrototypeOf 不改变自有属性查找）。
+ * 但 gateway 的 methodParameterNames() 只在 prototype 链上找方法实现，所以调用方必须把方法也镜像到 proto（见 createHostService 末尾）。
  */
 const HostServiceProto = Object.create(Object.prototype);
 
