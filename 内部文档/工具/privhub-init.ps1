@@ -31,7 +31,7 @@ param(
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$PluginDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'dsh-tag-memory'
+$PluginDir = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 if (-not (Test-Path $PluginDir)) { throw "找不到插件目录：$PluginDir" }
 
 # 只推「插件运行/对外」需要的文件。内部文档（内部文档/）**绝不推**。
