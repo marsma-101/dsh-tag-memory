@@ -17,6 +17,7 @@ import {
   planInduction,
   validateTidyPatch,
   planTidy,
+  planSplit,
   TIDY_EDITABLE,
   TIDY_IMMUTABLE,
 } from '../../lib/engine/tidy.mjs'
@@ -262,4 +263,65 @@ test('K27 planTidy：report 字段齐全', () => {
   for (const k of ['条目总数', 'read记录数', 'write记录数', 'feedback覆盖条目数', 'changes', 'proposals']) {
     assert.ok(k in r.report, `report 缺 ${k}`)
   }
+})
+// ── planSplit（拆库拆表）─────────────────────────────────
+
+test('K28 拆库：空库不拆', () => {
+  assert.equal(planSplit([]).shouldSplit, false)
+})
+
+test('K29 拆库：条目数超阈值 → 建议拆', () => {
+  const many = Array.from({ length: 2100 }, (_, i) => ({ 项目: `P${i % 10}`, 自由标签: [`t${i}`] }))
+  const r = planSplit(many, { maxEntries: 2000 })
+  assert.equal(r.shouldSplit, true)
+  assert.ok(r.reason.includes('条目数'))
+})
+
+test('K30 拆库：单项目占比过高 → 建议拆并点名该维度', () => {
+  const list = Array.from({ length: 100 }, (_, i) => ({
+    项目: i < 80 ? 'BIG' : 'small',
+    自由标签: [`t${i}`],
+  }))
+  const r = planSplit(list, { projectDominance: 0.6 })
+  assert.equal(r.shouldSplit, true)
+  assert.ok(r.reason.includes('BIG'))
+  assert.ok(r.suggestion.includes('BIG'))
+})
+
+test('K31 拆库：标签重复度过高 → 建议拆', () => {
+  const list = Array.from({ length: 100 }, (_, i) => ({ 项目: `P${i % 5}`, 自由标签: ['same', 'tag'] }))
+  const r = planSplit(list, { tagDuplication: 0.85 })
+  assert.equal(r.shouldSplit, true)
+  assert.ok(r.reason.includes('标签重复度'))
+})
+
+test('K32 拆库：正常库不拆', () => {
+  const list = Array.from({ length: 100 }, (_, i) => ({ 项目: `P${i % 10}`, 自由标签: [`t${i}`, `u${i}`] }))
+  const r = planSplit(list)
+  assert.equal(r.shouldSplit, false)
+})
+
+test('K33 拆库：指标都回报（供 UI 显示）', () => {
+  const r = planSplit([{ 项目: 'P', 自由标签: ['a'] }])
+  for (const k of ['条目数', '条目数阈值', '最大项目占比', '标签重复度']) {
+    assert.ok(k in r.metrics, `metrics 缺 ${k}`)
+  }
+})
+
+test('K34 拆库：只提议不自动执行（planTidy 里归入 proposals）', () => {
+  const many = Array.from({ length: 2100 }, (_, i) => ({
+    编号: `M-${i}`,
+    形态: '事实',
+    项目: `P${i % 10}`,
+    智能体: 'A',
+    主要内容: 'x',
+    自由标签: [`t${i}`],
+    稳定性: '观察',
+    时距: 1,
+    状态: '生效',
+  }))
+  const r = planTidy({ records: many, readLogs: [], writeLogs: [], config: {} })
+  assert.equal(r.changes.length, 0, '拆库不得进入可执行 changes')
+  assert.ok(r.proposals.some((p) => p.kind === 'split'), '拆库应作为 proposal')
+  assert.equal(r.report.需要拆库, true)
 })
