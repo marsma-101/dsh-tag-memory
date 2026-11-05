@@ -44,16 +44,28 @@ test('J1 lib/engine/** 零 cordis / @deepseek-ai 依赖，且能直接 import', 
   )
 
   // 源码里不得出现 cordis / ctx. 这类框架符号
+  //
+  // ⚠️ 判定口径：只查**代码**，不查注释和字符串字面量。
+  //    因为面向用户的报错文案里必须提到 "cordis.patch.yml"（告诉用户改哪一行），
+  //    那是字符串内容、不是依赖。早期版本只排除了注释，把 migrate.mjs 的
+  //    用户提示误判成"引用了 cordis"，属于测试判定过严，不是代码缺陷。
   const symbolHits = []
   for (const f of ENGINE_SOURCES) {
     const lines = readText(f).split(/\r?\n/)
     lines.forEach((line, i) => {
       const t = line.trim()
       if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return // 注释里提到不算
-      if (/\bcordis\b/i.test(line)) symbolHits.push(`${f}:${i + 1}: ${t}`)
+
+      // 剥掉字符串字面量（'...' / "..." / `...`），只留代码部分
+      const codeOnly = line
+        .replace(/`(?:\\.|[^`\\])*`/g, '""')
+        .replace(/'(?:\\.|[^'\\])*'/g, '""')
+        .replace(/"(?:\\.|[^"\\])*"/g, '""')
+
+      if (/\bcordis\b/i.test(codeOnly)) symbolHits.push(`${f}:${i + 1}: ${t}`)
     })
   }
-  assert.deepEqual(symbolHits, [], `引擎代码不得引用 cordis：\n${symbolHits.join('\n')}`)
+  assert.deepEqual(symbolHits, [], `引擎代码不得引用 cordis（注释与字符串不算）：\n${symbolHits.join('\n')}`)
 })
 
 /* ------------------------------------------------------------------ *

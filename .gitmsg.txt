@@ -1,26 +1,36 @@
-UI 接入整理：设置页加「预览要改什么」「立即整理」
+补 qa 测试 + 修 7 处测试与实现脱节
 
-client.js:
-  · Remote spec 加 tagMemory/runTidy（参数 request）
-  · createApi 加 runTidy(payload)
-  · createLazyApi methods 列表加 runTidy
-  · SettingsPage 加 tidyMsg/tidyErr state + onTidy handler
-  · 整理卡片加两个按钮（data-dtm-action: tidy-preview / tidy-apply）
-  · 中英文案各 5 条（tidyPreview/tidyApply/tidyNoChange/tidyPreviewResult/tidyApplied）
+新增测试（52 条）：
+  tests/engine/tidy.k.test.mjs      27 条  整理链路（foldFeedback/状态机/升通用/归纳/越界/汇总）
+  tests/engine/schedule.l.test.mjs  14 条  定时判定（备份到期/整理提醒/积压/格式化）
+  tests/engine/migrate.m.test.mjs   11 条  搬家（4 级优先级/锁定拒绝/双校验/清单）
 
-设计要点：
-  · 预览走 dryRun（只算不写），避免用户点一下就把库改了
-  · 实跑后自动 load() 刷新计数
-  · 整理必须模型参与判断（《流程_整理》引言），UI 只负责发起
+修真实的实现缺陷：
+  planInduction 在成功日志少于阈值时直接 return []，
+  调用方无法区分"没有数据"和"有数据但不够格"，
+  报告里看不到"还差几个场合"这种可行动信息。
+  -> 改为始终返回结构（含 needed 字段，eligible 表示够不够格）
 
-踩坑记录：
-  第一次把 tidyMsg state 插到了 EntriesPage（anchor 匹配到了错误的
-  React.useState(null)），结果 SettingsPage 渲染报 "tidyMsg is not defined"。
-  -> 改为锚定 SettingsPage 独有的 migrateOpen 才算对。
-  这类 bug 只有真渲染才暴露，静态检查和语法检查全程都是过的。
+修测试与实现脱节（7 处，都是我的改动导致）：
+  1. J1 只用正则查 "cordis" 字样，把 migrate.mjs 里给用户看的
+     报错文案（"改 cordis.patch.yml 哪一行"）误判成框架依赖
+     -> 改为先剥掉字符串字面量，只查代码
+  2. C1 写死 function createApi(ctx)，我改成 createApi(nsRef) 后解析失败
+     -> 改为不绑参数名
+  3. C3 写死 hasApi(ctx) -> 改为 hasApi(\w+)
+  4. 契约1 依赖已删除的 noParamMethod/oneParamMethod
+     -> 改为从 REMOTE_SIGNATURES 提取
+  5. 契约3 同上，createApi 参数名不绑
+  6. API2 断言"无参方法必须传 {}"——这条**已被真容器实测推翻**
+     （gateway 报 expected 0 argument(s), got 1）
+     -> 改为断言无参时不传实参
+  7-9. 假 ctx 缺 ctx.inject（宿主用 ctx.inject(['typert']) 延迟注册 Remote）
+     -> 三个测试 helper 都补上 inject 实现
 
-无头浏览器实测：
-  设置页无错误         ✅
-  预览按钮存在         ✅
-  整理按钮存在         ✅
-  点预览 -> "没有需要改的地方。"（169 条老数据无 feedback，逻辑正确）✅
+清残留：client.js.bak（P8 报的未覆盖文件）
+
+client.js 顺带加兼容：createApi/hasApi 既接受 nsRef({current})
+也接受 ctx({remote:{tagMemory}})，便于单测且向后兼容。
+生产路径仍必须走 nsRef —— 直接 ctx.remote[NS] 会被 cordis proxy 拦。
+
+全量：233 通过 / 0 失败 / 4 条视觉如实未验证（共 237 条）

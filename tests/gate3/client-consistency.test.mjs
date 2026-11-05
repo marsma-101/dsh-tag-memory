@@ -30,7 +30,9 @@ function lazyMethods() {
  * 只在 `return { ... }` 到 `}` 之间取 `name: function`。
  */
 function createApiMethods() {
-  const start = CLIENT.indexOf('function createApi(ctx)')
+  // 不绑参数名（createApi(ctx) / createApi(nsRef) 都应能解析）
+  const m = CLIENT.match(/function\s+createApi\s*\(/)
+  const start = m ? m.index : -1
   if (start === -1) return null
   const retIdx = CLIENT.indexOf('return {', start)
   if (retIdx === -1) return null
@@ -134,7 +136,7 @@ test('C3 lazy 代理每个方法都转发到同名 api 方法（不得转错名�
   assert.deepEqual(hardcoded, [], `转发体里不得写死方法名，发现：${hardcoded.join(', ')}`)
 
   // ready() 必须存在（页面据此判断是否真连上）
-  assert.match(CLIENT, /ready:\s*function\s*\(\s*\)\s*\{\s*return\s+hasApi\(ctx\)/, 'lazy 代理必须提供 ready()')
+  assert.match(CLIENT, /ready:\s*function\s*\(\s*\)\s*\{\s*return\s+hasApi\(\w+\)/, 'lazy 代理必须提供 ready()')
 
   // inject 面不得再是"一次性求值"写法（原缺陷）
   assert.equal(

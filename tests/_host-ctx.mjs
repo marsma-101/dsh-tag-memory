@@ -52,6 +52,26 @@ export async function makeHostCtx(opts = {}) {
     get(name) {
       return services[name]
     },
+    /**
+     * 子上下文注入（cordis 的 ctx.inject(deps, callback)）。
+     * 宿主用 ctx.inject(['typert'], cb) 延迟注册 Remote 端点，
+     * 因为 apply() 同步阶段 fiber 还没 ACTIVE，ctx.get('typert') 拿不到。
+     * 冒烟里同步调用回调、把同一个 ctx 当 child 传进去即可。
+     */
+    inject(deps, callback) {
+      const child = ctx
+      const ret = typeof callback === 'function' ? callback(child) : undefined
+      const dispose = typeof ret === 'function' ? ret : () => {}
+      const fiber = Promise.resolve()
+      fiber.dispose = async () => {
+        try {
+          await dispose()
+        } catch {
+          /* 卸载期忽略 */
+        }
+      }
+      return fiber
+    },
   }
 
   // ⚠️ 投影服务必须在 apply 之前挂好

@@ -49,6 +49,33 @@ export function createFakeCtx({ services = {} } = {}) {
       return services[name] ?? null
     },
 
+    /**
+     * 子上下文注入（cordis 的 ctx.inject(deps, callback)）。
+     *
+     * 宿主插件用 `ctx.inject(['typert'], cb)` 声明依赖后再注册 Remote 端点 ——
+     * 因为 cordis 的 reflect.get(name, strict=true) 要求 fiber 已 ACTIVE，
+     * apply() 同步阶段拿不到 typert。这里只要**同步调用回调**即可通过冒烟，
+     * 传进去的 child 就是同一个 ctx（依赖已"满足"的近似）。
+     *
+     * @returns 一个带 dispose 的体（模拟 fiber）
+     */
+    inject(deps, callback) {
+      const child = ctx
+      const ret = typeof callback === 'function' ? callback(child) : undefined
+      const dispose = typeof ret === 'function' ? ret : () => {}
+      disposers.push(dispose)
+      // 返回一个可 await、可 dispose 的体（cordis 的 fiber 形状）
+      const fiber = Promise.resolve()
+      fiber.dispose = async () => {
+        try {
+          await dispose()
+        } catch {
+          /* 卸载期忽略 */
+        }
+      }
+      return fiber
+    },
+
     logger: {
       debug() {},
       info() {},

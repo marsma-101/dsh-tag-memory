@@ -103,7 +103,13 @@ test('API2 正常挂载 → 各方法返回宿主 value，且外层 carrier 被�
   assert.deepEqual(list.items, [{ 编号: 'M-1' }])
 
   // 参数透传检查
-  assert.deepEqual(calls[0][1], {}, '无参方法必须传 {} （assertExactArguments 要求 plain object）')
+  // ⚠️ 这条断言**已按真容器实测修正**（2026-11-06）。
+  // 早期假设"无参方法也要传 {}，因为 assertExactArguments 要求 plain object"，
+  // 真装后实测报错：
+  //   tagMemory/getSettings expected 0 argument(s), got 1
+  // —— gateway 按 Function.length 校验实参个数，无参方法**不能**传任何实参。
+  // 所以这里断言：无参方法调用时实参列表为空（args 为 undefined）。
+  assert.equal(calls[0][1], undefined, '无参方法不得传 {}（gateway 按 Function.length 校验，会报 expected 0 argument(s)）')
   assert.deepEqual(calls[1][1], { page: 1 }, '有参方法必须原样透传')
 })
 

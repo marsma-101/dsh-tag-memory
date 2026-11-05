@@ -27,17 +27,20 @@ const CLIENT_SRC = readFileSync(join(process.cwd(), 'client.js'), 'utf8')
 function hostEndpoints() {
   const map = new Map()
 
-  // 无参：noParamMethod('getOverview', '说明')
-  for (const m of HOST_SRC.matchAll(/noParamMethod\(\s*'([A-Za-z0-9_]+)'/g)) {
-    map.set(m[1], null)
-  }
+  // ⚠️ 提取源已改为 REMOTE_SIGNATURES（registerRemote 里的唯一数据源）。
+  //
+  // 历史：早期宿主用 noParamMethod(...) / oneParamMethod(..., 'paramName') 两个
+  // helper 声明端点，测试也照着解析。后来端点注册重写为
+  //   REMOTE_SIGNATURES = { getOverview: [], listEntries: ['query'], ... }
+  // 单一数据源（marker 与纯标识符包装器都从它派生），旧 helper 已删除。
+  // 解析目标随之变化 —— 否则契约测试会"提取到 0 个端点"而假性失败。
+  const block = HOST_SRC.match(/const REMOTE_SIGNATURES = \{([\s\S]*?)\n  \};/)
+  if (!block) return map
 
-  // 有参：oneParamMethod('listEntries', '说明', 'query')
-  // 说明文字可能很长且含引号，用非贪婪跨行匹配到参数名
-  for (const m of HOST_SRC.matchAll(
-    /oneParamMethod\(\s*'([A-Za-z0-9_]+)'[\s\S]{0,300}?,\s*'([A-Za-z0-9_]+)'\s*\)/g,
-  )) {
-    map.set(m[1], m[2])
+  for (const m of block[1].matchAll(/([A-Za-z0-9_]+)\s*:\s*\[([^\]]*)\]/g)) {
+    const name = m[1]
+    const params = [...m[2].matchAll(/'([^']+)'/g)].map((x) => x[1])
+    map.set(name, params.length === 0 ? null : params[0])
   }
 
   return map
@@ -209,7 +212,9 @@ test('契约3 三方方法名完全一致（spec / createApi / createLazyApi）�
   const spec = [...new Set([...CLIENT_SRC.matchAll(/'tagMemory\/([A-Za-z0-9_]+)'\s*:\s*\{/g)].map((m) => m[1]))].sort()
 
   // ② createApi 返回对象里name: function
-  const apiStart = CLIENT_SRC.indexOf('function createApi(ctx)')
+  // 不绑参数名（createApi(ctx) / createApi(nsRef) 都应能解析）
+  const apiMatch = CLIENT_SRC.match(/function\s+createApi\s*\(/)
+  const apiStart = apiMatch ? apiMatch.index : -1
   assert.ok(apiStart >= 0, '找不到 createApi')
   const retIdx = CLIENT_SRC.indexOf('return {', apiStart)
   assert.ok(retIdx >= 0, 'createApi 里找不到 return {')

@@ -46,6 +46,18 @@ function makeCtx() {
     get(n) {
       return services[n]
     },
+    /**
+     * cordis 的 ctx.inject(deps, cb)：宿主用它延迟注册 Remote 端点
+     * （apply() 同步阶段 fiber 未 ACTIVE，取不到 typert）。
+     * 冒烟里同步调回调，把同一 ctx 当 child。
+     */
+    inject(deps, callback) {
+      const ret = typeof callback === 'function' ? callback(this) : undefined
+      const dispose = typeof ret === 'function' ? ret : () => {}
+      const fiber = Promise.resolve()
+      fiber.dispose = async () => { try { await dispose() } catch { /* 卸载期忽略 */ } }
+      return fiber
+    },
     __init() {
       services.sessionProjections = { stateOf: () => null, register: () => () => {} }
       return this

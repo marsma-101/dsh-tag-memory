@@ -502,7 +502,17 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
      */
     function createApi(nsRef) {
       function namespace() {
-        return nsRef.current
+        // 兼容两种入参形态（便于单测与向后兼容）：
+        //   ① nsRef（生产路径）：{ current: ns } —— ns 由 ctx.inject 回调写入
+        //   ② ctx（测试/兼容）：{ remote: { tagMemory: ns } }
+        //
+        // ⚠️ 生产路径**必须**走 ①：直接 ctx.remote[REMOTE_NS] 在真实浏览器里会被
+        // cordis 的 ctx proxy 拦掉（cannot get property "remote.tagMemory" without
+        // inject），因为 remote.tagMemory 是 $mount 之后才存在的动态子命名空间。
+        if (!nsRef || typeof nsRef !== 'object') return null
+        if ('current' in nsRef) return nsRef.current
+        const remote = nsRef.remote
+        return remote ? remote[REMOTE_NS] || null : null
       }
 
       async function call(method) {
@@ -568,7 +578,13 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
      * 页面用它决定显示"未接线"还是真数据，**不伪造数据**。
      */
     function hasApi(nsRef) {
-        const ns = nsRef.current
+      // 与 createApi 的 namespace() 同口径：nsRef（{current}）或 ctx（{remote}）都能吃
+      // —— 前者是生产路径（由 ctx.inject 回调写入），后者便于单测与向后兼容。
+      let ns = null
+      if (nsRef && typeof nsRef === 'object') {
+        if ('current' in nsRef) ns = nsRef.current
+        else ns = nsRef.remote ? nsRef.remote[REMOTE_NS] || null : null
+      }
       return !!(ns && typeof ns.listEntries === 'function')
     }
 
