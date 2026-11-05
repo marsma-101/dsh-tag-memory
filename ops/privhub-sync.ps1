@@ -1,4 +1,4 @@
-# privhub-sync.ps1 — 把本地 dsh-tag-memory 设计文档统一维护到 PrivHub 站内（v2 重写版）
+﻿# privhub-sync.ps1 — 把本地 dsh-tag-memory 设计文档统一维护到 PrivHub 站内（v2 重写版）
 #
 # 与旧版区别：
 #   1. 源目录 = 插件根目录（设计文档就放在根，不再有 docs/ 子目录）。
