@@ -510,6 +510,11 @@ function createHostService(ctx, config) {
     await ensureDirs(layout);
 
     let result;
+    // 台账要记「实际硬筛用的条件」，所以把 effective 提到锁外可见。
+    // ⚠️ 装进真容器后实测到过：这里若传原始 query，模型省略 项目/智能体 时
+    // read.jsonl 的 cond 会记成空串，而实际硬筛用的是绑定值 —— 台账与真相不符，
+    // 整理阶段就追不回「这次到底按什么条件查的」（《流程_读取》§七 cond 原样不改写）。
+    let effectiveQuery = null;
     await withFileLock(layout.lockFile, async () => {
       const { records } = await readLibraryCsv(layout.libraryCsv, schema);
 
@@ -522,6 +527,7 @@ function createHostService(ctx, config) {
         形态: str(query['形态']),
         自由标签: arr(query['自由标签']),
       };
+      effectiveQuery = effective;
 
       result = engineRecall({ records, query: effective, identity: { bound: true, who: identity.智能体 }, schema, config: scoring, equivalence });
 
@@ -533,7 +539,7 @@ function createHostService(ctx, config) {
       }
     });
 
-    await appendRecord('read', buildReadLog({ query, result, identity: { who: identity.智能体 }, now: new Date() }));
+    await appendRecord('read', buildReadLog({ query: effectiveQuery ?? query, result, identity: { who: identity.智能体 }, now: new Date() }));
 
     return {
       ok: result.ok !== false,
@@ -561,7 +567,24 @@ function createHostService(ctx, config) {
   async function listEntries(filter = {}) {
     const { layout } = await resolveLayout();
     const { schema } = await loadConfigs();
-    const { records } = await readLibraryCsv(layout.libraryCsv, schema);
+    const { records, errors } = await readLibraryCsv(layout.libraryCsv, schema);
+
+    // ⚠️ 库读不进来时**必须报出来**，不能静默返回空列表。
+    // 真实场景：旧版 8 列库（缺「自由标签」）会得到 HEADER_MISSING；
+    // 若这里吞掉 errors 只返回 total:0，用户看到的是"我的记忆全没了"，
+    // 而真相是"格式不兼容，一行都没读进来"——两者处置完全不同。
+    const fatal = arr(errors).filter((e) => e.code === 'HEADER_MISSING');
+    if (fatal.length > 0) {
+      return {
+        ...fail(fatal, 'LIBRARY_FORMAT_MISMATCH'),
+        items: [],
+        rows: [],
+        total: 0,
+        offset: 0,
+        limit: 0,
+        libraryIncompatible: true,
+      };
+    }
 
     const shape = str(filter['形态']);
     const project = str(filter['项目']);
@@ -586,14 +609,39 @@ function createHostService(ctx, config) {
     const page = matched.slice(offset, offset + limit);
 
     // items 是远端契约；rows 是 preset 侧的字段名。指向同一数组，两边都不用改。
-    return { ok: true, items: page, rows: page, total: matched.length, offset, limit };
+    // 非致命的问题（单行损坏）照常返回数据，但附带 errors 让 UI 能提示。
+    return {
+      ok: true,
+      items: page,
+      rows: page,
+      total: matched.length,
+      offset,
+      limit,
+      errors: arr(errors),
+    };
   }
 
   /** 库概况（只读）。 */
   async function getOverview() {
     const { layout, source } = await resolveLayout();
     const { schema } = await loadConfigs();
-    const { records } = await readLibraryCsv(layout.libraryCsv, schema);
+    const { records, errors } = await readLibraryCsv(layout.libraryCsv, schema);
+
+    // 与 listEntries 同理：库读不进来时必须让 UI 知道，
+    // 否则概况显示 total:0 会被误解成"记忆丢了"。
+    const fatal = arr(errors).filter((e) => e.code === 'HEADER_MISSING');
+    if (fatal.length > 0) {
+      return {
+        ...fail(fatal, 'LIBRARY_FORMAT_MISMATCH'),
+        total: 0,
+        active: 0,
+        superseded: 0,
+        archived: 0,
+        dataDir: layout.dataDir,
+        dataDirSource: source,
+        libraryIncompatible: true,
+      };
+    }
 
     const count = (s) => records.filter((r) => str(r['状态']) === s).length;
     return {
@@ -604,6 +652,7 @@ function createHostService(ctx, config) {
       archived: count('已归档'),
       dataDir: layout.dataDir,
       dataDirSource: source,
+      libraryIncompatible: false,
     };
   }
 
