@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "columns": ["编号", "主要内容", "形态", "项目", "智能体", "自由标签", "稳定性", "时距", "状态"],
+  "shapes": ["技能", "流程", "规则", "偏好", "事实", "模板"],
+  "stabilities": ["观察", "稳定", "易变"],
+  "statuses": ["生效", "被取代", "已归档"],
+  "universal": ["通用", "引入"],
+  "statusActive": "生效",
+  "limits": {
+    "tagsMax": 20,
+    "projectNameMax": 40,
+    "agentNameMax": 40
+  }
+}
