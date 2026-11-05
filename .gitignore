@@ -1,0 +1,16 @@
+# 依赖与构建产物（开发阶段才会出现）
+node_modules/
+dist/
+*.log
+
+# 运行时数据（记忆库与记录是用户数据，不入版本库）
+store/
+records/
+
+# 本地环境/凭据
+.env
+*.local
+
+# 操作系统/编辑器
+.DS_Store
+Thumbs.db
