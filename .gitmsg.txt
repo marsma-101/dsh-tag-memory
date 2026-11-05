@@ -1,25 +1,20 @@
-第5个缺陷：库格式不兼容时静默返回 total:0（host-dev 发现并修）
+v0.3.2 文档：教训7（读不到伪装成没有）+ 缺陷边际纪律
 
-问题：
-  listEntries / getOverview 把 readLibraryCsv 的 errors 丢弃，
-  库格式不兼容（如 8 列旧库缺 自由标签）时返回 { ok:true, total:0 }
-  -> UI 显示"暂无数据"，用户以为"记忆全没了"
+团队_开发流程.md 新增教训7：
+把"读不到"伪装成"没有" —— 本次5个缺陷的共同模式
+  ① Config={}        配置契约不满足 -> 没有配置
+  ② bindIdentity     绑定没生效     -> 绑定成功(ok:true)
+  ③ recall漏兜项目    筛不到        -> 库里没有(filtered=0)
+  ④ cond记原始query   用了绑定值查   -> 没传条件
+  ⑤ 丢弃errors       读不出        -> 空库(total:0)
+共同点：错误路径返回"看起来正常的空值"，调用方无法区分真没有和读不到
+含5条写代码自检清单
 
-total:0 有两种截然不同的含义：
-  - 库真的是空的 -> 该去写记忆
-  - 库格式不兼容、一行都没读进来 -> 该去处理格式
-  UI 无法区分。这与前三处同一模式：把"读不到"伪装成"没有"。
+新增缺陷发现边际纪律（三档）：
+  ① 影响用户对数据的判断 -> 必须修
+  ② 只影响日志/台账美观 -> 记录即可
+  ③ 需构造极端输入才能触发 -> 记录，不修
+host-dev 按此过完12个 readLibraryCsv 调用点后主动停止，判定
+getFacets / exportLibrary 不修，getSettings.libraryCount 待定
 
-修法：
-  HEADER_MISSING 属致命 -> 走 fail() 并带 libraryIncompatible:true
-  其余非致命（单行损坏）照常返回数据 + errors 供 UI 提示
-  client 无需改代码，它已有"失败优先显示 message"的逻辑
-
-容器内实测（8列旧库 vs 9列正常库对照）：
-  8列: listEntries  ok=false code=LIBRARY_FORMAT_MISMATCH incompatible=true
-        message: 表头缺少列：自由标签。必须 9 列齐全（顺序可变，列名必须对）
-       getOverview  ok=false code=LIBRARY_FORMAT_MISMATCH
-  9列: listEntries  ok=true total=1  / getOverview ok=true total=1 active=1
-       正常路径完全不受影响
-
-保留此修复（只影响错误路径，不增加正常路径复杂度）
+版本记录.md 新增 v0.3.2
