@@ -112,16 +112,26 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
 
 /* ---- 表格 ---- */
 .dtm-table-wrap{overflow:auto;border:.5px solid var(--dsw-alias-border-l4);border-radius:12px;background:var(--dsw-alias-bg-layer-1)}
-.dtm-table{width:100%;border-collapse:collapse;font-size:13px;line-height:20px;table-layout:fixed;min-width:900px}
-.dtm-table th{text-align:left;font-weight:500;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;padding:10px 12px;border-bottom:.5px solid var(--dsw-alias-border-l2);white-space:nowrap;background:var(--dsw-alias-bg-layer-2);position:sticky;top:0;z-index:1}
-.dtm-table td{padding:10px 12px;border-bottom:.5px solid var(--dsw-alias-border-l2);vertical-align:top;color:var(--dsw-alias-label-primary)}
+.dtm-table{width:100%;border-collapse:collapse;font-size:13px;line-height:20px;table-layout:auto;min-width:560px}
+.dtm-table th{text-align:left;font-weight:500;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;padding:8px 10px;border-bottom:.5px solid var(--dsw-alias-border-l2);white-space:nowrap;background:var(--dsw-alias-bg-layer-2);position:sticky;top:0;z-index:1}
+.dtm-table td{padding:7px 10px;border-bottom:.5px solid var(--dsw-alias-border-l2);vertical-align:middle;color:var(--dsw-alias-label-primary)}
 .dtm-table tbody tr:last-child td{border-bottom:none}
 .dtm-table tbody tr:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .dtm-table tbody tr[data-dtm-editing="1"]{background:var(--dsw-alias-bg-layer-2)}
 .dtm-cell-readonly{color:var(--dsw-alias-label-secondary)}
 .dtm-cell-readonly[data-dtm-readonly="content"]{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap;word-break:break-word;color:var(--dsw-alias-label-primary)}
 .dtm-nowrap{white-space:nowrap}
-.dtm-cell-tags{display:flex;flex-wrap:wrap;gap:4px}
+/* 主要内容：最多两行（用户主要看这个，但不能撑高整行） */
+.dtm-cell-content{min-width:280px}
+.dtm-content-clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;text-overflow:ellipsis;word-break:break-word;line-height:17px;max-height:34px}
+/* 窄列：形态/项目/智能体/稳定性/时距/状态，避免两个字占一大片 */
+.dtm-col-narrow{white-space:nowrap;min-width:64px}
+.dtm-col-id{white-space:nowrap;width:104px;font-family:var(--ds-font-family-code, ui-monospace, monospace);font-size:12px}
+/* 操作列固定在右侧，窄 */
+.dtm-cell-actions{white-space:nowrap;width:1%;text-align:right}
+
+/* 兼容：自由标签列已从表格移除（用户不能改，且纵向排列把行撑太高） */
+.dtm-cell-tags{display:none}
 .dtm-cell-actions{white-space:nowrap;text-align:right}
 .dtm-chip{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dtm-btn-sm{height:28px;padding:0 10px;font-size:12px}
@@ -952,6 +962,14 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
         return h(DtmEmpty, { text: t('entriesEmpty') })
       }
 
+      // 列宽策略（提升空间利用率）：
+      //   · 编号 / 形态 / 项目 / 智能体 / 稳定性 / 时距 / 状态 / 操作 → 窄列（nowrap + width:1%），
+      //     它们内容短（2~6 字），不该和长内容抢宽度
+      //   · 主要内容 → 唯一的弹性列，最多两行、超出省略
+      //   · 自由标签 → **不显示**：用户不能改它（编辑权限里也没有），
+      //     且 chip 纵向排列会把整行撑到 5~6 行高，是空间浪费的主因
+      const thNarrow = { scope: 'col', className: 'dtm-col-narrow' }
+
       return h(
         'div',
         { className: 'dtm-table-wrap' },
@@ -964,16 +982,15 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
             h(
               'tr',
               null,
-              h('th', { scope: 'col' }, t('colId')),
+              h('th', { scope: 'col', className: 'dtm-col-id' }, t('colId')),
               h('th', { scope: 'col' }, t('colContent')),
-              h('th', { scope: 'col' }, t('colShape')),
-              h('th', { scope: 'col' }, t('colProject')),
-              h('th', { scope: 'col' }, t('colAgent')),
-              h('th', { scope: 'col' }, t('colTags')),
-              h('th', { scope: 'col' }, t('colStability')),
-              h('th', { scope: 'col' }, t('colTick')),
-              h('th', { scope: 'col' }, t('colStatus')),
-              h('th', { scope: 'col' }, h('span', { className: 'dtm-sr-only' }, t('colActions'))),
+              h('th', thNarrow, t('colShape')),
+              h('th', thNarrow, t('colProject')),
+              h('th', thNarrow, t('colAgent')),
+              h('th', thNarrow, t('colStability')),
+              h('th', thNarrow, t('colTick')),
+              h('th', thNarrow, t('colStatus')),
+              h('th', { scope: 'col', className: 'dtm-cell-actions' }, h('span', { className: 'dtm-sr-only' }, t('colActions'))),
             ),
           ),
           h(
@@ -982,6 +999,7 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
             items.map(function (row) {
               const id = row['编号']
               const isEditing = editingId === id
+              const content = row['主要内容'] || ''
               return h(
                 'tr',
                 {
@@ -989,28 +1007,19 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
                   'data-dtm-row': id,
                   'data-dtm-editing': isEditing ? '1' : undefined,
                 },
-                // 编号：只读
-                h('td', null, h(ReadOnlyCell, { field: 'id', mono: true, nowrap: true }, id)),
-                // 主要内容：只读（可能很长，带换行，用 CSS 保留换行并截断）
+                h('td', { className: 'dtm-col-id' }, h(ReadOnlyCell, { field: 'id', mono: true, nowrap: true }, id)),
                 h(
                   'td',
                   { className: 'dtm-cell-content' },
-                  h(ReadOnlyCell, { field: 'content', title: row['主要内容'] }, row['主要内容']),
+                  // 两行截断：完整原文放 title，悬停可看；点「编辑」看全文
+                  h('div', { className: 'dtm-content-clamp', title: content }, content),
                 ),
-                h('td', null, row['形态'] || '—'),
-                h('td', null, row['项目'] || '—'),
-                h('td', null, row['智能体'] || '—'),
-                h(
-                  'td',
-                  { className: 'dtm-cell-tags' },
-                  (row['自由标签'] || []).map(function (tag) {
-                    return h('span', { key: tag, className: 'dtm-chip' }, tag)
-                  }),
-                ),
-                h('td', null, row['稳定性'] || '—'),
-                // 时距：只读
-                h('td', null, h(ReadOnlyCell, { field: 'tick', nowrap: true }, String(row['时距'] == null ? '—' : row['时距']))),
-                h('td', null, row['状态'] || '—'),
+                h('td', thNarrow, row['形态'] || '—'),
+                h('td', thNarrow, row['项目'] || '—'),
+                h('td', thNarrow, row['智能体'] || '—'),
+                h('td', thNarrow, row['稳定性'] || '—'),
+                h('td', thNarrow, h(ReadOnlyCell, { field: 'tick', nowrap: true }, String(row['时距'] ?? ''))),
+                h('td', thNarrow, row['状态'] || '—'),
                 h(
                   'td',
                   { className: 'dtm-cell-actions' },
