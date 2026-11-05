@@ -1342,7 +1342,7 @@ function createHostService(ctx, config) {
     cfgCache = null;
   }
 
-  return {
+  const serviceObj = {
     // 身份
     bindIdentity,
     identityOf,
@@ -1375,6 +1375,13 @@ function createHostService(ctx, config) {
     _resolveLayout: resolveLayout,
     _loadConfigs: loadConfigs,
   };
+
+  // ⚠️ Remote 端点登记要求 service 是「class 实例」形态：
+  // dsh-typert-protocol 的 remoteMethods() 只从 Object.getPrototypeOf(service) 读
+  // 符号键描述符；普通对象字面量的 prototype 是 Object.prototype，永远读不到，
+  // 结果就是客户端 $mount 成功、请求却 404。
+  // 这里给一个专属原型（不改任何方法实现），让 gateway 能发现端点。
+  return Object.setPrototypeOf(serviceObj, HostServiceProto);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1525,40 +1532,62 @@ const oneParamMethod = (method, description, paramName) => ({
 });
 
 async function registerRemote(ctx, service) {
-  const typert = ctx.get?.('typert');
-
-  // 描述符与绑定都可缺：缺了就只是 UI 不可用，工具链路照常
-  if (!typert || typeof typert.register !== 'function') {
-    ctx.logger?.warn?.('[dsh-tag-memory] 没有 typert 服务，跳过 Remote 注册（UI 不可用）。');
-    return;
-  }
-
-  const invocations = [
-    noParamMethod('getOverview', '记忆库概况：总数、各状态计数、数据目录与生效来源层级。'),
-    noParamMethod('getFacets', '现存的项目/智能体/形态/状态/稳定性去重值，供编辑候选下拉。'),
-    noParamMethod('getSettings', '设置页所需：库位置、锁定说明、备份与自动整理开关、字典原文。'),
-    noParamMethod('backupNow', '立刻备份记忆库并校验。'),
-    noParamMethod('listBackups', '列出已有备份，新的在前。'),
-    oneParamMethod('listEntries', '列出记忆条目（只读，不记台账、不动时距）。', 'query'),
-    oneParamMethod('retagEntry', '改某条的 6 个可改字段（与 dtm_retag 共用同一实现）。', 'request'),
-    oneParamMethod('migrateDataDir', '把数据目录搬到新位置（被部署配置锁定时会说明改哪一行）。', 'request'),
-    oneParamMethod('restore', '从备份恢复（会先给当前库再备份一次）。', 'request'),
-    oneParamMethod('mergeLibrary', '合并另一份记忆库（同号保留较新）。', 'request'),
+  /*
+   * ⚠️ 千万不要用 ctx.typert.register({package, face, invocations}) ——
+   * 那不是 Remote 的注册入口。真实机制（dsh-typert-protocol + dsh-api-gateway）是：
+   *
+   *   1) service 实例上挂 typertRemote 绑定，字段必须恰好是
+   *      { service, serviceKey, namespace }，且 service 必须是实例本身
+   *      （gateway 严格校验这三个字段，错了抛 gateway/binding-invalid）
+   *   2) service 的 class prototype 上要有
+   *      符号键 "@deepseek-ai/dsh-typert-protocol/remote-methods" 描述符：
+   *      { version: 1, methods: [{ method, invocation: {kind:'direct'} }] }
+   *      （protocol 的 remoteMethods() 只从 prototype 读，不从实例读）
+   *
+   * 满足这两条，gateway 的 collectSrcClaims() 才会把
+   * namespace/method 登记成合法端点；否则客户端 $mount 成功但请求 404。
+   */
+  const PARAM = {
+    listEntries: 'query',
+    retagEntry: 'request',
+    migrateDataDir: 'request',
+    restore: 'request',
+    mergeLibrary: 'request',
+  };
+  const METHODS = [
+    'getOverview', 'listEntries', 'getFacets', 'getSettings',
+    'retagEntry', 'migrateDataDir', 'backupNow', 'listBackups', 'restore', 'mergeLibrary',
   ];
 
-  // 绑定：网关的 SRC 发现靠服务实例上的 `typertRemote`
+  // ---- 1) 绑定：字段必须是这三个，且 service 指向实例本身 ----
   service.typertRemote = Object.freeze({
     service,
     serviceKey: SERVICE_NAME,
     namespace: REMOTE_NAMESPACE,
   });
 
-  typert.register({
-    package: 'dsh-tag-memory',
-    face: 'host',
-    schemas: [],
-    invocations,
-    model: { services: [], events: [], objects: [] },
+  // ---- 2) prototype 描述符：gateway 只认这里 ----
+  const prototype = Object.getPrototypeOf(service);
+  if (!prototype || prototype === Object.prototype) {
+    ctx.logger?.warn?.(
+      '[dsh-tag-memory] 宿主服务必须是 class 实例（当前是普通对象），Remote 端点无法登记，UI 将不可用。',
+    );
+    return;
+  }
+  const KEY = '@deepseek-ai/dsh-typert-protocol/remote-methods';
+  const existing = Object.getOwnPropertyDescriptor(prototype, KEY);
+  const methods = METHODS.map(function (m) {
+    const marker = { method: m, invocation: Object.freeze({ kind: 'direct' }) };
+    if (PARAM[m]) marker.parameters = Object.freeze([{ name: PARAM[m], required: true }]);
+    return Object.freeze(marker);
+  });
+  const merged =
+    existing && existing.value && Array.isArray(existing.value.methods)
+      ? existing.value.methods.concat(methods)
+      : methods;
+  Object.defineProperty(prototype, KEY, {
+    configurable: true,
+    value: Object.freeze({ version: 1, methods: Object.freeze(merged) }),
   });
 }
 
@@ -1567,6 +1596,15 @@ async function registerRemote(ctx, service) {
  * ------------------------------------------------------------------ */
 
 /** 时间戳片段（备份/导出文件名用）。 */
+/**
+ * 宿主服务的专属原型。
+ *
+ * 只为满足 dsh-typert-protocol 的 Remote 端点发现：它的 remoteMethods() 读的是
+ * `Object.getPrototypeOf(service)` 上的符号键描述符。用 Object.prototype 会读不到。
+ * 方法实现全部在 serviceObj 自身上（Object.setPrototypeOf 不改变自有属性查找）。
+ */
+const HostServiceProto = Object.create(Object.prototype);
+
 function stamp(now = new Date()) {
   const p = (n) => String(n).padStart(2, '0');
   return (

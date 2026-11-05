@@ -1,11 +1,33 @@
-接口契约 新增 §八 库统计口径
+修 Remote 端点 404：真实注册机制是 prototype 描述符，不是 ctx.typert.register
 
-「共 N 条」这类用户可见数字必须用 getOverview()，
-不得用 getSettings().libraryCount。
+视觉验证暴露（主子截图）：
+  client api: tagMemory/listEntries failed: transport failure: HTTP 404
 
-理由：libraryCount: 0 有两种含义（库真空 vs 格式不兼容读不出来），
-用它显示"共 0 条"会让用户以为数据丢了。
-getOverview 会明确报 LIBRARY_FORMAT_MISMATCH。
+根因（查 dsh-typert-protocol + dsh-api-gateway 源码）：
+  gateway 的 collectSrcClaims() 靠两样东西发现端点：
+    1) service 实例上的 typertRemote 绑定，字段必须恰好
+       { service, serviceKey, namespace }，且 service === 实例本身
+    2) service 的 **class prototype** 上的符号键描述符
+       "@deepseek-ai/dsh-typert-protocol/remote-methods"
+       { version: 1, methods: [{ method, invocation:{kind:'direct'} }] }
+  protocol 的 remoteMethods() 只从 Object.getPrototypeOf(service) 读，
+  普通对象字面量的 prototype 是 Object.prototype，永远读不到 -> 端点不存在 -> 404
 
-已查证：client.js 当前不读 libraryCount，符合约束。
-将来加"共 N 条"必须改用 getOverview。
+  而 ctx.typert.register({package, face, invocations}) 那条路根本不是
+  Remote 注册入口（那是 lookup 注册，签名完全不同），已废弃。
+
+修法（index.js）：
+  1. 重写 registerRemote：挂 typertRemote 绑定 + 在 prototype 上打描述符
+  2. createHostService 返回的对象改为 Object.setPrototypeOf(serviceObj, HostServiceProto)
+     给一个专属原型，让 remoteMethods() 能读到（不改任何方法实现）
+
+client.js 同时修（上一轮）：
+  ctx.remote[REMOTE_NS] 直接访问会被 cordis proxy 拦（without inject）
+  改为 nsRef + ctx.inject(['remote.tagMemory'], child => nsRef.current = ...)
+
+容器验证：
+  prototype !== Object.prototype        ✅
+  描述符存在 version:1 10 个方法       ✅
+  typertRemote 三字段完整               ✅
+  /api/tagMemory/getOverview -> 401     ✅（原 404，端点已注册）
+  重启零激活报错                        ✅

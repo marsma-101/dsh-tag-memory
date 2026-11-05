@@ -476,9 +476,9 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
      * @param {object} ctx 客户端 cordis 上下文
      * @returns 页面用的 api 对象；命名空间尚未挂上时各方法会抛明确错误
      */
-    function createApi(ctx) {
+    function createApi(nsRef) {
       function namespace() {
-        return ctx && ctx.remote ? ctx.remote[REMOTE_NS] : null
+        return nsRef.current
       }
 
       async function call(method) {
@@ -535,8 +535,8 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
      * 判断 api 是否真的可用（命名空间已挂上）。
      * 页面用它决定显示"未接线"还是真数据，**不伪造数据**。
      */
-    function hasApi(ctx) {
-      const ns = ctx && ctx.remote ? ctx.remote[REMOTE_NS] : null
+    function hasApi(nsRef) {
+        const ns = nsRef.current
       return !!(ns && typeof ns.listEntries === 'function')
     }
 
@@ -553,9 +553,9 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
      *
      * 同时提供一个 `ready()` 供页面/调试判断当前是否真的连上。
      */
-    function createLazyApi(ctx) {
-      const api = createApi(ctx)
-      const lazy = { ready: function () { return hasApi(ctx) } }
+      function createLazyApi(nsRef) {
+        const api = createApi(nsRef)
+        const lazy = { ready: function () { return hasApi(nsRef) } }
       const methods = [
         'getOverview', 'listEntries', 'getFacets', 'getSettings',
         'retagEntry', 'migrateDataDir', 'backupNow', 'listBackups', 'restore', 'mergeLibrary',
@@ -2662,6 +2662,16 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       // 没装好时起不来。正确姿势是运行时挂载后再用（官方 cot-translation 同款）。
       inject: ['slots', 'locale', 'remote'],
       apply(ctx) {
+
+        // ---- remote 命名空间的跨渲染引用 ----
+        //
+        // ⚠️ 不能写 ctx.remote[REMOTE_NS]！
+        // cordis 的 ctx proxy 对未在 inject 里声明的服务访问会直接抛：
+        //   cannot get property "remote.tagMemory" without inject
+        // 而 "remote.tagMemory" 是 $mount 之后才存在的**动态**子命名空间，静态写不进 inject。
+        // 官方做法（cot-translation L1028）：ctx.inject(["remote.xxx"], (child) => ...) 在 child 上访问。
+        // 所以这里用一个可变引用：UI 全读 nsRef.current，挂载晚到/重试都能反映当下真实状态。
+        const nsRef = { current: null };
         // 字典注册是受 context 管理的 effect：插件卸载时自动撤销。
         ctx.effect(function () {
           return ctx.locale.register(NS, 'zh', LOCALE_ZH)
@@ -2690,6 +2700,14 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
             // 用内置 toContribution（不 import 任何 Harness Client 包，见其注释）
             return ctx.remote.$mount(toContribution(buildRemoteSpec()))
           })
+          .then(function () {
+            // 挂载成功：用 ctx.inject 拿到「有权访问 remote.tagMemory」的 child ctx。
+            // child 是「依赖已满足」的子 fiber 上下文 —— 只有它上面访问才不触发 proxy 拦截。
+            ctx.inject(['remote.' + REMOTE_NS], function (child) {
+              nsRef.current = child.remote[REMOTE_NS]
+              return function () { nsRef.current = null }
+            })
+          })
           .catch(function (err) {
             if (typeof console !== 'undefined' && console.warn) {
               console.warn('[dsh-tag-memory] remote namespace mount failed:', err && err.message ? err.message : err)
@@ -2716,7 +2734,7 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
               // 正确做法：这里给一个**惰性代理**——每次 `api.xxx()` 被调用时才去探
               // `ctx.remote.tagMemory`。挂载晚到也能用上，探测永远反映当下真实状态。
               inject: function () {
-                return { api: createLazyApi(ctx) }
+                return { api: createLazyApi(nsRef) }
               },
             },
             BundleConfigPage,
