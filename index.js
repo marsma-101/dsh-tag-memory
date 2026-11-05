@@ -88,6 +88,9 @@ import { buildNewRecord, buildWriteLog } from './lib/engine/write.mjs';
 import { recall as engineRecall, buildReadLog } from './lib/engine/read.mjs';
 import { applyTick } from './lib/engine/tick.mjs';
 import { backupLibrary, listBackups as engineListBackups, restoreBackup } from './lib/engine/backup.mjs';
+import { planTidy } from './lib/engine/tidy.mjs';
+import { isBackupDue, isTidyDue } from './lib/engine/schedule.mjs';
+import { canMigrate, verifyMigration } from './lib/engine/migrate.mjs';
 import {
   loadSchema,
   loadScoring,
@@ -1124,6 +1127,128 @@ function createHostService(ctx, config) {
     return { ok: true, backups: arr(result.backups) };
   }
 
+  /**
+   * 执行整理（UI 与工具共用；一个操作两个调用者）。
+   *
+   * 编排职责（《流程_整理》§〇）：
+   *   备份 → 校验 → 锁内读库 + 读台账 → 纯逻辑算 changes → 锁内写回 → 写 tidy 台账
+   *
+   * 纯逻辑在 lib/engine/tidy.mjs（planTidy），这里只做 I/O 编排。
+   *
+   * @param {object} opts
+   * @param {boolean} opts.dryRun    只算不写（UI 预览用）
+   * @param {object[]} opts.promoteCandidates  模型判定的"同一簇"候选（升通用用）
+   * @param {string} opts.who        整理者身份
+   */
+  async function runTidy({ dryRun = false, promoteCandidates = [], who = '' } = {}) {
+    const { layout, source } = await resolveLayout();
+    const { schema, scoring } = await loadConfigs();
+    await ensureDirs(layout);
+
+    // ---- 〇、整理前必须备份（无开关，不可跳过）----
+    if (!dryRun) {
+      const bak = await backupLibrary({
+        libraryCsv: layout.libraryCsv,
+        backupDir: layout.backupDir,
+        schema,
+      });
+      if (!bak.ok) {
+        const missing = arr(bak.errors).some((e) => e.code === 'BACKUP_SOURCE_MISSING');
+        return {
+          ok: false,
+          code: missing ? 'LIBRARY_EMPTY' : 'BACKUP_FAILED',
+          message: missing
+            ? '记忆库还是空的，没有可整理的内容。'
+            : '整理前备份失败，已中止（不允许在无备份的情况下改库）。',
+          errors: arr(bak.errors),
+        };
+      }
+    }
+
+    // ---- 一、读库 + 读台账 ----
+    let records = [];
+    let readLogs = [];
+    let writeLogs = [];
+
+    await withFileLock(layout.lockFile, async () => {
+      const lib = await readLibraryCsv(layout.libraryCsv, schema);
+      records = arr(lib.records);
+      // ⚠️ readJsonl 返回的是 { items, errors }，不是数组（core.mjs:626）
+      // 直接当数组用会导致台账永远读成空 —— 整理就永远不会改任何东西。
+      const rl = await readJsonl(layout.recordsDir + '/read.jsonl');
+      const wl = await readJsonl(layout.recordsDir + '/write.jsonl');
+      readLogs = arr(rl && rl.items);
+      writeLogs = arr(wl && wl.items);
+    });
+
+    // ---- 二、纯逻辑算"该改什么" ----
+    const plan = planTidy({
+      records,
+      readLogs,
+      writeLogs,
+      promoteCandidates,
+      config: {
+        stableOkThreshold: Number(scoring?.stableOkThreshold ?? 3),
+        promoteMinDistinct: Number(scoring?.promoteMinDistinct ?? 4),
+        inductionMinOccasions: Number(scoring?.inductionMinOccasions ?? 3),
+      },
+    });
+
+    if (dryRun) {
+      return {
+        ok: true,
+        dryRun: true,
+        changes: plan.changes,
+        proposals: plan.proposals,
+        report: plan.report,
+        backupPath: null,
+      };
+    }
+
+    // ---- 三、锁内写回 + 记台账 ----
+    const applied = [];
+    await withFileLock(layout.lockFile, async () => {
+      const lib = await readLibraryCsv(layout.libraryCsv, schema);
+      const rows = arr(lib.records);
+      const byId = new Map(rows.map((r, i) => [r['编号'], { r, i }]));
+
+      for (const ch of plan.changes) {
+        const hit = byId.get(ch['编号']);
+        if (!hit) continue;
+        const before = hit.r[ch.field];
+        if (String(before) === String(ch.after)) continue;   // 已经是目标值
+        hit.r[ch.field] = ch.after;
+        applied.push({ ...ch, before });
+      }
+
+      if (applied.length > 0) {
+        await writeLibraryCsv(layout.libraryCsv, rows, schema);
+      }
+    });
+
+    // 台账：每条改动记一笔（《流程_整理》§七）
+    for (const ch of applied) {
+      await writeTidyLog({
+        who: who || '整理',
+        action: ch.field === '稳定性' ? 'stability' : 'retag',
+        target: ch['编号'],
+        before: ch.before,
+        after: ch.after,
+        basis: ch.basis,
+      });
+    }
+
+    return {
+      ok: true,
+      dryRun: false,
+      changes: applied,
+      proposals: plan.proposals,
+      report: plan.report,
+      backupPath: null,
+      applied: applied.length,
+    };
+  }
+
   /** 从备份恢复。破坏性操作：**先把当前库再备份一次**再覆盖。 */
   async function restore({ from } = {}) {
     const src = str(from);
@@ -1381,6 +1506,7 @@ function createHostService(ctx, config) {
     mergeLibrary,
     migrateDataDir,
     getSettings,
+    runTidy,
     // 生命周期
     _startTimer: startTimer,
     _dispose: dispose,
