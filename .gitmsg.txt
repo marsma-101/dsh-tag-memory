@@ -1,20 +1,11 @@
-v0.3.2 文档：教训7（读不到伪装成没有）+ 缺陷边际纪律
+接口契约 新增 §八 库统计口径
 
-团队_开发流程.md 新增教训7：
-把"读不到"伪装成"没有" —— 本次5个缺陷的共同模式
-  ① Config={}        配置契约不满足 -> 没有配置
-  ② bindIdentity     绑定没生效     -> 绑定成功(ok:true)
-  ③ recall漏兜项目    筛不到        -> 库里没有(filtered=0)
-  ④ cond记原始query   用了绑定值查   -> 没传条件
-  ⑤ 丢弃errors       读不出        -> 空库(total:0)
-共同点：错误路径返回"看起来正常的空值"，调用方无法区分真没有和读不到
-含5条写代码自检清单
+「共 N 条」这类用户可见数字必须用 getOverview()，
+不得用 getSettings().libraryCount。
 
-新增缺陷发现边际纪律（三档）：
-  ① 影响用户对数据的判断 -> 必须修
-  ② 只影响日志/台账美观 -> 记录即可
-  ③ 需构造极端输入才能触发 -> 记录，不修
-host-dev 按此过完12个 readLibraryCsv 调用点后主动停止，判定
-getFacets / exportLibrary 不修，getSettings.libraryCount 待定
+理由：libraryCount: 0 有两种含义（库真空 vs 格式不兼容读不出来），
+用它显示"共 0 条"会让用户以为数据丢了。
+getOverview 会明确报 LIBRARY_FORMAT_MISMATCH。
 
-版本记录.md 新增 v0.3.2
+已查证：client.js 当前不读 libraryCount，符合约束。
+将来加"共 N 条"必须改用 getOverview。
