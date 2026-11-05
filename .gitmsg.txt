@@ -1,29 +1,18 @@
-真容器首次安装：修掉 3 个只有真实环境才暴露的缺陷
+v0.3.0 文档更新：真容器安装结论 + 流程教训6
 
-在 Docker 容器 dsh-text-codeing (DSH 0.2.1-rc.2) 里真实安装后暴露：
+探明结论.md 新增 §9 真容器安装实测（DSH 0.2.1-rc.2）：
+- 9.1 模块解析：插件本体必须放进 <profile>/node_modules/<包名>，
+      放 /opt/dsh/plugins/ 会导致 DSH 自定义 loader 解析不到 @deepseek-ai/*
+      （同样路径跑普通 node 却能成功——这是关键差异）
+- 9.2 Config 空对象是陷阱：cordis resolveConfig 要求 ~standard
+- 9.3 身份必须"投影优先 + 进程内 WeakMap 兜底"
+- 9.4 项目/智能体两个维度都要兜底，漏一个 filtered 归零
+- 9.5 实测通过清单
+- 9.6 仍未验（视觉 / Remote 端到端 / 定时任务真实生命周期）
 
-1. preset/index.js 导出空 Config = {} 导致整个插件行激活失败
-   cordis resolveConfig: if (!runtime.Config) return config;
-                         runtime.Config['~standard'].validate(config)
-   空对象过了第一道判断但无 '~standard' -> TypeError: reading 'validate'
-   -> 改为不导出 Config（可调值走 engine templates/*.json）
+团队_开发流程.md 新增教训 6：
+假环境验业务逻辑，验不了框架契约。
+列出框架契约清单（Config schema / 模块解析 / 激活与生命周期 /
+Remote 挂载 / slot 注册），要求报告区分"本地测试通过"与"真装验证通过"。
 
-2. bindIdentity 只返回不存储，identityOf 恒为 null
-   投影依赖 tool/call、command/run 事件，宿主方法被直接调用时投影为空
-   -> 所有写入被拒（bind ok 但 write UNBOUND_IDENTITY）
-   -> 增加 WeakMap 进程内兜底，投影有值时投影优先
-
-3. writeEntry / recall 不自动填当前绑定值
-   writeEntry: 模型省略 项目/智能体 时被 engine 判 PROJECT_EMPTY/AGENT_EMPTY
-   recall:     只兜底 智能体 不兜底 项目 -> 硬筛用空串匹配，filtered 归零
-   -> 两处都改为"绑定值兜底，显式值优先"
-
-容器内实测通过：
-- 未绑定拒写 UNBOUND_IDENTITY
-- 写入 M-20261105-001，CSV 9 列 + 引号包裹正文
-- 召回命中 分=90，时距 1->2
-- 浏览模式正常
-- 查空识别 false_but_near
-- 跨项目隔离查不到
-- 标签含 | 拒写 TAG_CONTAINS_PIPE
-- 重启后零激活报错
+版本记录.md 新增 v0.3.0（含环境准备、3 个缺陷、实测结果、未验项）
