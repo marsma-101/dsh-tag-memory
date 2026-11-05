@@ -1,0 +1,25 @@
+{
+  "version": 1,
+
+  "_comment": "标签等价表：把 query 标签与条目标签归一，双向生效。不注入模型，纯程序侧（《流程_整理》§5.1）。只收高频稳定的等价说法，偶发一次的不收。",
+
+  "groups": [
+    ["发版", "上线", "deploy", "发布"],
+    ["部署", "deploy", "上线部署"],
+    ["构建", "build", "打包"],
+    ["测试", "test", "跑测"],
+    ["数据库", "db", "database"],
+    ["配置", "config", "configuration"],
+    ["权限", "permission", "acl"],
+    ["缓存", "cache"],
+    ["迁移", "migration", "migrate"],
+    ["日志", "log", "logging"],
+    ["接口", "api", "endpoint"],
+    ["环境变量", "env", "environment"],
+    ["路径", "path"],
+    ["编码", "encoding"],
+    ["超时", "timeout"],
+    ["重试", "retry"],
+    ["目录", "folder", "directory"]
+  ]
+}

@@ -12,19 +12,37 @@ export const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]
 const EXCLUDE_DIRS = new Set(['.git', 'node_modules', '内部文档', 'tests'])
 
 /**
- * 递归列出「运行时文件」的相对路径（POSIX 分隔符）。
- * 排除 .git / node_modules / 内部文档 / tests —— 这些不是运行时文件。
+ * 递归列出**全部**工作区文件（仍排除 .git / node_modules / 内部文档 / tests）。
+ * 用于"残留文件扫描"这类需要看全貌的检查。
  */
-export function listRuntimeFiles(dir = ROOT, acc = []) {
+export function listAllFiles(dir = ROOT, acc = []) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) {
       if (EXCLUDE_DIRS.has(entry.name)) continue
-      listRuntimeFiles(join(dir, entry.name), acc)
+      listAllFiles(join(dir, entry.name), acc)
     } else if (entry.isFile()) {
       acc.push(relative(ROOT, join(dir, entry.name)).split(sep).join('/'))
     }
   }
   return acc
+}
+
+/**
+ * 递归列出「**运行时文件**」——即 npm 打包时必须被 files 白名单覆盖的文件。
+ *
+ * 与 listAllFiles 的区别（这层区分很重要，否则 P8 会误报）：
+ *   - package.json 本身由 npm 自动包含，不需要出现在 files 里
+ *   - .gitignore / .npmignore 是开发辅助，不是运行时文件
+ *   - `.*.mjs` / `*.smoke.mjs` 这类临时冒烟脚本不是运行时文件（另见 P11 残留扫描）
+ */
+export function listRuntimeFiles() {
+  const AUTO_INCLUDED = new Set(['package.json'])
+  return listAllFiles().filter((f) => {
+    const base = f.split('/').pop()
+    if (AUTO_INCLUDED.has(base)) return false
+    if (base.startsWith('.')) return false // dotfiles：.gitignore / .npmignore / .env...
+    return true
+  })
 }
 
 /** 列出指定扩展名的运行时源文件 */

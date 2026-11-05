@@ -6,6 +6,7 @@
   "description": "Tag-based long-term memory for DSH agents.",
   "exports": {
     ".": "./index.js",
+    "./preset": "./preset/index.js",
     "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
@@ -27,7 +28,11 @@
     },
     "client": {
       "platform": "web",
-      "immediately": true
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
     }
   }
 }

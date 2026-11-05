@@ -1,7 +1,28 @@
 # dsh-tag-memory 的 bundle 补丁
 #
-# 由 plugin_manager 的 install_bundle 装配，不要手写 profile 的 package.json。
-# 宿主入口（index.js）与预设入口（preset/）通过这里的 insert 接进当前 profile。
+# 安装方式：只用 plugin_manager 的 install_bundle（不要手写 profile 的 package.json）。
+# 本文件由官方的 Loader 补丁方言解析，insert 两行：
+#   1) 宿主入口（index.js）——存储、宿主方法、身份投影、定时任务
+#   2) 预设入口（preset/index.js）——10 个 dtm_* 工具 + 每轮注入
+#
+# 两行为什么分开：
+#   - 宿主行提供 ctx 服务（dtmHost）与 Remote namespace（tagMemory），UI 靠它工作
+#   - 预设行注册工具与 systemPrompt section，走全局层，装上即对所有 agent 可用
+#   - id 必须互不相同；`dsh-tag-memory-tools` 不叫 `tag-memory`，避免与宿主行抢 id
+#
+# 为什么预设用「普通宿主行」而不是 @deepseek-ai/dsh-agent-preset 行：
+#   第一方工具（tool-fs / tool-todo / tool-goal / tool-jobs）全是普通宿主行，
+#   不在任何 preset 里，但每个 agent 都能用——因为 ctx.tools.register() 注册进全局层，
+#   ToolRuntime.view() 解析时全局层对所有 scope 可见。ctx.systemPrompt.section() 同理。
+#   所以本插件走这条路：用户装上就自动可用，不用选 preset、不用改设置。
+#
+# 反面做法（不要踩）：
+#   ❌ 直接 patch `preset-standard` 的 id 加进去 —— 补丁方言是 config 整体替换、
+#      绝不深合并，这么干会把整个 standard preset 的 40+ 插件全清空，apply 直接崩。
+#   ❌ 新建一个只含我们的 preset —— agent 只有记忆工具，没有 bash/read/write，插件等于废掉。
 - insert:
     - id: dsh-tag-memory
       name: 'dsh-tag-memory'
+
+    - id: dsh-tag-memory-tools
+      name: 'dsh-tag-memory/preset'

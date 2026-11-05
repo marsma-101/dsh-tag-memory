@@ -1,0 +1,38 @@
+{
+  "version": 1,
+
+  "_comment": "可调阈值。改动=调参，不涉及结构变更（结构在 schema.json）。整理环节按《流程_整理》§5.3 调整本文件，改完即生效。",
+
+  "_weights": "打分权重。总分封顶 = shapeHit + tagMax + tickMaxScore = 100。",
+  "weights": {
+    "shapeHit": 50,
+    "tagMax": 40,
+    "tickMaxScore": 10
+  },
+
+  "_passLine": "及格线，总分 >= passLine 才返回。出厂 40。",
+  "passLine": 40,
+
+  "_veto": "命中否决阈值。entryRatio 是严格大于判定（e_ratio > entryRatio 才通过）；queryFloor 是大于等于判定（q_ratio >= queryFloor 才通过）。",
+  "veto": {
+    "entryRatio": 0.5,
+    "queryFloor": 0.15
+  },
+
+  "_tickScore": "时距分 = min(log2(时距) * multiplier, tickMaxScore)。注意：这是【打分权重上限】，与下面 tickCap【时距字段值上限】是两个不同的 10，别改错。",
+  "tickScore": {
+    "multiplier": 2
+  },
+
+  "_tickCap": "时距计数字段的最大值。被召回 +1，到 10 封顶（《流程_读取》§六）。这是【字段值上限】，不是打分权重。",
+  "tickCap": 10,
+
+  "_topK": "默认返回条数。模型需要更多就调大，不搞两阶段召回（《流程_读取》§八）。",
+  "topK": 5,
+
+  "_nearLimit": "near（擦边条目）最多记几条。它们是判真假查空的关键物证（《流程_读取》§七）。",
+  "nearLimit": 3,
+
+  "_writeLogTagLimit": "records/write.jsonl 的 tags 字段记前几个标签（《接口契约》Q6）。",
+  "writeLogTagLimit": 10
+}
