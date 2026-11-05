@@ -1,21 +1,41 @@
-// 闸门③ 回归：真容器安装暴露的 3 个缺陷（3 条）
+// 闸门③ 回归：真容器安装暴露的 4 个缺陷
 //
 // 背景：本地 177 条全绿，但装进真实容器（DSH 0.2.1-rc.2 / Node v22 / Linux）
-// 暴露了 3 个缺陷。这三个都属于**假 ctx 测试覆盖不到的那一层**——
-// 框架契约、事件链路、真实调用形态。
+// 暴露了 4 个缺陷。
 //
-// 本文件把它们固化成回归断言，防止再退化。
-// ⚠️ 注意：这些断言仍然跑在假 ctx 上，**只能守住"代码形态不再写错"**，
-//          守不住"框架实际行为"。真实容器验证不可被替代（见 tests/LIMITS.md）。
+// ⚠️ 归因必须分清两类（Lead 2026-11-05 纠正，别笼统说成"环境限制"）：
+//
+//   【甲类·框架契约】本地真的测不出（框架在 apply 之前/之后做的事，假 ctx 没有那一步）
+//     · 缺陷① Config = {} → resolveConfig TypeError
+//
+//   【乙类·实现缺口 + 用例缺口】**本地完全能测出来**，只要用例覆盖足够
+//     · 缺陷② bindIdentity 只返回不存储   —— 用例没覆盖"投影读不到"的形态
+//     · 缺陷③ recall 漏兜 项目            —— 用例总传全参数，没测"模型省略"
+//     · 缺陷④ read.jsonl cond 记原始 query —— 同理，没测"省略 + 台账一致性"
+//
+//   **把用例缺口说成环境限制，是最容易自我原谅的偷懒。**
+//   下面 4 条里，只有 R9 属于甲类；R10–R12 都是乙类，本来就该被本地测试挡住。
+//
+// ⚠️ 这些断言仍跑在假 ctx 上，只能守住"代码形态不再写错"，
+//    守不住"框架实际行为"。真实容器验证不可被替代（见 tests/LIMITS.md）。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { makeHostCtx, BOUND } from '../_host-ctx.mjs'
 
 const PRESET_SRC = readFileSync(join(process.cwd(), 'preset', 'index.js'), 'utf8')
+
+/** 读 jsonl 全量（测试辅助） */
+function readJsonl(file) {
+  if (!existsSync(file)) return []
+  return readFileSync(file, 'utf8')
+    .split(/\r?\n/)
+    .filter((l) => l.trim() !== '')
+    .map((l) => JSON.parse(l))
+}
 
 /* ------------------------------------------------------------------ *
  * R9【真容器缺陷①】preset 不得导出没有 `~standard` 的 Config
@@ -154,6 +174,80 @@ test('R11【真容器缺陷③】省略 项目/智能体 → write 与 recall �
     })
     assert.equal(w2.ok, true)
     assert.equal(w2['项目'], 'P2', '模型显式给的 项目 必须优先于绑定值')
+  } finally {
+    h.cleanup()
+  }
+})
+
+/* ------------------------------------------------------------------ *
+ * R12【缺陷④】read.jsonl 的 cond 必须记**实际硬筛值**，且与 echo 一致
+ *
+ * 原实现：`buildReadLog({ query: 原始query })` —— 模型省略 项目/智能体 时，
+ * cond 记成空串，而实际硬筛用的是绑定值。
+ *
+ * 为什么是真问题（不只是"字段不好看"）：
+ *   cond 的用途是整理阶段追根因。
+ *   记空串会让整理得出**错误结论**："模型没传项目所以查不到"，
+ *   而真相是"用 P1 查了但库里没有"。
+ *   → 整理会去改**本来正确**的行为，而不是去补缺失的条目。**归因被台账带偏。**
+ * ------------------------------------------------------------------ */
+test('R12【真容器缺陷④】省略 项目/智能体 召回 → read.jsonl 的 cond 记绑定值，且与 echo 一致', async () => {
+  const h = await makeHostCtx({ identity: null })
+  try {
+    const agent = { session: { id: 'qa-r12' } }
+    h.host.bindIdentity(agent, { 智能体: 'tester', 项目: 'P1' })
+
+    // 先写一条，确保库非空（否则可能走不同分支）
+    const w = await h.host.writeEntry(agent, {
+      主要内容: 'R12 回归：cond 必须记实际硬筛值',
+      形态: '事实',
+      自由标签: ['cond回归'],
+    })
+    assert.equal(w.ok, true)
+
+    // 故意省略 项目/智能体 召回
+    const query = { 形态: '事实', 自由标签: ['cond回归'] }
+    const r = await h.host.recall(agent, query)
+    assert.equal(r.ok, true, `召回应成功，实际 ${JSON.stringify(r).slice(0, 200)}`)
+
+    // 读台账
+    const logs = readJsonl(join(h.dataDir, 'records', 'read.jsonl'))
+    assert.equal(logs.length, 1, `应记 1 条读取台账，实际 ${logs.length}`)
+    const cond = logs[0].cond
+
+    assert.ok(cond, '台账必须有 cond 字段')
+
+    // 核心断言：cond 必须记**实际使用的绑定值**，不是空串
+    assert.equal(
+      cond['项目'],
+      'P1',
+      `cond.项目 必须记实际硬筛用的绑定值 P1，实际「${cond['项目']}」—— ` +
+        '原缺陷：记原始 query 的空串，会让整理误判"模型没传项目"',
+    )
+    assert.equal(
+      cond['智能体'],
+      'tester',
+      `cond.智能体 必须记实际硬筛用的绑定值 tester，实际「${cond['智能体']}」`,
+    )
+
+    // cond 与 echo 必须一致（两者都是"实际用了什么条件"的回显）
+    assert.equal(cond['项目'], r.echo['项目'], 'cond.项目 必须与 echo.项目 一致')
+    assert.equal(cond['智能体'], r.echo['智能体'], 'cond.智能体 必须与 echo.智能体 一致')
+    assert.equal(cond['形态'], r.echo['形态'], 'cond.形态 必须与 echo.形态 一致')
+
+    // 反向：cond 不得是空串（这是原缺陷的直接形态）
+    assert.notEqual(cond['项目'], '', 'cond.项目 不得为空串')
+    assert.notEqual(cond['智能体'], '', 'cond.智能体 不得为空串')
+
+    // 显式传值时，cond 应记显式值（不是绑定值）—— 证明记的是"实际用的"
+    await h.host.recall(agent, { 项目: 'P-other', 智能体: 'tester', 形态: '事实', 自由标签: ['cond回归'] })
+    const logs2 = readJsonl(join(h.dataDir, 'records', 'read.jsonl'))
+    assert.equal(logs2.length, 2, '第二次召回也应记台账')
+    assert.equal(
+      logs2[1].cond['项目'],
+      'P-other',
+      `显式传值时 cond 必须记显式值 P-other，实际「${logs2[1].cond['项目']}」（证明记的是实际用的，不是绑定值）`,
+    )
   } finally {
     h.cleanup()
   }

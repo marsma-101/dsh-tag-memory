@@ -1,26 +1,25 @@
-v0.3.1 第4个同根因缺陷 + 缺陷分类纠正
+第5个缺陷：库格式不兼容时静默返回 total:0（host-dev 发现并修）
 
-缺陷4（host-dev 发现并修）：read.jsonl 的 cond 记原始 query
-- 省略 项目/智能体 召回时，echo 显示 P1/tester（对），但 cond 记成空串
-- cond 用途是整理阶段追根因，记空串会让整理得出错误结论
-  "模型没传项目所以查不到"，而真相是"用绑定值查了但库里没有"
-- 修法：effectiveQuery 提到锁外，buildReadLog({ query: effectiveQuery ?? query })
-- 容器内实测：cond 现在记 {"项目":"P1","智能体":"tester"}，与 echo 一致
+问题：
+  listEntries / getOverview 把 readLibraryCsv 的 errors 丢弃，
+  库格式不兼容（如 8 列旧库缺 自由标签）时返回 { ok:true, total:0 }
+  -> UI 显示"暂无数据"，用户以为"记忆全没了"
 
-重要：缺陷分类纠正
-初次复盘把 4 个缺陷都归为"环境限制"，这个归因是错的。
-只有 Config = {} 是真框架契约（本地测不出）；
-其余 3 个是实现缺口+用例缺口，本地完全能测出来，
-只要用例覆盖"省略参数"和"事件还没进投影"。
+total:0 有两种截然不同的含义：
+  - 库真的是空的 -> 该去写记忆
+  - 库格式不兼容、一行都没读进来 -> 该去处理格式
+  UI 无法区分。这与前三处同一模式：把"读不到"伪装成"没有"。
 
-自查清单据此分两条：
-1. 框架契约类 -> 本地一律不算验过，标注需真装验证
-2. 调用形态类（参数省略/时序竞态/异常路径/默认值兜底）-> 本地必须覆盖，
-   没覆盖不许归因于环境
+修法：
+  HEADER_MISSING 属致命 -> 走 fail() 并带 libraryIncompatible:true
+  其余非致命（单行损坏）照常返回数据 + errors 供 UI 提示
+  client 无需改代码，它已有"失败优先显示 message"的逻辑
 
-旧数据：按主子指示不迁移、直接删除
-- 容器备份 12MB / 198 条 8 列旧记忆已删
-- 两代格式不兼容是有意决定
-- 读取侧安全：按列名定位，缺列报 HEADER_MISSING 不静默错读
+容器内实测（8列旧库 vs 9列正常库对照）：
+  8列: listEntries  ok=false code=LIBRARY_FORMAT_MISMATCH incompatible=true
+        message: 表头缺少列：自由标签。必须 9 列齐全（顺序可变，列名必须对）
+       getOverview  ok=false code=LIBRARY_FORMAT_MISMATCH
+  9列: listEntries  ok=true total=1  / getOverview ok=true total=1 active=1
+       正常路径完全不受影响
 
-容器已清理：临时文件、/workspace/tmv2、备份全部移除
+保留此修复（只影响错误路径，不增加正常路径复杂度）

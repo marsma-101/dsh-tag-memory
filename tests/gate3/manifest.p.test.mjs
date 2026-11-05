@@ -163,10 +163,32 @@ test('P8 files 白名单覆盖全部运行时文件，且必须含 标签字典.
 
   // 覆盖性：每个运行时文件都必须被某条 pattern 覆盖
   const uncovered = allFiles.filter((f) => !files.some((p) => globToRegExp(p).test(f)))
+
+  // Lead 2026-11-05 建议：把"疑似临时文件"单独点名，帮助区分
+  // 「真漏发布」与「有人把临时脚本/测试数据留在包根」。
+  // 判据：以 `_` 或 `.` 开头，或落在 `_xxx/` 这类目录下。
+  const looksTemp = (f) => /(^|\/)(_|\.)/.test(f)
+  const tempLike = uncovered.filter(looksTemp)
+  const realUncovered = uncovered.filter((f) => !looksTemp(f))
+
+  if (tempLike.length > 0) {
+    console.log(
+      `\n[P8 提示] 以下文件疑似临时文件（以 _ 或 . 开头），请确认是否应被 .gitignore 排除：\n` +
+        tempLike.map((f) => `  · ${f}`).join('\n') +
+        '\n',
+    )
+  }
+
   assert.deepEqual(
     uncovered,
     [],
-    `以下运行时文件未被 files 白名单覆盖（会漏发布）：${uncovered.join(', ')}`,
+    `以下运行时文件未被 files 白名单覆盖（会漏发布）：\n` +
+      realUncovered.map((f) => `  · ${f}`).join('\n') +
+      (tempLike.length > 0
+        ? `\n\n其中以下 ${tempLike.length} 个疑似临时文件（_ 或 . 前缀），` +
+          `请确认是"该排除"还是"该进包"：\n` +
+          tempLike.map((f) => `  · ${f}`).join('\n')
+        : ''),
   )
 })
 
