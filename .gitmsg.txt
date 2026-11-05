@@ -1,36 +1,22 @@
-补 qa 测试 + 修 7 处测试与实现脱节
+验证「立即整理」在真实库上真改库（不只 dryRun）
 
-新增测试（52 条）：
-  tests/engine/tidy.k.test.mjs      27 条  整理链路（foldFeedback/状态机/升通用/归纳/越界/汇总）
-  tests/engine/schedule.l.test.mjs  14 条  定时判定（备份到期/整理提醒/积压/格式化）
-  tests/engine/migrate.m.test.mjs   11 条  搬家（4 级优先级/锁定拒绝/双校验/清单）
+真实库实测（169 条 / 7 条观察态）：
+  目标 M-20261022-011（观察）
+  造 3 次 ok feedback
+  -> 预览识别 1 项：稳定性 观察 -> 稳定
+     依据「read.jsonl feedback：连续 ok 3 次（阈值 3），无 wrong」
+  -> 实际执行 applied=1
+  -> 库中该条稳定性真的变成「稳定」
+  -> tidy.jsonl 记 1 行，含 action=stability / before / after / basis
 
-修真实的实现缺陷：
-  planInduction 在成功日志少于阈值时直接 return []，
-  调用方无法区分"没有数据"和"有数据但不够格"，
-  报告里看不到"还差几个场合"这种可行动信息。
-  -> 改为始终返回结构（含 needed 字段，eligible 表示够不够格）
+无头浏览器 UI 实测（1600x900）：
+  设置页无错误
+  「预览要改什么」可点，返回"没有需要改的地方。"（此轮 feedback 已消费，正确）
+  「立即整理」可点，返回"已整理，共修改 0 项。"
+  整理后仍无错误
 
-修测试与实现脱节（7 处，都是我的改动导致）：
-  1. J1 只用正则查 "cordis" 字样，把 migrate.mjs 里给用户看的
-     报错文案（"改 cordis.patch.yml 哪一行"）误判成框架依赖
-     -> 改为先剥掉字符串字面量，只查代码
-  2. C1 写死 function createApi(ctx)，我改成 createApi(nsRef) 后解析失败
-     -> 改为不绑参数名
-  3. C3 写死 hasApi(ctx) -> 改为 hasApi(\w+)
-  4. 契约1 依赖已删除的 noParamMethod/oneParamMethod
-     -> 改为从 REMOTE_SIGNATURES 提取
-  5. 契约3 同上，createApi 参数名不绑
-  6. API2 断言"无参方法必须传 {}"——这条**已被真容器实测推翻**
-     （gateway 报 expected 0 argument(s), got 1）
-     -> 改为断言无参时不传实参
-  7-9. 假 ctx 缺 ctx.inject（宿主用 ctx.inject(['typert']) 延迟注册 Remote）
-     -> 三个测试 helper 都补上 inject 实现
-
-清残留：client.js.bak（P8 报的未覆盖文件）
-
-client.js 顺带加兼容：createApi/hasApi 既接受 nsRef({current})
-也接受 ctx({remote:{tagMemory}})，便于单测且向后兼容。
-生产路径仍必须走 nsRef —— 直接 ctx.remote[NS] 会被 cordis proxy 拦。
-
-全量：233 通过 / 0 失败 / 4 条视觉如实未验证（共 237 条）
+顺带确认一个部署事实：
+  数据实际在 /opt/dsh/profiles/web/node_modules/dsh-tag-memory/data/（出厂默认位置），
+  补丁里的 /opt/dsh/tag-memory-v2 并不存在 —— 说明 4 级优先级里
+  配置那一级没生效，实际走了 package 兜底。设置页如实显示
+  "生效来源：插件包内目录（出厂默认）"并给出搬家提示，与事实一致。
