@@ -170,10 +170,22 @@ export function apply(ctx, config = {}) {
   registerIdentityProjection(ctx);
   registerTimer(ctx, service, config);
 
-  // Remote 通道（UI 调宿主）。失败**不能影响工具链路**——所以吞掉并记日志，
-  // 由 client 侧显示“未接线”而不是整个插件挂掉。
-  registerRemote(ctx, service).catch((err) => {
-    ctx.logger?.warn?.('[dsh-tag-memory] Remote 注册失败（UI 将不可用，工具不受影响）：%s', err?.message ?? err);
+  // Remote 通道（UI 调宿主）。失败 **不能影响工具链路** —— 吞掉并记日志，
+  // 由 client 侧显示「未接线」而不是整插件挂掉。
+  //
+  // ⚠️ 不能同步调 registerRemote！cordis 的 reflect.get(name, strict=true) 要求
+  // impl.fiber.state === 2（ACTIVE）才返回服务；apply() 执行时本插件 fiber 还在
+  // 加载中，ctx.get('typert') 拿到 undefined，注册被静默跳过 ——
+  // 表现就是「代码在、端点不存在」，客户端 $mount 成功但请求 404。
+  //
+  // 正确做法：ctx.inject 声明依赖 typert，框架等该服务就绪后再跑回调。
+  ctx.inject(['typert'], (typertCtx) => {
+    registerRemote(typertCtx, service).catch((err) => {
+      ctx.logger?.warn?.(
+        '[dsh-tag-memory] Remote 注册失败（UI 将不可用，工具不受影响）：',
+        err?.message ?? err,
+      );
+    });
   });
 
   return () => {
