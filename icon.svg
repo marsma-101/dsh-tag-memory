@@ -1,6 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
-  <rect x="4" y="12" width="56" height="40" rx="8" fill="#247bbf"/>
-  <path d="M14 24h18M14 32h26M14 40h14" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round" opacity="0.95"/>
-  <circle cx="48" cy="22" r="5" fill="#ffd166"/>
-  <path d="M48 16v-4" stroke="#ffd166" stroke-width="3" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="标签记忆">
+  <defs>
+    <linearGradient id="dtm-brain" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5b9cff"/>
+      <stop offset="1" stop-color="#2a5fc4"/>
+    </linearGradient>
+  </defs>
+  <path d="M32 11c-4-4.5-12-4.5-16.5 0.8-5 0.8-8 6-7 11-3 3.2-3 9 1.2 12 0 5.2 4.2 9.2 9.2 9.2 2.2 4 6 5.8 10 4.8m3.1-37.8c4-4.5 12-4.5 16.5 0.8 5 0.8 8 6 7 11 3 3.2 3 9-1.2 12 0 5.2-4.2 9.2-9.2 9.2-2.2 4-6 5.8-10 4.8"
+        fill="none" stroke="url(#dtm-brain)" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M32 12v37" stroke="#7aaef0" stroke-width="3.2" stroke-linecap="round" opacity="0.85"/>
+  <circle cx="21.5" cy="24" r="4.4" fill="#ffd166"/>
+  <circle cx="42.5" cy="31.5" r="4.4" fill="#ffd166"/>
+  <circle cx="26.5" cy="41" r="3.8" fill="#ffd166" opacity="0.9"/>
 </svg>

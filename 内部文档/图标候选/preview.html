@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; padding:32px; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background:#f5f7fa; color:#1f2328; }
+  h1 { font-size:20px; margin:0 0 6px; }
+  .sub { color:#656d76; font-size:13px; margin-bottom:24px; }
+  .grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:18px; }
+  .card { background:#fff; border:1px solid #d8dee4; border-radius:12px; padding:18px; display:flex; gap:16px; align-items:flex-start; }
+  .icon-wrap { width:64px; height:64px; flex:0 0 64px; }
+  .icon-wrap svg { width:64px; height:64px; display:block; }
+  .meta { min-width:0; }
+  .name { font-weight:600; font-size:14px; margin-bottom:4px; }
+  .desc { font-size:12.5px; color:#57606a; line-height:1.5; margin-bottom:6px; }
+  .file { font-family:ui-monospace,Consolas,monospace; font-size:11px; color:#8b949e; }
+  .section-title { font-size:14px; font-weight:600; margin:32px 0 14px; padding-top:20px; border-top:1px solid #d8dee4; }
+  .sm-row { display:flex; gap:20px; flex-wrap:wrap; }
+  .sm { display:flex; flex-direction:column; align-items:center; gap:6px; width:88px; }
+  .sm-icon { width:32px; height:32px; }
+  .sm-icon svg { width:32px; height:32px; display:block; }
+  .sm span { font-size:11px; color:#57606a; text-align:center; }
+  .dark { background:#161b22; border-radius:12px; padding:18px; }
+  .dark .sm span { color:#8b949e; }
+</style></head>
+<body>
+  <h1>标签记忆 · 图标方案</h1>
+  <div class="sub">12 个候选，尺寸 64×64。点开单独文件可直接替换 icon.svg。</div>
+  <div class="grid">
+    <div class="card">
+      <div class="icon-wrap"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b9ae1"/>
+      <stop offset="1" stop-color="#1a5f9e"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="11" width="58" height="42" rx="11" fill="url(#g1)"/>
+  <rect x="3" y="11" width="58" height="42" rx="11" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path d="M13 23h17M13 31h26M13 39h13" stroke="#ffffff" stroke-width="3.6" stroke-linecap="round" opacity="0.96"/>
+  <circle cx="49" cy="21" r="5.5" fill="#ffd166"/>
+  <path d="M49 14.5v-3.5" stroke="#ffd166" stroke-width="3.2" stroke-linecap="round"/>
+</svg>
+</div>
+      <div class="meta">
+        <div class="name">卡片 + 标签钉</div>
+        <div class="desc">当前方案的精修版：更强的对比与更饱满的圆角</div>
+        <div class="file">01-card-pin.svg</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="icon-wrap"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#59b0ea"/>
+      <stop offset="1" stop-color="#2b7cc0"/>
+    </linearGradient>
+  </defs>
+  <rect x="13" y="8" width="42" height="30" rx="8" fill="#8fc7ec" opacity="0.55"/>
+  <rect x="8" y="16" width="46" height="32" rx="9" fill="#5ba4d8" opacity="0.8"/>
+  <rect x="4" y="24" width="50" height="34" rx="10" fill="url(#g2)"/>
+  <path d="M13 35h20M13 43h28" stroke="#ffffff" stroke-width="3.4" stroke-linecap="round" opacity="0.95"/>
+  <circle cx="46" cy="35" r="4.2" fill="#ffd166"/>
+</svg>
+</div>
+      <div class="meta">
+        <div class="name">层叠记忆</div>
+        <div class="desc">三张卡片错位堆叠，表达「一层层积累」</div>
+        <div class="file">02-stack.svg</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="icon-wrap"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2f8fd0"/>
+      <stop offset="1" stop-color="#17537f"/>
+    </linearGradient>
+  </defs>
+  <path d="M16 8h32a6 6 0 0 1 6 6v42l-22-13-22 13V14a6 6 0 0 1 6-6z" fill="url(#g3)"/>
+  <circle cx="32" cy="20" r="4.5" fill="#ffd166"/>
+  <path d="M24 32h16M24 39h10" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" opacity="0.9"/>
+</svg>
+</div>
+      <div class="meta">
+        <div class="name">书签夹标</div>
+        <div class="desc">书签形，带打孔，像夹在记忆库里的一页</div>
+        <div class="file">03-bookmark.svg</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="icon-wrap"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g4" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5b9cff"/>
+      <stop offset="1" stop-color="#2a5fc4"/>
+    </linearGradient>
+  </defs>
+  <path d="M32 10c-4-4-12-4-16 1-5 1-8 6-7 11-3 3-3 9 1 12 0 5 4 9 9 9 2 4 6 6 10 5m3-38c4-4 12-4 16 1 5 1 8 6 7 11 3 3 3 9-1 12 0 5-4 9-9 9-2 4-6 6-10 5"
+        fill="none" stroke="url(#g4)" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M32 10v38" stroke="#8fbaf7" stroke-width="2.6" stroke-linecap="round" opacity="0.75"/>
+  <circle cx="22" cy="24" r="3.4" fill="#ffd166"/>
+  <circle cx="42" cy="32" r="3.4" fill="#ffd166"/>
+  <circle cx="27" cy="41" r="3" fill="#ffd166" opacity="0.85"/>
+</svg>
+</div>
+      <div class="meta">
+        <div class="name">大脑节点</div>
+        <div class="desc">大脑轮廓 + 记忆节点，偏「智能」感</div>
+        <div class="file">04-brain.svg</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="icon-wrap"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g5" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#46a1d8"/>
+      <stop offset="1" stop-color="#1d6a9e"/>
+    </linearGradient>
+  </defs>
+  <rect x="6" y="14" width="52" height="42" rx="7" fill="url(#g5)"/>
+  <rect x="6" y="14" width="52" height="10" rx="7" fill="#ffffff" opacity="0.22"/>
+  <rect x="22" y="31" width="20" height="5" rx="2.5" fill="#ffffff" opacity="0.92"/>
+  <rect x="22" y="43" width="20" height="5" rx="2.5" fill="#ffffff" opacity="0.6"/>
+  <circle cx="46" cy="20" r="4" fill="#ffd166"/>
+</svg>
+</div>
+      <div class="meta">
+        <div class="name">档案盒</div>
+        <div class="desc">带抽屉的记忆盒，偏「归档/可靠」</div>
+        <div class="file">05-archive.svg</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="icon-wrap"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g6" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4aa3e8"/>
+      <stop offset="1" stop-color="#1c5a92"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="26" fill="url(#g6)"/>
+  <path d="M20 32a12 12 0 0 1 24 0v6M32 20a12 12 0 0 1 12 12M24 32a8 8 0 0 1 16 0v8"
+        fill="none" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" opacity="0.95"/>
+  <path d="M32 32v10" stroke="#ffd166" stroke-width="3.2" stroke-linecap="round"/>
+</svg>
+</div>
+      <div class="meta">
+        <div class="name">身份印记</div>
+        <div class="desc">指纹同心弧，呼应「身份隔离」这个核心设计</div>
+        <div class="file">06-fingerprint.svg</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="icon-wrap"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g7" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3f9fe0"/>
+      <stop offset="1" stop-color="#1a5c94"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#g7)"/>
+  <path d="M22 20h12l6 10-6 10H22l-6-10z" fill="#ffffff" opacity="0.95"/>
+  <path d="M40 14h9l4.5 8-4.5 8h-9l-4.5-8z" fill="#ffd166" opacity="0.95" transform="translate(3,-6) scale(.72)"/>
+  <circle cx="28" cy="30" r="3.4" fill="#1a5c94"/>
+</svg>
+</div>
+      <div class="meta">
+        <div class="name">标签蜂巢</div>
+        <div class="desc">六边形网格，表达「结构化标签体系」</div>
+        <div class="file">07-hex.svg</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="icon-wrap"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g8" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4fa8e6"/>
+      <stop offset="1" stop-color="#1d5f96"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#eef5fb"/>
+  <path d="M22 14v14a10 10 0 0 0 20 0V14h-8v14a2 2 0 0 1-4 0V14z" fill="url(#g8)"/>
+  <rect x="22" y="10" width="8" height="7" rx="2" fill="#ffd166"/>
+  <rect x="34" y="10" width="8" height="7" rx="2" fill="#ffd166"/>
+  <circle cx="32" cy="46" r="4" fill="#8fbde0" opacity="0.9"/>
+  <circle cx="20" cy="50" r="2.6" fill="#b7d6ee"/>
+  <circle cx="45" cy="49" r="3" fill="#b7d6ee"/>
+</svg>
+</div>
+      <div class="meta">
+        <div class="name">磁吸检索</div>
+        <div class="desc">磁铁吸住记忆碎片，表达「召回」</div>
+        <div class="file">08-magnet.svg</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="icon-wrap"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g9" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2b7fc4"/>
+      <stop offset="1" stop-color="#123f66"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#g9)"/>
+  <path d="M20 20L32 30M32 30l13-9M32 30v14M32 44l-11 6M32 44l11 6"
+        stroke="#8fc4ea" stroke-width="2.4" stroke-linecap="round" opacity="0.8"/>
+  <circle cx="20" cy="20" r="5" fill="#ffffff"/>
+  <circle cx="45" cy="21" r="4.2" fill="#ffd166"/>
+  <circle cx="32" cy="30" r="6" fill="#ffffff"/>
+  <circle cx="21" cy="50" r="4" fill="#8fc4ea"/>
+  <circle cx="43" cy="50" r="4.6" fill="#ffd166" opacity="0.9"/>
+</svg>
+</div>
+      <div class="meta">
+        <div class="name">知识网络</div>
+        <div class="desc">节点连线，表达「跨会话关联」</div>
+        <div class="file">09-network.svg</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="icon-wrap"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g10" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3e95d6"/>
+      <stop offset="1" stop-color="#194f7d"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="27" fill="url(#g10)"/>
+  <circle cx="32" cy="32" r="21" fill="none" stroke="#ffffff" stroke-width="2" stroke-opacity="0.55"/>
+  <path d="M22 27h20M22 33h20M22 39h12" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" opacity="0.95"/>
+  <circle cx="44" cy="39" r="4" fill="#ffd166"/>
+</svg>
+</div>
+      <div class="meta">
+        <div class="name">记忆印章</div>
+        <div class="desc">圆形印章感，偏「权威/不可篡改」</div>
+        <div class="file">10-stamp.svg</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="icon-wrap"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g11" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5aa9e6"/>
+      <stop offset="1" stop-color="#2f7fc1"/>
+    </linearGradient>
+  </defs>
+  <rect x="5" y="13" width="54" height="38" rx="10" fill="none" stroke="url(#g11)" stroke-width="3.4"/>
+  <path d="M14 24h14M14 32h22M14 40h10" stroke="url(#g11)" stroke-width="3.2" stroke-linecap="round"/>
+  <circle cx="47" cy="25" r="4.5" fill="#ffd166"/>
+</svg>
+</div>
+      <div class="meta">
+        <div class="name">极简卡片</div>
+        <div class="desc">留白多、线条轻，适合浅色主题</div>
+        <div class="file">11-minimal-card.svg</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="icon-wrap"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g12" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4ea6e8"/>
+      <stop offset="1" stop-color="#1a5d95"/>
+    </linearGradient>
+  </defs>
+  <path d="M32 6L58 32 32 58 6 32z" fill="url(#g12)" opacity="0.14"/>
+  <path d="M37 8h13a6 6 0 0 1 6 6v13L28 55a6 6 0 0 1-8.5 0L8.5 44a6 6 0 0 1 0-8.5z" fill="url(#g12)"/>
+  <circle cx="45" cy="19" r="5.5" fill="#ffd166"/>
+  <path d="M22 36h12M22 43h7" stroke="#ffffff" stroke-width="3" stroke-linecap="round" opacity="0.92"/>
+</svg>
+</div>
+      <div class="meta">
+        <div class="name">纯标签</div>
+        <div class="desc">去掉卡片容器，只留标签形状，最简洁</div>
+        <div class="file">12-tag-only.svg</div>
+      </div>
+    </div></div>
+
+  <div class="section-title">实际显示尺寸（32px，左侧浅色 / 下方深色）</div>
+  <div class="sm-row"><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b9ae1"/>
+      <stop offset="1" stop-color="#1a5f9e"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="11" width="58" height="42" rx="11" fill="url(#g1)"/>
+  <rect x="3" y="11" width="58" height="42" rx="11" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path d="M13 23h17M13 31h26M13 39h13" stroke="#ffffff" stroke-width="3.6" stroke-linecap="round" opacity="0.96"/>
+  <circle cx="49" cy="21" r="5.5" fill="#ffd166"/>
+  <path d="M49 14.5v-3.5" stroke="#ffd166" stroke-width="3.2" stroke-linecap="round"/>
+</svg>
+</div><span>卡片 + 标签钉</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#59b0ea"/>
+      <stop offset="1" stop-color="#2b7cc0"/>
+    </linearGradient>
+  </defs>
+  <rect x="13" y="8" width="42" height="30" rx="8" fill="#8fc7ec" opacity="0.55"/>
+  <rect x="8" y="16" width="46" height="32" rx="9" fill="#5ba4d8" opacity="0.8"/>
+  <rect x="4" y="24" width="50" height="34" rx="10" fill="url(#g2)"/>
+  <path d="M13 35h20M13 43h28" stroke="#ffffff" stroke-width="3.4" stroke-linecap="round" opacity="0.95"/>
+  <circle cx="46" cy="35" r="4.2" fill="#ffd166"/>
+</svg>
+</div><span>层叠记忆</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2f8fd0"/>
+      <stop offset="1" stop-color="#17537f"/>
+    </linearGradient>
+  </defs>
+  <path d="M16 8h32a6 6 0 0 1 6 6v42l-22-13-22 13V14a6 6 0 0 1 6-6z" fill="url(#g3)"/>
+  <circle cx="32" cy="20" r="4.5" fill="#ffd166"/>
+  <path d="M24 32h16M24 39h10" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" opacity="0.9"/>
+</svg>
+</div><span>书签夹标</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g4" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5b9cff"/>
+      <stop offset="1" stop-color="#2a5fc4"/>
+    </linearGradient>
+  </defs>
+  <path d="M32 10c-4-4-12-4-16 1-5 1-8 6-7 11-3 3-3 9 1 12 0 5 4 9 9 9 2 4 6 6 10 5m3-38c4-4 12-4 16 1 5 1 8 6 7 11 3 3 3 9-1 12 0 5-4 9-9 9-2 4-6 6-10 5"
+        fill="none" stroke="url(#g4)" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M32 10v38" stroke="#8fbaf7" stroke-width="2.6" stroke-linecap="round" opacity="0.75"/>
+  <circle cx="22" cy="24" r="3.4" fill="#ffd166"/>
+  <circle cx="42" cy="32" r="3.4" fill="#ffd166"/>
+  <circle cx="27" cy="41" r="3" fill="#ffd166" opacity="0.85"/>
+</svg>
+</div><span>大脑节点</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g5" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#46a1d8"/>
+      <stop offset="1" stop-color="#1d6a9e"/>
+    </linearGradient>
+  </defs>
+  <rect x="6" y="14" width="52" height="42" rx="7" fill="url(#g5)"/>
+  <rect x="6" y="14" width="52" height="10" rx="7" fill="#ffffff" opacity="0.22"/>
+  <rect x="22" y="31" width="20" height="5" rx="2.5" fill="#ffffff" opacity="0.92"/>
+  <rect x="22" y="43" width="20" height="5" rx="2.5" fill="#ffffff" opacity="0.6"/>
+  <circle cx="46" cy="20" r="4" fill="#ffd166"/>
+</svg>
+</div><span>档案盒</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g6" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4aa3e8"/>
+      <stop offset="1" stop-color="#1c5a92"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="26" fill="url(#g6)"/>
+  <path d="M20 32a12 12 0 0 1 24 0v6M32 20a12 12 0 0 1 12 12M24 32a8 8 0 0 1 16 0v8"
+        fill="none" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" opacity="0.95"/>
+  <path d="M32 32v10" stroke="#ffd166" stroke-width="3.2" stroke-linecap="round"/>
+</svg>
+</div><span>身份印记</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g7" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3f9fe0"/>
+      <stop offset="1" stop-color="#1a5c94"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#g7)"/>
+  <path d="M22 20h12l6 10-6 10H22l-6-10z" fill="#ffffff" opacity="0.95"/>
+  <path d="M40 14h9l4.5 8-4.5 8h-9l-4.5-8z" fill="#ffd166" opacity="0.95" transform="translate(3,-6) scale(.72)"/>
+  <circle cx="28" cy="30" r="3.4" fill="#1a5c94"/>
+</svg>
+</div><span>标签蜂巢</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g8" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4fa8e6"/>
+      <stop offset="1" stop-color="#1d5f96"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#eef5fb"/>
+  <path d="M22 14v14a10 10 0 0 0 20 0V14h-8v14a2 2 0 0 1-4 0V14z" fill="url(#g8)"/>
+  <rect x="22" y="10" width="8" height="7" rx="2" fill="#ffd166"/>
+  <rect x="34" y="10" width="8" height="7" rx="2" fill="#ffd166"/>
+  <circle cx="32" cy="46" r="4" fill="#8fbde0" opacity="0.9"/>
+  <circle cx="20" cy="50" r="2.6" fill="#b7d6ee"/>
+  <circle cx="45" cy="49" r="3" fill="#b7d6ee"/>
+</svg>
+</div><span>磁吸检索</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g9" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2b7fc4"/>
+      <stop offset="1" stop-color="#123f66"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#g9)"/>
+  <path d="M20 20L32 30M32 30l13-9M32 30v14M32 44l-11 6M32 44l11 6"
+        stroke="#8fc4ea" stroke-width="2.4" stroke-linecap="round" opacity="0.8"/>
+  <circle cx="20" cy="20" r="5" fill="#ffffff"/>
+  <circle cx="45" cy="21" r="4.2" fill="#ffd166"/>
+  <circle cx="32" cy="30" r="6" fill="#ffffff"/>
+  <circle cx="21" cy="50" r="4" fill="#8fc4ea"/>
+  <circle cx="43" cy="50" r="4.6" fill="#ffd166" opacity="0.9"/>
+</svg>
+</div><span>知识网络</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g10" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3e95d6"/>
+      <stop offset="1" stop-color="#194f7d"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="27" fill="url(#g10)"/>
+  <circle cx="32" cy="32" r="21" fill="none" stroke="#ffffff" stroke-width="2" stroke-opacity="0.55"/>
+  <path d="M22 27h20M22 33h20M22 39h12" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" opacity="0.95"/>
+  <circle cx="44" cy="39" r="4" fill="#ffd166"/>
+</svg>
+</div><span>记忆印章</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g11" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5aa9e6"/>
+      <stop offset="1" stop-color="#2f7fc1"/>
+    </linearGradient>
+  </defs>
+  <rect x="5" y="13" width="54" height="38" rx="10" fill="none" stroke="url(#g11)" stroke-width="3.4"/>
+  <path d="M14 24h14M14 32h22M14 40h10" stroke="url(#g11)" stroke-width="3.2" stroke-linecap="round"/>
+  <circle cx="47" cy="25" r="4.5" fill="#ffd166"/>
+</svg>
+</div><span>极简卡片</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g12" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4ea6e8"/>
+      <stop offset="1" stop-color="#1a5d95"/>
+    </linearGradient>
+  </defs>
+  <path d="M32 6L58 32 32 58 6 32z" fill="url(#g12)" opacity="0.14"/>
+  <path d="M37 8h13a6 6 0 0 1 6 6v13L28 55a6 6 0 0 1-8.5 0L8.5 44a6 6 0 0 1 0-8.5z" fill="url(#g12)"/>
+  <circle cx="45" cy="19" r="5.5" fill="#ffd166"/>
+  <path d="M22 36h12M22 43h7" stroke="#ffffff" stroke-width="3" stroke-linecap="round" opacity="0.92"/>
+</svg>
+</div><span>纯标签</span></div></div>
+  <div class="dark" style="margin-top:14px"><div class="sm-row"><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b9ae1"/>
+      <stop offset="1" stop-color="#1a5f9e"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="11" width="58" height="42" rx="11" fill="url(#g1)"/>
+  <rect x="3" y="11" width="58" height="42" rx="11" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path d="M13 23h17M13 31h26M13 39h13" stroke="#ffffff" stroke-width="3.6" stroke-linecap="round" opacity="0.96"/>
+  <circle cx="49" cy="21" r="5.5" fill="#ffd166"/>
+  <path d="M49 14.5v-3.5" stroke="#ffd166" stroke-width="3.2" stroke-linecap="round"/>
+</svg>
+</div><span>卡片 + 标签钉</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#59b0ea"/>
+      <stop offset="1" stop-color="#2b7cc0"/>
+    </linearGradient>
+  </defs>
+  <rect x="13" y="8" width="42" height="30" rx="8" fill="#8fc7ec" opacity="0.55"/>
+  <rect x="8" y="16" width="46" height="32" rx="9" fill="#5ba4d8" opacity="0.8"/>
+  <rect x="4" y="24" width="50" height="34" rx="10" fill="url(#g2)"/>
+  <path d="M13 35h20M13 43h28" stroke="#ffffff" stroke-width="3.4" stroke-linecap="round" opacity="0.95"/>
+  <circle cx="46" cy="35" r="4.2" fill="#ffd166"/>
+</svg>
+</div><span>层叠记忆</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2f8fd0"/>
+      <stop offset="1" stop-color="#17537f"/>
+    </linearGradient>
+  </defs>
+  <path d="M16 8h32a6 6 0 0 1 6 6v42l-22-13-22 13V14a6 6 0 0 1 6-6z" fill="url(#g3)"/>
+  <circle cx="32" cy="20" r="4.5" fill="#ffd166"/>
+  <path d="M24 32h16M24 39h10" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" opacity="0.9"/>
+</svg>
+</div><span>书签夹标</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g4" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5b9cff"/>
+      <stop offset="1" stop-color="#2a5fc4"/>
+    </linearGradient>
+  </defs>
+  <path d="M32 10c-4-4-12-4-16 1-5 1-8 6-7 11-3 3-3 9 1 12 0 5 4 9 9 9 2 4 6 6 10 5m3-38c4-4 12-4 16 1 5 1 8 6 7 11 3 3 3 9-1 12 0 5-4 9-9 9-2 4-6 6-10 5"
+        fill="none" stroke="url(#g4)" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M32 10v38" stroke="#8fbaf7" stroke-width="2.6" stroke-linecap="round" opacity="0.75"/>
+  <circle cx="22" cy="24" r="3.4" fill="#ffd166"/>
+  <circle cx="42" cy="32" r="3.4" fill="#ffd166"/>
+  <circle cx="27" cy="41" r="3" fill="#ffd166" opacity="0.85"/>
+</svg>
+</div><span>大脑节点</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g5" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#46a1d8"/>
+      <stop offset="1" stop-color="#1d6a9e"/>
+    </linearGradient>
+  </defs>
+  <rect x="6" y="14" width="52" height="42" rx="7" fill="url(#g5)"/>
+  <rect x="6" y="14" width="52" height="10" rx="7" fill="#ffffff" opacity="0.22"/>
+  <rect x="22" y="31" width="20" height="5" rx="2.5" fill="#ffffff" opacity="0.92"/>
+  <rect x="22" y="43" width="20" height="5" rx="2.5" fill="#ffffff" opacity="0.6"/>
+  <circle cx="46" cy="20" r="4" fill="#ffd166"/>
+</svg>
+</div><span>档案盒</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g6" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4aa3e8"/>
+      <stop offset="1" stop-color="#1c5a92"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="26" fill="url(#g6)"/>
+  <path d="M20 32a12 12 0 0 1 24 0v6M32 20a12 12 0 0 1 12 12M24 32a8 8 0 0 1 16 0v8"
+        fill="none" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" opacity="0.95"/>
+  <path d="M32 32v10" stroke="#ffd166" stroke-width="3.2" stroke-linecap="round"/>
+</svg>
+</div><span>身份印记</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g7" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3f9fe0"/>
+      <stop offset="1" stop-color="#1a5c94"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#g7)"/>
+  <path d="M22 20h12l6 10-6 10H22l-6-10z" fill="#ffffff" opacity="0.95"/>
+  <path d="M40 14h9l4.5 8-4.5 8h-9l-4.5-8z" fill="#ffd166" opacity="0.95" transform="translate(3,-6) scale(.72)"/>
+  <circle cx="28" cy="30" r="3.4" fill="#1a5c94"/>
+</svg>
+</div><span>标签蜂巢</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g8" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4fa8e6"/>
+      <stop offset="1" stop-color="#1d5f96"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#eef5fb"/>
+  <path d="M22 14v14a10 10 0 0 0 20 0V14h-8v14a2 2 0 0 1-4 0V14z" fill="url(#g8)"/>
+  <rect x="22" y="10" width="8" height="7" rx="2" fill="#ffd166"/>
+  <rect x="34" y="10" width="8" height="7" rx="2" fill="#ffd166"/>
+  <circle cx="32" cy="46" r="4" fill="#8fbde0" opacity="0.9"/>
+  <circle cx="20" cy="50" r="2.6" fill="#b7d6ee"/>
+  <circle cx="45" cy="49" r="3" fill="#b7d6ee"/>
+</svg>
+</div><span>磁吸检索</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g9" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2b7fc4"/>
+      <stop offset="1" stop-color="#123f66"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#g9)"/>
+  <path d="M20 20L32 30M32 30l13-9M32 30v14M32 44l-11 6M32 44l11 6"
+        stroke="#8fc4ea" stroke-width="2.4" stroke-linecap="round" opacity="0.8"/>
+  <circle cx="20" cy="20" r="5" fill="#ffffff"/>
+  <circle cx="45" cy="21" r="4.2" fill="#ffd166"/>
+  <circle cx="32" cy="30" r="6" fill="#ffffff"/>
+  <circle cx="21" cy="50" r="4" fill="#8fc4ea"/>
+  <circle cx="43" cy="50" r="4.6" fill="#ffd166" opacity="0.9"/>
+</svg>
+</div><span>知识网络</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g10" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3e95d6"/>
+      <stop offset="1" stop-color="#194f7d"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="27" fill="url(#g10)"/>
+  <circle cx="32" cy="32" r="21" fill="none" stroke="#ffffff" stroke-width="2" stroke-opacity="0.55"/>
+  <path d="M22 27h20M22 33h20M22 39h12" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" opacity="0.95"/>
+  <circle cx="44" cy="39" r="4" fill="#ffd166"/>
+</svg>
+</div><span>记忆印章</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g11" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5aa9e6"/>
+      <stop offset="1" stop-color="#2f7fc1"/>
+    </linearGradient>
+  </defs>
+  <rect x="5" y="13" width="54" height="38" rx="10" fill="none" stroke="url(#g11)" stroke-width="3.4"/>
+  <path d="M14 24h14M14 32h22M14 40h10" stroke="url(#g11)" stroke-width="3.2" stroke-linecap="round"/>
+  <circle cx="47" cy="25" r="4.5" fill="#ffd166"/>
+</svg>
+</div><span>极简卡片</span></div><div class="sm"><div class="sm-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Tag Memory">
+  <defs>
+    <linearGradient id="g12" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4ea6e8"/>
+      <stop offset="1" stop-color="#1a5d95"/>
+    </linearGradient>
+  </defs>
+  <path d="M32 6L58 32 32 58 6 32z" fill="url(#g12)" opacity="0.14"/>
+  <path d="M37 8h13a6 6 0 0 1 6 6v13L28 55a6 6 0 0 1-8.5 0L8.5 44a6 6 0 0 1 0-8.5z" fill="url(#g12)"/>
+  <circle cx="45" cy="19" r="5.5" fill="#ffd166"/>
+  <path d="M22 36h12M22 43h7" stroke="#ffffff" stroke-width="3" stroke-linecap="round" opacity="0.92"/>
+</svg>
+</div><span>纯标签</span></div></div></div>
+</body></html>
