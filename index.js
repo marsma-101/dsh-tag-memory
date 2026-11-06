@@ -1389,6 +1389,27 @@ function createHostService(ctx, config) {
     const { layout } = await resolveLayout();
     const { schema } = await loadConfigs();
 
+    // ⚠️ 必须先确认源文件**真的存在**。
+    // readLibraryCsv 对不存在的文件返回空记录（当空库），不抛错 ——
+    // 于是合并一个不存在的路径会得到 ok:true（“对方是空库”），还白白生成一份备份。
+    // 实测到过（2026-11-06）。这是教训7「把读不到伪装成没有」的又一例。
+    try {
+      const st = await fsp.stat(src);
+      if (!st.isFile()) {
+        return reject('MERGE_SOURCE_NOT_FILE', `路径不是文件：${src}。`, 'path');
+      }
+    } catch (err) {
+      if (err && err.code === 'ENOENT') {
+        return reject(
+          'MERGE_SOURCE_NOT_FOUND',
+          `要合并的文件不存在：${src}。` +
+            '请确认路径（插件运行在沙箱/容器里，宿主机路径在这侧不存在）。',
+          'path',
+        );
+      }
+      return reject('MERGE_SOURCE_UNREADABLE', `读不了要合并的文件：${err?.message ?? err}`, 'path');
+    }
+
     let incoming;
     try {
       incoming = await readLibraryCsv(src, schema);

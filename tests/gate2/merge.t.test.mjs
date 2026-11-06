@@ -148,3 +148,65 @@ test('T9 mergeLibrary 返回里的 changed 会真实反映覆盖数', () => {
   assert.match(body, /changed\s*\+=\s*1/, 'changed 必须真的累加（否则调用方看不出有没有覆盖）')
   assert.match(body, /conflicts\s*\+=\s*1/, 'conflicts 计数必须保留')
 })
+
+// ── T10-T12: 源文件不存在 / 不是文件 / 正常路径 ──────────
+
+test('T10 【关键】合并源文件不存在时必须拒绝，不许返回 ok:true', () => {
+  const i = HOST_SRC.indexOf('async function mergeLibrary')
+  assert.ok(i >= 0, '找不到 mergeLibrary')
+
+  let depth = 0
+  let end = -1
+  const bodyStart = HOST_SRC.indexOf('{', HOST_SRC.indexOf(')', i))
+  for (let k = bodyStart; k < HOST_SRC.length; k++) {
+    if (HOST_SRC[k] === '{') depth++
+    else if (HOST_SRC[k] === '}') {
+      depth--
+      if (depth === 0) {
+        end = k + 1
+        break
+      }
+    }
+  }
+  const body = HOST_SRC.slice(i, end)
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+    .join('\n')
+
+  // 必须有 stat 存在性检查
+  assert.match(body, /fsp\.stat\s*\(/, '必须先 stat 源文件，确认它真的存在')
+  // 必须处理 ENOENT
+  assert.match(body, /ENOENT/, '必须处理文件不存在（ENOENT）')
+  // 必须给出明确错误码
+  assert.match(body, /MERGE_SOURCE_NOT_FOUND/, '文件不存在要返回 MERGE_SOURCE_NOT_FOUND')
+})
+
+test('T11 路径是目录时也要拒绝（不能当空库合并）', () => {
+  const i = HOST_SRC.indexOf('async function mergeLibrary')
+  let depth = 0
+  let end = -1
+  const bodyStart = HOST_SRC.indexOf('{', HOST_SRC.indexOf(')', i))
+  for (let k = bodyStart; k < HOST_SRC.length; k++) {
+    if (HOST_SRC[k] === '{') depth++
+    else if (HOST_SRC[k] === '}') {
+      depth--
+      if (depth === 0) {
+        end = k + 1
+        break
+      }
+    }
+  }
+  const body = HOST_SRC.slice(i, end)
+  assert.match(body, /isFile\s*\(/, '必须用 isFile() 排除目录')
+  assert.match(body, /MERGE_SOURCE_NOT_FILE/, '目录要返回 MERGE_SOURCE_NOT_FILE')
+})
+
+test('T12 存在性检查必须在读取内容之前', () => {
+  const i = HOST_SRC.indexOf('async function mergeLibrary')
+  const body = HOST_SRC.slice(i, i + 3000)
+  const iStat = body.indexOf('fsp.stat')
+  const iRead = body.indexOf('readLibraryCsv(src')
+  assert.ok(iStat >= 0, '缺 stat 检查')
+  assert.ok(iRead >= 0, '缺读取')
+  assert.ok(iStat < iRead, 'stat 必须在 readLibraryCsv 之前 —— 否则读到空记录就被当空库')
+})
