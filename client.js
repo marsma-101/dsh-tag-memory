@@ -392,6 +392,27 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
             ],
             result: { mode: 'src-json' },
           },
+          'tagMemory/exportLibrary': {
+            service: REMOTE_NS,
+            description: '导出记忆库为 CSV。path 省略时写到备份目录。',
+            invocation: { kind: 'direct' },
+            parameters: [
+              {
+                name: 'request',
+                source: 'json',
+                wire: 'request',
+                codec: passthroughCodec(PACKAGE_NAME + '/types#ExportPayload'),
+              },
+            ],
+            result: { mode: 'src-json' },
+          },
+          'tagMemory/listExportTargets': {
+            service: REMOTE_NS,
+            description: '列出当前环境下可写的导出目标目录（实测写权限）。',
+            invocation: { kind: 'direct' },
+            parameters: [],
+            result: { mode: 'src-json' },
+          },
         },
       }
     }
@@ -570,6 +591,10 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
 
         // 整理（dryRun 只算不写，给 UI 预览用）
         runTidy: function (payload) { return call('runTidy', payload || {}) },
+
+        // 导出（沙箱内可选目标目录）
+        exportLibrary: function (payload) { return call('exportLibrary', payload || {}) },
+        listExportTargets: function () { return call('listExportTargets') },
       }
     }
 
@@ -606,7 +631,7 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
         const lazy = { ready: function () { return hasApi(nsRef) } }
       const methods = [
         'getOverview', 'listEntries', 'getFacets', 'getSettings',
-        'retagEntry', 'migrateDataDir', 'backupNow', 'listBackups', 'restore', 'mergeLibrary', 'runTidy',
+        'retagEntry', 'migrateDataDir', 'backupNow', 'listBackups', 'restore', 'mergeLibrary', 'runTidy', 'exportLibrary', 'listExportTargets',
       ]
       methods.forEach(function (name) {
         lazy[name] = function () {
@@ -1547,16 +1572,22 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
 
       // 生成发给宿主的查询参数：自由标签按空白拆成数组（交集筛选）
       const query = React.useMemo(function () {
+        // ⚠️ 宿主 listEntries 读的是**中文键**（与 CSV 列名/台账字段一致，零映射）：
+        //   filter['形态'] / filter['项目'] / filter['智能体'] / filter['状态'] / filter['自由标签']
+        // 之前这里发的是英文键（shape/project/agent/status/tags），
+        // 宿主读不到 -> 所有条件都当空 -> 返回全量，
+        // 用户看到的就是「筛选是摆设，选了没反应」。
+        // 这是跨模块字段名漂移（教训2）的又一例，现由契约测试锁死。
         return {
-          shape: filters.shape || null,
-          project: filters.project || null,
-          agent: filters.agent || null,
-          status: filters.status || null,
-          tags: filters.tagsText
+          形态: filters.shape || '',
+          项目: filters.project || '',
+          智能体: filters.agent || '',
+          状态: filters.status || '',
+          自由标签: filters.tagsText
             ? filters.tagsText.split(/[\s,，]+/).filter(Boolean)
             : [],
-          page: page,
-          pageSize: pageSize,
+          offset: (page - 1) * pageSize,
+          limit: pageSize,
         }
       }, [filters, page, pageSize])
 
@@ -1776,6 +1807,11 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       // 整理：干跑预览 + 实跑，都走宿主 runTidy（与 dtm 侧共用同一实现）
       const [tidyMsg, setTidyMsg] = React.useState(null)
       const [tidyErr, setTidyErr] = React.useState(false)
+      // 导出：目标目录由宿主实测列出（沙箱内只能写这些）
+      const [exportTargets, setExportTargets] = React.useState(null)
+      const [exportTargetId, setExportTargetId] = React.useState('')
+      const [exportMsg, setExportMsg] = React.useState(null)
+      const [exportErr, setExportErr] = React.useState(false)
       const [notice, setNotice] = React.useState(null)
 
       const load = React.useCallback(function () {
@@ -1827,6 +1863,51 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
           })
           .then(function () { setBusy(false) })
       }, [api, load, t])
+      /** 拉取可写的导出目标目录（宿主会真写临时文件探测） */
+      const loadExportTargets = React.useCallback(function () {
+        if (!api) return
+        Promise.resolve()
+          .then(function () { return api.listExportTargets() })
+          .then(function (r) {
+            const list = (r && r.targets) || []
+            setExportTargets(list)
+            const writable = list.filter(function (x) { return x.writable })
+            if (writable.length) {
+              setExportTargetId(function (prev) {
+                return prev && writable.some(function (x) { return x.id === prev }) ? prev : writable[0].id
+              })
+            }
+          })
+          .catch(function () { setExportTargets([]) })
+      }, [api])
+
+      React.useEffect(function () { loadExportTargets() }, [loadExportTargets])
+
+      /** 导出到当前选中的目录 */
+      const onExport = React.useCallback(function () {
+        if (!api) return
+        const hit = (exportTargets || []).filter(function (x) { return x.id === exportTargetId })[0]
+        if (!hit) {
+          setExportErr(true)
+          setExportMsg(t('exportPickFirst'))
+          return
+        }
+        setBusy(true)
+        setExportErr(false)
+        setExportMsg(null)
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+        const dest = hit.dir.replace(/\/$/, '') + '/export-' + stamp + '.csv'
+        Promise.resolve()
+          .then(function () { return api.exportLibrary({ path: dest }) })
+          .then(function (r) {
+            setExportMsg(t('exportDone').replace('{path}', (r && r.path) || dest).replace('{n}', String((r && r.count) || 0)))
+          })
+          .catch(function (err) {
+            setExportErr(true)
+            setExportMsg(err && err.message ? err.message : String(err))
+          })
+          .then(function () { setBusy(false) })
+      }, [api, exportTargets, exportTargetId, t])
 
       // `api` 是惰性代理（永远非 null），用 `api.ready()` 判断命名空间是否真挂上
       const wired = !!(api && typeof api.ready === 'function' && api.ready())
@@ -2045,6 +2126,57 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
             { className: 'dtm-caption' },
             t('backupViaDialog'),
           ),
+
+          // ---- 导出到指定目录（沙箱内）----
+          // 插件跑在沙箱/容器里，宿主机路径在这一侧不存在，
+          // 所以只能从「实测能写」的目录里选，不让用户自由填路径。
+          h(
+            'div',
+            { className: 'dtm-kv', style: { marginTop: '10px', alignItems: 'center', gap: '8px' } },
+            h('span', { className: 'dtm-kv-key' }, t('exportTargetLabel')),
+            h(
+              'select',
+              {
+                className: 'dtm-input',
+                id: 'dtm-export-target',
+                value: exportTargetId,
+                disabled: !!busy,
+                onChange: function (e) { setExportTargetId(e.target.value) },
+              },
+              (exportTargets || []).map(function (x) {
+                return h('option', { key: x.id, value: x.id }, x.label + '  ' + x.dir)
+              }),
+            ),
+          ),
+          h(
+            'div',
+            { style: { marginTop: '8px', display: 'flex', gap: '8px', flexWrap: 'wrap' } },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dtm-btn dtm-btn-sm dtm-btn-primary',
+                'data-dtm-action': 'export-run',
+                disabled: !!busy,
+                onClick: function () { onExport() },
+              },
+              t('exportRun'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dtm-btn dtm-btn-sm',
+                'data-dtm-action': 'export-refresh',
+                disabled: !!busy,
+                onClick: function () { loadExportTargets() },
+              },
+              t('exportRefresh'),
+            ),
+          ),
+          exportMsg
+            ? h('p', { className: exportErr ? 'dtm-error-text' : 'dtm-caption', 'data-dtm-export-msg': '1' }, exportMsg)
+            : null,
         ),
 
         // ---- ③ 自动整理 ----
@@ -2634,6 +2766,11 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       tidyNoChange: '没有需要改的地方。',
       tidyPreviewResult: '将修改',
       tidyApplied: '已整理，共修改 {n} 项。',
+      exportTargetLabel: '导出位置',
+      exportRun: '导出到此目录',
+      exportRefresh: '刷新可选目录',
+      exportPickFirst: '请先选一个可写的目录。',
+      exportDone: '已导出 {n} 条到：{path}',
 
       // 字典
       cardDictTitle: '标签字典（只读）',
@@ -2766,6 +2903,11 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       tidyNoChange: 'Nothing to change.',
       tidyPreviewResult: 'Would change',
       tidyApplied: 'Tidy done, {n} item(s) changed.',
+      exportTargetLabel: 'Export to',
+      exportRun: 'Export to this folder',
+      exportRefresh: 'Refresh folders',
+      exportPickFirst: 'Pick a writable folder first.',
+      exportDone: 'Exported {n} item(s) to: {path}',
 
       cardDictTitle: 'Tag dictionary (read-only)',
       cardDictDesc: 'Value domain of the fixed tags. Free tags have no vocabulary; the model decides them per the tag dictionary.',

@@ -34,7 +34,11 @@ function hostEndpoints() {
   //   REMOTE_SIGNATURES = { getOverview: [], listEntries: ['query'], ... }
   // 单一数据源（marker 与纯标识符包装器都从它派生），旧 helper 已删除。
   // 解析目标随之变化 —— 否则契约测试会"提取到 0 个端点"而假性失败。
-  const block = HOST_SRC.match(/const REMOTE_SIGNATURES = \{([\s\S]*?)\n  \};/)
+  // 适配两种形态（实现从函数内提取成模块级常量后，
+  // 结尾从 "  };" 变成 "});"）—— 两种都要能解析，避免实现微调后测试假失败。
+  const block =
+    HOST_SRC.match(/const REMOTE_SIGNATURES = Object\.freeze\(\{([\s\S]*?)\}\)/) ||
+    HOST_SRC.match(/const REMOTE_SIGNATURES = \{([\s\S]*?)\n  \};/)
   if (!block) return map
 
   for (const m of block[1].matchAll(/([A-Za-z0-9_]+)\s*:\s*\[([^\]]*)\]/g)) {

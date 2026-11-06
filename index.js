@@ -104,6 +104,39 @@ export const SERVICE_NAME = 'dtmHost';
 /** Remote 线协议命名空间（client-dev 按这个挂）。 */
 export const REMOTE_NAMESPACE = 'tagMemory';
 
+/* ------------------------------------------------------------------ *
+ * Remote 方法表：唯一数据源
+ *
+ * ⚠️ 这个表有两个消费者，必须同步：
+ *   ① createHostService —— 把方法镜像到 HostServiceProto（gateway 要求方法在原型链上）
+ *   ② registerRemote    —— 生成 marker 符号描述符（gateway 只从这里发现端点）
+ *
+ * 原来两处各写一份，改了一处另一处不生效。
+ * 实测踩过（2026-11-06）：新增 exportLibrary / listExportTargets 后端点一直 404，
+ * 因为只改了镜像层、没改 marker 层 —— 而只有 marker 层决定端点能不能被调到。
+ *
+ * 参数名必须与 client.js 的 spec 逐字一致；且 gateway 用 Function.toString() 解析，
+ * 只认纯标识符（不允许解构 / 默认值 / rest）。
+ * ------------------------------------------------------------------ */
+export const REMOTE_SIGNATURES = Object.freeze({
+  getOverview: [],
+  getFacets: [],
+  getSettings: [],
+  backupNow: [],
+  listBackups: [],
+  listExportTargets: [],
+  listEntries: ['query'],
+  retagEntry: ['request'],
+  migrateDataDir: ['request'],
+  restore: ['request'],
+  mergeLibrary: ['request'],
+  runTidy: ['request'],
+  exportLibrary: ['request'],
+});
+
+/** Remote 方法名列表（顺序稳定，供两个消费者共用）。 */
+export const REMOTE_METHOD_NAMES = Object.freeze(Object.keys(REMOTE_SIGNATURES));
+
 /** 允许用户手动改的 6 个字段（《功能说明》§10.3）。 */
 const EDITABLE_FIELDS = ['形态', '项目', '智能体', '自由标签', '稳定性', '状态'];
 
@@ -1108,6 +1141,46 @@ function createHostService(ctx, config) {
    * 导出记忆库（库本体就是 CSV，直接可读可交接）。
    * **与 UI 导出按钮共用同一实现**（《功能说明》§十二 dtm_export）。
    */
+  /**
+   * 列出当前环境下**可写**的导出/备份目标目录。
+   *
+   * 为什么不能让用户自由填路径：插件运行在沙箱/容器里，
+   * 宿主机路径（如 G:\…）在那一侧根本不存在，写了也是 ENOENT。
+   * 所以这里只回报「实测能写」的目录，界面只能从这些里选 ——
+   * 宁可少给选项，也不给一个点下去必失败的路径。
+   */
+  async function listExportTargets() {
+    const { layout } = await resolveLayout();
+    const candidates = [
+      { id: 'backup', label: '备份目录（默认）', dir: layout.backupDir },
+      { id: 'data', label: '数据目录根', dir: layout.dataDir || path.dirname(layout.libraryCsv) },
+      { id: 'records', label: '台账目录', dir: layout.recordsDir },
+    ];
+
+    const targets = [];
+    for (const c of candidates) {
+      if (!c.dir) continue;
+      // 实测写权限：能 mkdir 且能写临时文件才算可用
+      let writable = false;
+      try {
+        await fsp.mkdir(c.dir, { recursive: true });
+        const probe = path.join(c.dir, '.dsh-write-probe');
+        await fsp.writeFile(probe, 'ok', 'utf8');
+        await fsp.unlink(probe);
+        writable = true;
+      } catch {
+        writable = false;
+      }
+      targets.push({ id: c.id, label: c.label, dir: c.dir, writable });
+    }
+
+    return {
+      ok: true,
+      targets,
+      // 给界面一个默认值，免得用户每次都要先选
+      defaultId: (targets.find((x) => x.writable) || {}).id || 'backup',
+    };
+  }
   async function exportLibrary({ path: target } = {}) {
     const { layout } = await resolveLayout();
     const { schema } = await loadConfigs();
@@ -1562,6 +1635,7 @@ function createHostService(ctx, config) {
     readRecords,
     // 导入导出 / 备份
     exportLibrary,
+    listExportTargets,
     backupNow,
     listBackups,
     restore,
@@ -1592,19 +1666,7 @@ function createHostService(ctx, config) {
   // 而我们的实现大量用 `fn(x = {})` 和 `fn({ a, b } = {})`，直接镜像会报：
   //   SRC method "xxx" must use unique identifier parameters without destructuring...
   // 所以在 proto 上放一层**纯标识符签名**的薄包装，内部转调真实实现。
-  const REMOTE_SIGNATURES = {
-    getOverview: [],
-    getFacets: [],
-    getSettings: [],
-    backupNow: [],
-    listBackups: [],
-    listEntries: ['query'],
-    retagEntry: ['request'],
-    migrateDataDir: ['request'],
-    restore: ['request'],
-    mergeLibrary: ['request'],
-    runTidy: ['request'],
-  };
+  // 使用模块级 REMOTE_SIGNATURES（单一数据源，与 registerRemote 共用）
   for (const name of Object.keys(REMOTE_SIGNATURES)) {
     const impl = serviceObj[name];
     if (typeof impl !== 'function') continue;
@@ -1795,19 +1857,7 @@ async function registerRemote(ctx, service) {
    * client 侧 spec 的参数名必须与这里逐字一致（曾发生 payload/request 漂移，
    * 装上后整个编辑功能不可用，而双方自测都查不出）。
    */
-  const REMOTE_SIGNATURES = {
-    getOverview: [],
-    getFacets: [],
-    getSettings: [],
-    backupNow: [],
-    listBackups: [],
-    listEntries: ['query'],
-    retagEntry: ['request'],
-    migrateDataDir: ['request'],
-    restore: ['request'],
-    mergeLibrary: ['request'],
-    runTidy: ['request'],
-  };
+  // 使用模块级 REMOTE_SIGNATURES（单一数据源，与 createHostService 共用）
   const NAMES = Object.keys(REMOTE_SIGNATURES);
 
   // ---- 1) 绑定：字段必须恰好这三个，service 指向实例本身 ----
