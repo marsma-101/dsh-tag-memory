@@ -1,9 +1,27 @@
 {
   "name": "dsh-tag-memory",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Tag-based long-term memory for DSH agents.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "memory",
+    "long-term-memory",
+    "tag",
+    "agent"
+  ],
+  "author": "marsma-101",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marsma-101/dsh-tag-memory.git"
+  },
+  "homepage": "https://github.com/marsma-101/dsh-tag-memory#readme",
+  "bugs": {
+    "url": "https://github.com/marsma-101/dsh-tag-memory/issues"
+  },
   "exports": {
     ".": "./index.js",
     "./preset": "./preset/index.js",
