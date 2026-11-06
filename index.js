@@ -1146,12 +1146,14 @@ function createHostService(ctx, config) {
     await ensureDirs(layout);
 
     // ---- 〇、整理前必须备份（无开关，不可跳过）----
+    let backupPath = null;
     if (!dryRun) {
       const bak = await backupLibrary({
         libraryCsv: layout.libraryCsv,
         backupDir: layout.backupDir,
         schema,
       });
+      backupPath = bak.path ?? null;
       if (!bak.ok) {
         const missing = arr(bak.errors).some((e) => e.code === 'BACKUP_SOURCE_MISSING');
         return {
@@ -1201,7 +1203,7 @@ function createHostService(ctx, config) {
         changes: plan.changes,
         proposals: plan.proposals,
         report: plan.report,
-        backupPath: null,
+        backupPath,
       };
     }
 
@@ -1244,7 +1246,7 @@ function createHostService(ctx, config) {
       changes: applied,
       proposals: plan.proposals,
       report: plan.report,
-      backupPath: null,
+      backupPath,
       applied: applied.length,
     };
   }
