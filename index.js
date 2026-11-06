@@ -1414,9 +1414,21 @@ function createHostService(ctx, config) {
         added += 1;
         continue;
       }
-      // 同号：保留较新的那条
+
+      // 同号冲突：保留「较新」的那条（《流程_整理》§二 L90）。
+      //
+      // ⚠️ 实测缺陷（2026-11-06）：原来这里调
+      //   idNewerThan(rec['编号'], existing['编号'])
+      // 但进到这个分支说明两条编号**完全相同**，
+      // 比较同一字符串恒为 false ——「保留较新」是死代码，
+      // 合并方的版本永远被静默丢弃（changed 恒为 0）。
+      //
+      // 编号相同就无法用编号判新旧，只能看条目自身的状态。按优先级：
+      //   ① 时距大的更新（时距=被召回次数，用得多说明更贴合当下）
+      //   ② 时距相同看稳定性：稳定 > 观察 > 易变
+      //   ③ 都一样则保留当前库的（幂等，不折腾）
       conflicts += 1;
-      if (idNewerThan(rec['编号'], existing['编号'])) {
+      if (recordNewerThan(rec, existing)) {
         byId.set(id, rec);
         changed += 1;
       }
@@ -1456,6 +1468,27 @@ function createHostService(ctx, config) {
   }
 
   /** 编号 M-YYYYMMDD-NNN 的“较新”判定：先比日期，再比序号。 */
+  /**
+   * 同编号冲突时判断「哪条更新」。
+   *
+   * 编号相同就没法用编号判新旧 —— 只能看条目状态。优先级：
+   *   时距（被召回次数）大 > 稳定性高 > 都不动（保留当前库）
+   *
+   * @returns {boolean} true 表示 incoming 应当覆盖 existing
+   */
+  function recordNewerThan(incoming, existing) {
+    const tickA = Number(incoming?.['时距']);
+    const tickB = Number(existing?.['时距']);
+    const a = Number.isFinite(tickA) ? tickA : 0;
+    const b = Number.isFinite(tickB) ? tickB : 0;
+    if (a !== b) return a > b;
+
+    const rank = { '稳定': 2, '观察': 1, '易变': 0 };
+    const ra = rank[String(incoming?.['稳定性'] ?? '')] ?? -1;
+    const rb = rank[String(existing?.['稳定性'] ?? '')] ?? -1;
+    return ra > rb;
+  }
+
   function idNewerThan(a, b) {
     const pa = parseIdParts(a);
     const pb = parseIdParts(b);
