@@ -40,6 +40,12 @@
     "icon.svg",
     "标签字典.md"
   ],
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.2.0-0"
+  },
+  "engines": {
+    "dsh": ">=0.2.0"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
