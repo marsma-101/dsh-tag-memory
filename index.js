@@ -932,14 +932,24 @@ function createHostService(ctx, config) {
       }
 
       const existingIds = records.map((r) => r['编号']);
+
+      // 已绑定：用绑定身份兜底填 项目/智能体，模型显式给的值优先。
+      // 与 writeEntry / recall 的 effectiveInput 同一口径。
+      // 实测缺陷（2026-11-06）：dtm_supersede 只传旧编号/主要内容/形态/自由标签/basis
+      // 时被 engine 判 PROJECT_EMPTY + AGENT_EMPTY 打回，模型不得不补传
+      // 项目/智能体 才成功，而身份早就绑好了。writeEntry 已兜底，supersede 漏了。
+      const prevRec = records[idx];
+      const effectiveInput = {
+        主要内容: input['主要内容'],
+        形态: input['形态'],
+        自由标签: input['自由标签'],
+        // 模型没给就沿用它要顶替的那条（归属不变），再兜底到绑定身份
+        项目: str(input['项目']) || str(prevRec && prevRec['项目']) || identity['项目'],
+        智能体: str(input['智能体']) || str(prevRec && prevRec['智能体']) || identity['智能体'],
+      };
+
       const built = buildNewRecord({
-        input: {
-          主要内容: input['主要内容'],
-          形态: input['形态'],
-          项目: input['项目'],
-          智能体: input['智能体'],
-          自由标签: input['自由标签'],
-        },
+        input: effectiveInput,
         existingIds,
         schema,
         now: new Date(),
@@ -986,39 +996,62 @@ function createHostService(ctx, config) {
     const { schema } = await loadConfigs();
     await ensureDirs(layout);
 
-    const backup = await backupLibrary({ libraryCsv: layout.libraryCsv, backupDir: layout.backupDir, schema, suffix: '-archive' });
-    if (!backup.ok) return { ...fail(backup.errors, 'BACKUP_FAILED'), backupErrors: backup.errors };
-    lastBackupAt = localIsoString(new Date());
-
     let outcome;
     await withFileLock(layout.lockFile, async () => {
       const { records } = await readLibraryCsv(layout.libraryCsv, schema);
       const idx = records.findIndex((r) => str(r['编号']) === targetId);
       if (idx < 0) {
-        outcome = { ok: false, errors: [{ code: 'ID_NOT_FOUND', message: `库里没有编号 ${targetId} 的条目。` }] };
+        outcome = { ok: false, errors: [{ code: 'ID_NOT_FOUND', field: '编号', message: `库里没有编号 ${targetId} 的条目。` }] };
         return;
       }
       const before = records[idx];
+
+      // 状态互斥（《流程_整理》§三 L153-154）：
+      //   被取代 = 被新条顶掉了；已归档 = 没有新的顶替，只是不需要了。
+      //   两者叠在一条上会让按状态筛选时同时落两个篮子，且语义矛盾。
+      //   实测到过（2026-11-06）：M-005 已被顶替后又被归档成功。
+      if (str(before['状态']) === '被取代') {
+        outcome = {
+          ok: false,
+          code: 'ALREADY_SUPERSEDED',
+          message:
+            `条目 ${targetId} 已被新条取代，不需要再归档。` +
+            '《流程_整理》§三：被取代（有新条顶替）与已归档（无新条顶替）互斥。',
+          errors: [{ code: 'ALREADY_SUPERSEDED', field: '状态', message: '已被取代的条目不需要再归档。' }],
+        };
+        return;
+      }
+      // 已归档 的幂等（不报错，直接返回现状）
       if (str(before['状态']) === '已归档') {
         outcome = { ok: true, already: true, before, after: before };
         return;
       }
-      const next = { ...before, 状态: '已归档' };
-      await replaceRecordCsv(layout.libraryCsv, next, schema);
-      outcome = { ok: true, before, after: next };
+
+      // ---- 到这里才确定真的要改库，此时才备份 ----
+      // （2026-11-06 修：备份原来在锁外、判断之前，导致被拒的归档也白留一份备份）
+      const backup = await backupLibrary({
+        libraryCsv: layout.libraryCsv,
+        backupDir: layout.backupDir,
+        schema,
+        suffix: '-archive',
+      });
+      if (!backup.ok) {
+        outcome = { ok: false, errors: backup.errors, code: 'BACKUP_FAILED' };
+        return;
+      }
+      outcome = { ok: true, before, after: { ...before, 状态: '已归档' }, backupPath: backup.path };
+      await replaceRecordCsv(layout.libraryCsv, outcome.after, schema);
     });
 
-    if (!outcome?.ok) return fail(outcome?.errors, outcome?.errors?.[0]?.code);
-    if (!outcome.already) {
-      await writeTidyLog({ who: identity.智能体, action: 'status', target: targetId, before: pickEditable(outcome.before), after: pickEditable(outcome.after), basis: basisText });
-    }
-
+    if (!outcome?.ok) return fail(outcome?.errors, outcome?.errors?.[0]?.code ?? outcome?.code);
+    if (outcome.backupPath) lastBackupAt = localIsoString(new Date());
     return {
       ok: true,
       编号: targetId,
-      id: targetId,
-      backupPath: backup.path ?? null,
-      changed: { 状态: '已归档' },
+      before: outcome.before,
+      after: outcome.after,
+      changed: outcome.already ? {} : { 状态: '已归档' },
+      backupPath: outcome.backupPath ?? null,
     };
   }
 
