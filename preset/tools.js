@@ -259,6 +259,17 @@ function executeArchive(ctx) {
  * `basis` 的必填由 `parameters.basis.required: true` 表达（Lead 裁决：不自己校验）。
  * 这里仍兜一层：即便有人绕过 schema 直接调 execute，也不能改出没有依据的改动
  * —— 《流程_整理》§七："没有依据的改动不允许做"。
+ *
+ * ⚠️ patch 必须**只包含模型真正给出的字段**（2026-11-06 修）。
+ *
+ * 真实事故：这里原来无条件把 5 个字段都塞进 patch ——
+ *   patch: { 形态: args['形态'], 项目: ..., 智能体: ..., 自由标签: ..., 稳定性: ... }
+ * 模型只传 `稳定性` 时，其余 4 个是 undefined，但 `Object.keys(patch).length === 5`，
+ * 宿主以为"五个字段都要改"，先撞上 `形态 = undefined` 报 FIELD_EMPTY，
+ * 再试又撞 TAGS_EMPTY —— **模型连续被拒 3 次才改成功**。
+ *
+ * 工具语义是「改某几个字段」，不是「整组替换」（那是 UI 编辑器的语义）。
+ * 所以这里按"模型实际给了才放进 patch"来组装，undefined 一律跳过。
  */
 function executeRetag(ctx) {
   return async (args, exec) => {
@@ -276,17 +287,34 @@ function executeRetag(ctx) {
       };
     }
 
+    // 只把模型**实际给出**的字段放进 patch。
+    // undefined / 未出现 一律跳过 —— 漏传不等于"要清空"。
+    const patch = {};
+    for (const field of ['形态', '项目', '智能体', '自由标签', '稳定性', '状态']) {
+      const v = args[field];
+      if (v !== undefined && v !== null) {
+        // 空数组/空串是**真给了空值**，要放进去让宿主报错（那是模型想清空，属于错误操作）
+        patch[field] = v;
+      }
+    }
+
+    // 一个字段都没给：不是"合法空操作"，是模型漏传，必须明确拒绝
+    if (Object.keys(patch).length === 0) {
+      return {
+        ok: false,
+        code: 'PATCH_EMPTY',
+        text:
+          '没有给出任何要改的字段。`dtm_retag` 至少要改一项：' +
+          '形态 / 项目 / 智能体 / 自由标签 / 稳定性 / 状态。\n' +
+          '不想改的字段**直接省略**即可（省略 ≠ 清空），不用传原值。',
+      };
+    }
+
     const r = await callHost(h.host, 'retagEntry', [
       agentOf(exec),
       {
         编号: args['编号'],
-        patch: {
-          形态: args['形态'],
-          项目: args['项目'],
-          智能体: args['智能体'],
-          自由标签: args['自由标签'],
-          稳定性: args['稳定性'],
-        },
+        patch,
         basis,
       },
     ]);

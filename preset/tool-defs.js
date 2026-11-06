@@ -236,15 +236,15 @@ const DEFS = [
           '依据：哪条读写记录支持这次改动（如 read.jsonl#2026-11-03T22:11）。' +
           '没有依据就不许改标签——这是硬要求，缺了会被拒。',
       },
-      形态: { type: 'string', enum: d.shapes, description: '新形态。省略=不改。' },
-      项目: { type: 'string', description: '新项目。省略=不改。' },
-      智能体: { type: 'string', description: '新智能体。省略=不改。' },
+      形态: { type: 'string', enum: d.shapes, description: '新形态。**省略=不改**（不需要传原值）。' },
+      项目: { type: 'string', description: '新项目。**省略=不改**（不需要传原值）。' },
+      智能体: { type: 'string', description: '新智能体。**省略=不改**（不需要传原值）。' },
       自由标签: {
         type: 'array',
         items: { type: 'string' },
-        description: '新的完整标签数组（不是增量，会整体替换）。省略=不改。',
+        description: '新的完整标签数组（不是增量，会整体替换）。**省略=不改**（不需要传原值）；传空数组 = 想清空，会被拒绝。',
       },
-      稳定性: { type: 'string', enum: d.stabilities, description: '新稳定性。省略=不改。' },
+      稳定性: { type: 'string', enum: d.stabilities, description: '新稳定性。**省略=不改**（不需要传原值）。' },
     }),
   },
 

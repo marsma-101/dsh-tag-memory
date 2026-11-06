@@ -1,28 +1,73 @@
-修问题3（整理备份路径不回传）+ 问题5（recall 入参不校验）
+修 dtm_retag 的"省略=不改"语义（前端真实对话验证通过）
 
-## 问题3：runTidy 的备份白做
-以前 runTidy 里 backupLibrary 的返回值被丢弃，两处返回硬编码 backupPath: null。
-后果：整理确实备份了，但调用方拿不到路径，看不到"改之前的回滚点在哪个文件"。
-修法：把 bak.path 存进 backupPath，dryRun 与实跑两条路径都回传。
+## 事故经过
 
-备份防重名本身是对的（backup.mjs L69-79 绝不覆盖，同秒自动加 -N 后缀），
-不是缺陷 —— 只是路径没回传让人以为白做了。
+模型调 dtm_retag 只想改「稳定性」，被连续拒绝 3 次：
+  FIELD_EMPTY: 形态 不能改成空值
+  FIELD_EMPTY: 项目 不能改成空值
+  TAGS_EMPTY : 自由标签不能为空
 
-## 问题5：recall 入参形状错误时静默返回空
-实测踩到：调用方按位置传 recall(records, query, cfg)，
-而函数收的是单个对象，解构后全部落默认值 ->
-records=[] -> 一条都查不到，看起来像"库里没有"。
+## 根因
 
-这是教训7「把读不到伪装成没有」的入参版本。
-修法：开头显式校验并抛 TypeError ——
-  · 入参不是对象（按位置传）-> 抛，且提示"改用对象形式"
-  · records 不是数组 -> 抛
-  · query 不是对象 -> 抛
-不是兜底、不是容错：传错了就该炸，不许静默。
+preset/tools.js 的 executeRetag 无条件把 5 个字段都塞进 patch：
 
-## 顺带确认：字段命名不是缺陷
-规格用「分=」描述显示样例，实现内部用 score，format.js 渲染成「分=」给模型看。
-这是有意的分层（内部数据结构 vs 给人/模型看的文本），不统一。
-但规格没写明这层关系，容易让人误判 —— 已在问题清单里标注。
+  patch: {
+    形态: args['形态'],        // undefined
+    项目: args['项目'],        // undefined
+    智能体: args['智能体'],    // undefined
+    自由标签: args['自由标签'], // undefined
+    稳定性: args['稳定性'],    // "稳定"  <- 只有这个是真的
+  }
 
-全量：240 通过 / 0 失败 / 4 条视觉如实未验（共 244 条）
+Object.keys(patch).length === 5，宿主以为"五个字段都要改"，
+撞上 形态=undefined 就报 FIELD_EMPTY。
+
+工具的语义是「改某几个」，被按 UI 编辑器的「整组替换」实现了。
+
+## 修法
+
+只把模型**真正给出**的字段放进 patch：
+
+  const patch = {}
+  for (const field of [...6个字段]) {
+    const v = args[field]
+    if (v !== undefined && v !== null) patch[field] = v
+  }
+  if (Object.keys(patch).length === 0) return PATCH_EMPTY
+
+关键：undefined 跳过，但**空数组/空串保留** ——
+那是模型想显式清空，必须让宿主报错，不能静默吞掉。
+
+## 三层语义（这次想清楚了）
+
+  工具 dtm_retag   改某几个    -> patch 只含给出的字段
+  UI 编辑器保存     整组替换    -> patch 含全部 6 个字段（草稿本就全有）
+  模型想清空标签    显式清空    -> patch 含 自由标签:[]
+
+三层不能混用。之前就是拿 UI 语义做了工具。
+
+## 回归测试（新增 12 条）
+
+tests/gate2/retag.n.test.mjs，含两条源码级防复发：
+  N11 扫 executeRetag 函数体，若退回"五连塞"写法就报错
+  N12 字段清单必须与测试一致
+
+旧用例全部"五个字段传齐"，从没测过"只传一个" ——
+这正是「用例缺口 ≠ 环境限制」的又一例。
+
+## 前端真实对话验证（无头 Edge + CDP）
+
+修复前：同一操作被拒 3 次
+修复后：一次成功，模型明确说
+  "形态、项目、智能体、自由标签四个字段都省略未传，工具按「不改」处理"
+
+库中确认：M-20261106-003 稳定性 观察 -> 稳定，其余字段原值不变
+台账确认：tidy.jsonl 的 before/after 只有 稳定性 不同
+
+## 顺带修好的环境问题
+
+容器默认 provider 是失效的 workbuddy，改成 deepseek-official 后
+模型可正常调用（[llm-deepseek-account] loaded 2 model(s)）。
+这是验证环境，不进代码。
+
+全量：252 通过 / 0 失败 / 4 条视觉如实未验（共 256 条）
