@@ -1,0 +1,47 @@
+# 统一行尾为 LF —— 跨平台协作和 GitHub 显示都需要一致
+#
+# 背景：仓库里原本混着 CRLF 和 LF 两种行尾
+#   - index.js / client.js 是 CRLF（Windows 编辑器改过）
+#   - lib/engine/*.mjs / cordis.patch.yml / icon.svg 是 LF
+#   - .gitignore 甚至同一文件里混用
+#
+# 后果：不统一的话，GitHub 上任何一个文件被改动都会显示「整文件重写」
+#       （每行都标成 changed），diff 完全不可读。
+#
+# 规则：所有文本文件在 git 里统一存 LF，检出时按平台转（Windows 得到 CRLF）。
+#       二进制文件不碰。
+
+# ---- 默认：文本文件统一 LF ----
+* text=auto eol=lf
+
+# ---- 明确声明为文本（防止 git 猜错）----
+*.js      text eol=lf
+*.mjs     text eol=lf
+*.cjs     text eol=lf
+*.json    text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.md      text eol=lf
+*.css     text eol=lf
+*.html    text eol=lf
+*.ps1     text eol=lf
+
+# ---- 二进制：不做行尾转换 ----
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.webp    binary
+*.ico     binary
+*.zip     binary
+*.gz      binary
+
+# SVG 是文本（要能 diff），但不当代码处理
+*.svg     text eol=lf
+
+# ---- Git 行为 ----
+# 合并 .gitmsg.txt 之类的临时消息文件时不要产生冲突噪音
+.gitmsg.txt merge=ours
+
+# 中文文件名不要在 diff 里被转义
+*.md    diff=markdown

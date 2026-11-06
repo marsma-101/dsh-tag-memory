@@ -25,3 +25,6 @@ Thumbs.db
 ._*.cjs
 ._*.mjs
 ._*.txt
+
+# 提交消息临时文件（每次 commit 后删除）
+.gitmsg.txt

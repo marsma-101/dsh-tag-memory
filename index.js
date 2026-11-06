@@ -69,6 +69,7 @@
 
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import os from 'node:os';
 import fsp from 'node:fs/promises';
 
 import {
@@ -246,8 +247,9 @@ function createHostService(ctx, config) {
   let lastBackupAt = null;
 
   /**
-   * 解析数据目录 —— 4 级优先级（①config ②env ③设置页 ④包内）。
-   * 返回 { layout, source, locked, lockedHint }。
+   * 解析数据目录 —— 5 级优先级
+   * （①config ②env ③设置页 ④$DSH_HOME/tag-memory ⑤插件包内）。
+   * 返回 { layout, source, locked, lockedHint, warning }。
    */
   async function resolveLayout() {
     const settingsDir = await readSettingsDir();
@@ -255,15 +257,61 @@ function createHostService(ctx, config) {
       configDir: config?.dataDir,
       envDir: process.env.DSH_TAG_MEMORY_DATA_DIR,
       settingsDir,
+      dshHomeDir: currentDshHome(),
       packageDir: PACKAGE_DIR,
     });
     const locked = resolved.source === 'config' || resolved.source === 'env';
+    const source = resolved.source;
+    if (source === 'package') warnPackageFallbackOnce(resolved.dir);
     return {
       layout: layoutOf(resolved.dir),
-      source: resolved.source,
+      source,
       locked,
-      lockedHint: locked ? lockedHintOf(resolved.source) : null,
+      lockedHint: locked ? lockedHintOf(source) : null,
+      warning: packageFallbackWarning(source, resolved.dir),
     };
+  }
+
+  /**
+   * DSH home：`$DSH_HOME` 优先，否则 `~/.dsh`（与 @deepseek-ai/dsh-home-paths 一致）。
+   *
+   * ⚠️ 刻意**不 import** `@deepseek-ai/dsh-home-paths`：engine 零框架依赖是硬约束，
+   * 而这段逻辑只有 3 行。行为对齐官方口径即可（空/纯空白视为未设置）。
+   */
+  function currentDshHome() {
+    const fromEnv = str(process.env.DSH_HOME);
+    if (fromEnv !== '') return path.resolve(fromEnv);
+    try {
+      return path.join(os.homedir(), '.dsh');
+    } catch {
+      return null; // 拿不到 HOME → 让 resolveDataDir 落到 ⑤ 包内 + 告警
+    }
+  }
+
+  /** ⑤ 包内兜底的告警文案（UI 与日志共用同一句话，避免两处不一致）。 */
+  function packageFallbackWarning(source, dir) {
+    if (source !== 'package') return null;
+    return (
+      `数据目录落在插件包内（${dir}）——**pnpm 重装或升级插件会整个删除这个目录，数据会丢**。` +
+      '请把 cordis.patch.yml 里本插件的 config.dataDir 指到包外（例如 $DSH_HOME/tag-memory）。'
+    );
+  }
+
+  /**
+   * ⑤ 包内兜底只在**进程内打一次**日志。
+   *
+   * 为什么只打一次：`resolveLayout()` 几乎每个方法都调（20+ 处），
+   * 每次调用都 warn 会把日志刷爆，反而让人忽略这条最重要的告警。
+   */
+  let packageFallbackWarned = false;
+  function warnPackageFallbackOnce(dir) {
+    if (packageFallbackWarned) return;
+    packageFallbackWarned = true;
+    ctx.logger?.warn?.(
+      '[dsh-tag-memory] ⚠️ 数据目录落在插件包内（%s）：pnpm 重装/升级会整个删除该目录，数据会丢。' +
+        '请把 cordis.patch.yml 的 config.dataDir 指到包外（例如 $DSH_HOME/tag-memory）。',
+      dir,
+    );
   }
 
   /** 锁定时告诉用户**改哪一行**（《功能说明》§10.5 明确要求）。 */
@@ -1570,7 +1618,7 @@ function createHostService(ctx, config) {
   /* ---------------- 设置 ---------------- */
 
   async function getSettings() {
-    const { layout, source, locked, lockedHint } = await resolveLayout();
+    const { layout, source, locked, lockedHint, warning } = await resolveLayout();
     const { schema } = await loadConfigs();
     const { records } = await readLibraryCsv(layout.libraryCsv, schema);
 
@@ -1588,6 +1636,9 @@ function createHostService(ctx, config) {
       dataDirSource: source,
       dataDirLocked: locked,
       dataDirLockedHint: lockedHint,
+      // ⑤ 包内兜底时的显著告警（null = 没问题）。UI 据此标红；
+      // 目前 client.js 只认 'package'，这里保持字符串/ null 的简单契约。
+      warning: warning ?? null,
       backupAuto: config?.backupAuto === true,
       lastBackupAt,
       tidyAuto: config?.tidyAuto === true,

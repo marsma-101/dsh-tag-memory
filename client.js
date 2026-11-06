@@ -164,6 +164,8 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
 .dtm-kv{display:flex;align-items:baseline;gap:12px;padding:6px 0;min-width:0}
 .dtm-kv-key{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;min-width:88px;flex-shrink:0}
 .dtm-kv-val{color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px;word-break:break-all;min-width:0}
+/* 来源是「插件包内」时把这一行标成警示色：那是会丢数据的位置，不该看起来跟正常一样 */
+.dtm-kv-val.dtm-kv-danger{color:var(--dsw-alias-state-warn-primary);font-weight:500}
 .dtm-kv-val.dtm-chips{display:flex;flex-wrap:wrap;gap:4px}
 .dtm-inline-form{display:flex;flex-direction:column;gap:8px;margin-top:12px;padding:12px;border-radius:8px;background:var(--dsw-alias-bg-layer-2);border:.5px solid var(--dsw-alias-border-l2)}
 .dtm-list{margin:0;padding-left:20px;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:22px;display:flex;flex-direction:column;gap:2px}
@@ -1943,13 +1945,18 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       //   'config'   → 部署配置（优先级 ①，搬家不生效）
       //   'env'      → 环境变量（优先级 ②，搬家不生效）
       //   'settings' → 设置页选的
-      //   'package'  → 插件包内（出厂默认，有被 pnpm 重装删掉的风险）
+      //   'dsh-home' → 用户目录默认 $DSH_HOME/tag-memory（优先级 ④，出厂默认）
+      //   'package'  → 插件包内（优先级 ⑤，最后手段，升级会丢数据）
+      //
+      // ⚠️ fallback 必须是 'package' 而不是 'dsh-home'：拿不到来源时按**最坏情况**
+      //    展示（警示 + 搬家入口），不能乐观地显示成"默认位置没问题"。
       const source = s.dataDirSource || 'package'
       const locked = s.dataDirLocked === true || source === 'config' || source === 'env'
       const sourceLabel = {
         config: t('dirSourceConfig'),
         env: t('dirSourceEnv'),
         settings: t('dirSourceSetting'),
+        'dsh-home': t('dirSourceDshHome'),
         package: t('dirSourcePackage'),
       }[source] || t('dirSourcePackage')
       // 锁定时宿主直接给"改哪一行"的整句话；拿不到就前端兜一句同义文案（不空白）
@@ -2018,15 +2025,22 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
             'div',
             { className: 'dtm-kv' },
             h('span', { className: 'dtm-kv-key' }, t('dirSource')),
-            h('span', { className: 'dtm-kv-val' }, sourceLabel),
+            // ⑤ 插件包内 = 会丢数据的位置 → 警示色（不能和正常来源长得一样）
+            h(
+              'span',
+              { className: source === 'package' ? 'dtm-kv-val dtm-kv-danger' : 'dtm-kv-val' },
+              sourceLabel,
+            ),
           ),
 
-          // 包内默认：给风险警告 + 搬家入口
+          // ⑤ 插件包内：给风险警告 + 搬家入口。
+          // 优先用宿主算好的 `s.warning`（它和启动日志是同一句话，避免两处文案漂移）；
+          // 拿不到再退回本地文案（老宿主 / 断线时不会空白）。
           source === 'package'
             ? h(
                 DtmWarn,
                 null,
-                t('warnPackageDir'),
+                s.warning || t('warnPackageDir'),
               )
             : null,
 
@@ -2720,7 +2734,8 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       dirSourceConfig: '部署配置（cordis.patch.yml 的 config.dataDir）',
       dirSourceEnv: '环境变量 DSH_TAG_MEMORY_DATA_DIR',
       dirSourceSetting: '设置页选择',
-      dirSourcePackage: '插件包内目录（出厂默认）',
+      dirSourceDshHome: '用户目录默认（$DSH_HOME/tag-memory）',
+      dirSourcePackage: '⚠️ 插件包内（升级会丢数据）',
       warnPackageDir: '当前在插件包内。pnpm 重装或升级会连包目录一起删除，建议搬到包外。',
       warnLockedConfig: '数据目录被部署配置锁定了（优先级 ①）。要搬家请改 profile 的 cordis.patch.yml 里本插件那一行的 config.dataDir —— 在这个页面搬家不会生效。',
       warnLockedEnv: '数据目录被环境变量锁定了（优先级 ②）。要搬家请改环境变量 DSH_TAG_MEMORY_DATA_DIR —— 在这个页面搬家不会生效。',
@@ -2860,7 +2875,8 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       dirSourceConfig: 'Deployment config (cordis.patch.yml config.dataDir)',
       dirSourceEnv: 'Environment variable DSH_TAG_MEMORY_DATA_DIR',
       dirSourceSetting: 'Chosen on this settings page',
-      dirSourcePackage: 'Inside the plugin package (factory default)',
+      dirSourceDshHome: 'User-directory default ($DSH_HOME/tag-memory)',
+      dirSourcePackage: '⚠️ Inside the plugin package (data lost on upgrade)',
       warnPackageDir: 'The library is inside the plugin package. A pnpm reinstall or upgrade deletes the package directory too; moving it outside is recommended.',
       warnLockedConfig: 'The data directory is pinned by deployment config (priority 1). To move it, change config.dataDir on this plugin row in the profile cordis.patch.yml — moving it from this page will not take effect.',
       warnLockedEnv: 'The data directory is pinned by an environment variable (priority 2). To move it, change DSH_TAG_MEMORY_DATA_DIR — moving it from this page will not take effect.',

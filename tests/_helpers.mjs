@@ -8,17 +8,47 @@ import { fileURLToPath } from 'node:url'
 /** 包根目录（tests/ 的上一级） */
 export const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '')
 
-/** 扫描时排除的目录：不进包、非运行时、我自己 */
+/**
+ * 扫描时排除的目录：不进包、非运行时、我自己。
+ *
+ * 分两类：
+ *   ① 语义排除 —— 这些目录本来就不是插件运行时的一部分：
+ *      `.git`（版本库）/ `node_modules`（依赖）/ `内部文档`（内部资料）/ `tests`（测试自身）
+ *   ② 环境排除 —— 本地工具可能在仓库里留下的工作目录（2026-11-06 加）：
+ *      `._cdp` 是 Chrome/Edge 被指到本仓库当用户数据目录时创建的（里面有扩展的
+ *      js/png/db）。它被 `.gitignore` 忽略，但**测试扫描器原本没跳过它**，
+ *      导致 R3（"无自建 HTTP 服务"）和 S6（"无位图截图"）在本地误报失败。
+ *
+ * ⚠️ 为什么用"排除"而不是"清掉完事"：
+ *    清掉只能保证**我这边**干净。换台机器、或者本机又跑起调试浏览器，
+ *    同一个误报会再次出现，还会被误当成产品缺陷。排除掉才是对"别人的机器上
+ *    也有这些目录"免疫的做法。
+ *
+ * 匹配方式：精确名（`EXCLUDE_DIRS`）+ 前缀模式（`EXCLUDE_DIR_PREFIXES`），
+ * 后者专门处理 `._*` 这类"名字不固定但形态固定"的本地产物。
+ */
 const EXCLUDE_DIRS = new Set(['.git', 'node_modules', '内部文档', 'tests'])
 
 /**
- * 递归列出**全部**工作区文件（仍排除 .git / node_modules / 内部文档 / tests）。
+ * 需要按前缀排除的目录名。
+ * `._*` 覆盖 `._cdp` 以及编辑器/同步工具可能生成的其他 `._xxx` 目录。
+ */
+const EXCLUDE_DIR_PREFIXES = ['._']
+
+/** 某个目录名是否应被扫描跳过（两类排除规则的唯一判定入口）。 */
+function isExcludedDir(name) {
+  if (EXCLUDE_DIRS.has(name)) return true
+  return EXCLUDE_DIR_PREFIXES.some((p) => name.startsWith(p))
+}
+
+/**
+ * 递归列出**全部**工作区文件（仍排除 .git / node_modules / 内部文档 / tests / ._*）。
  * 用于"残留文件扫描"这类需要看全貌的检查。
  */
 export function listAllFiles(dir = ROOT, acc = []) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) {
-      if (EXCLUDE_DIRS.has(entry.name)) continue
+      if (isExcludedDir(entry.name)) continue
       listAllFiles(join(dir, entry.name), acc)
     } else if (entry.isFile()) {
       acc.push(relative(ROOT, join(dir, entry.name)).split(sep).join('/'))
