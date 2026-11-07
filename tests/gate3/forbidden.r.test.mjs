@@ -45,6 +45,40 @@ test('R1 不 import 任何 @deepseek-ai/dsh-client-* 包（含 -ui-primitives）
 })
 
 /* ------------------------------------------------------------------ *
+ * R1b 服务端也不 import 任何 @deepseek-ai/* 或 cordis（零运行时依赖）
+ * ------------------------------------------------------------------ *
+ * 为什么单独立一条：R1 只管 client 包。历史事故是 `preset/tools.js` 顶层
+ * `import { defineTool } from '@deepseek-ai/dsh-tools'` —— 插件一旦落在没有
+ * node_modules 链的目录就 ERR_MODULE_NOT_FOUND，整个 preset 挂掉、10 个工具全丢，
+ * 而日志里只有一行 import 失败。现在 preset 自带 define-tool.js，这条闸门防止它回潮。
+ */
+test('R1b 服务端零运行时依赖：不 import 任何 @deepseek-ai/* 或 cordis', () => {
+  const re =
+    /(?:^|[^.\w])(?:import|export)\s[^;]*?from\s*['"](?:@deepseek-ai\/|cordis)([^'"]*)['"]/
+
+  // 只看真实 import 语句，跳过注释行——否则文档里写「以前 import 过 X」会被误判。
+  const hits = []
+  for (const f of SOURCES) {
+    if (/(^|\/)client[\w.-]*\.js$/.test(f)) continue
+    const lines = readText(f).split(/\r?\n/)
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]
+      const trimmed = line.trim()
+      if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
+      // 行内注释（`... // 说明`）截掉再判
+      const code = line.replace(/\/\/.*$/, '').replace(/\/\*[\s\S]*?\*\//g, '')
+      if (re.test(code)) hits.push(`${f}:${i + 1}: ${trimmed}`)
+    }
+  }
+
+  assert.deepEqual(
+    hits,
+    [],
+    `服务端（index.js / preset / lib）不得 import 框架包，插件必须零运行时依赖。发现：\n${hits.join('\n')}`,
+  )
+})
+
+/* ------------------------------------------------------------------ *
  * R2 不用 iframe 载入宿主 HTML
  * ------------------------------------------------------------------ */
 test('R2 客户端不用 iframe（含 createElement("iframe")）', () => {

@@ -2,9 +2,9 @@
 
 > 给 DSH 智能体一套**标签化、可检索、跨会话**的长期记忆。
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue)]()
-[![DSH](https://img.shields.io/badge/DSH-0.2.1--rc.2-orange)]()
-[![Tests](https://img.shields.io/badge/tests-295%20passing-brightgreen)]()
+[![Version](https://img.shields.io/badge/version-1.2.0-blue)]()
+[![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1-orange)]()
+[![Tests](https://img.shields.io/badge/tests-296%20passing-brightgreen)]()
 
 ---
 
@@ -75,16 +75,103 @@ backup/                   改库前自动备份
 
 ## 安装
 
-> ⚠️ **有一条硬要求，违反了不会报错，只会静默失效。**
-
-### 用 plugin_manager 安装
+**一条命令。只要 `node ≥ 24.9` + `npx`——不需要 pnpm、git、已装插件，也不需要模型。**
 
 ```bash
-dsh plugin --profile web install dsh-tag-memory
+npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.2.0 apply
 ```
 
-或通过 `plugin_manager` 的 `install_bundle`。**不要手动 cp 到 node_modules**——
-那样 dsh.bundle.patch 不会被注册，插件不会激活。
+`npx` 只负责把包拉下来；真正干活的是包里的 [`scripts/install.mjs`](scripts/install.mjs)（纯 node、零依赖、约 1 秒）：
+
+1. **自检本包**：名字/版本、`dsh.bundle.patch`、`exports`、`preset/lib` 零框架依赖——不过就**一个字节不写**；
+2. **拷本体**到 `<DSH_HOME>/plugins/dsh-tag-memory`（不能直接链到 npx 临时目录：npx 清缓存时链接会指向空气）；
+3. **建链接** `<profile>/node_modules/dsh-tag-memory`（Windows junction / POSIX symlink）；
+4. **改 profile 的 `package.json`**：`dependencies` 加 `link:<本体>`、`dsh.profile.bundles` 追加本插件（先备份 `.bak-tag-memory-*`）；
+5. **验收**：和 `verify-install.mjs` 用同一份判据（[`scripts/checks.mjs`](scripts/checks.mjs)），全绿才打 `INSTALL OK`。
+
+常用变体：
+
+```bash
+npx -y <同一个 URL>                            # 只预检 + 打计划，一个字节不动
+npx -y <同一个 URL> apply --profile tui        # 换 profile
+npx -y <同一个 URL> apply --dsh-home /opt/dsh  # 换 DSH_HOME
+npx -y <同一个 URL> uninstall                  # 预演卸载
+npx -y <同一个 URL> uninstall apply            # 真卸
+node scripts/install.mjs apply                 # 包已经在本地时，直接用同一个脚本
+```
+
+**装到哪个实例不用猜**：不带参数时，脚本先认 `$DSH_PROFILE_DIR`（DSH 在每个 shell 调用里都会带它），
+直接落进**当前正在跑的那个 profile**；没有它才看 `$DSH_HOME`，最后才是 `~/.dsh`。输出里会打印
+`目标来源 = $DSH_PROFILE_DIR（当前实例）`，装错地方一眼能看出来。
+
+### 在容器里让 agent 装（目标场景）
+
+对 agent 只需要一句话：
+
+> 从这个 URL 装 1.2.0：`npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.2.0 apply`，
+> 别手写 profile 的 `package.json` / `cordis.patch.yml`；装完把输出贴出来，等用户重启 dsh。
+
+它会自动落到容器里 `/opt/dsh/profiles/<profile>`（靠 `$DSH_PROFILE_DIR`），不需要 `--dsh-home`。
+
+两个必须知道的边界：
+
+- **权限**：agent 的受限沙箱（workspace-write）写不了 `DSH_HOME`。脚本会**先做写权限预检**并明确报错
+  （不会装到一半才 EPERM）——这时让用户在自己的终端跑同一条命令，或走 `plugin_manager install_bundle`（需批准）。
+- **重启**：bundle 补丁只在启动时装配，agent 重启不了自己的进程。装完 `INSTALL OK` 之后，
+  容器 `docker restart <容器名>`，重启后 10 个 `dtm_*` 才出现。
+
+### 实测记录（2026-11-07，Node 24.21 / dsh 0.2.2-rc.1，隔离 DSH_HOME）
+
+| 场景 | 结果 |
+|---|---|
+| `npx` 从 HTTP tarball 装（等价于 codeload URL） | exit 0，13 项验收全绿；profile 里出现 `link:` 依赖与 `dsh.profile.bundles` 条目 |
+| 装完 `dsh --profile e2e --dump-config` | 两条行都在：`dsh-tag-memory` + `dsh-tag-memory/preset` |
+| 重复 `apply` | 幂等，manifest 不变 |
+| `uninstall apply` | 链接摘掉、依赖与 bundle 条目摘回原样；本体与记忆数据保留 |
+| profile 不存在 / 链接位是实体目录 | 拒绝安装，**一个字节没写** |
+| 带 `$DSH_PROFILE_DIR` 的 shell 里不带参数跑 | 自动定位到当前实例（`目标来源 = $DSH_PROFILE_DIR`），不会错装到 `~/.dsh` |
+| 从 `main`（1.1.0）装 | 自检 4 项红——所以钉 tag，不装 `main` |
+
+装完**重启 dsh**：bundle 补丁只在启动时装配，没有 `restart` 子命令——容器 `docker restart <容器名>`，
+本机前台就 Ctrl-C 再起；浏览器页面再刷新一次。
+
+### 装完自检（只读，不需要 pnpm、不需要 dsh 在跑）
+
+```bash
+node ~/.dsh/profiles/web/node_modules/dsh-tag-memory/scripts/verify-install.mjs
+```
+
+Windows 路径：`node %USERPROFILE%\.dsh\profiles\web\node_modules\dsh-tag-memory\scripts\verify-install.mjs`
+
+它逐条核对：依赖登记、安装版本 ≥ 1.2.0、有没有旧结构特征（`peerDependencies` 带 `@deepseek-ai/dsh-tools`）、
+`dsh.bundle.patch` 存在、`dsh.profile.bundles` 已登记（**不登记就不会装载**）、`preset/lib` 有没有框架 import、
+入口文件齐不齐。全绿再重启；有红项它会直接说下一步。
+
+### 升级
+
+换 tag 重跑同一条命令（覆盖本体、重指链接、条目已存在则跳过）。
+
+### 别用这几种写法
+
+| 写法 | 为什么不行 |
+|---|---|
+| `dsh plugin add dsh-tag-memory` | npm 上 `latest` 还是**旧版 0.3.7**（结构不同、带两个 peerDeps），1.x 没发到 npm |
+| `.../tar.gz/main` | `main` 浮动，当前是 1.1.0（带 `@deepseek-ai/dsh-tools` peer），装上工具全丢 |
+| `add github:marsma-101/dsh-tag-memory` | 要连 `github.com`（被墙时 21 s 超时，实测），且 git 依赖会走 `prepare` 构建 |
+| 手动 `cp` 到 `node_modules` | `dsh.bundle.patch` 不登记，插件不激活 |
+| 装完不重启 | 工具不会出现 |
+
+> 装了 pnpm 的机器，也可以用 DSH 自己的 `dsh plugin --profile web add <tag URL>`——它走 pnpm + `reconcile()`，
+> 效果一样；上面那条是为了「只有 node + npx」的机器准备的，两条都实测过。
+
+### 零运行时依赖
+
+插件**不 import 任何 `@deepseek-ai/*` 或 `cordis`**，`package.json` 里也**没有 `peerDependencies`**；
+`preset/define-tool.js` 是自带的 `defineTool`（移植自官方 `dsh-tools`，MIT，输出经逐字节比对一致）。
+
+以前 `preset/tools.js` 顶层写着 `import … from '@deepseek-ai/dsh-tools'`，插件一旦落在没有
+`node_modules` 链的目录（实测 `/opt/dsh/plugins/…`）就 `ERR_MODULE_NOT_FOUND`，整个 preset
+挂不上、10 个工具全丢，日志里只有一行 import 失败。现在装哪都能跑。
 
 ### profile 补丁的 `id` 必须等于 bundle 补丁 `insert` 的 `id`
 
@@ -125,20 +212,6 @@ dsh plugin --profile web install dsh-tag-memory
 # bundle 里：  config: { dataDir: '/a', other: 1 }
 # profile 里： config: { dataDir: '/b' }
 # 结果是：     { dataDir: '/b' }        ← other:1 被整个丢掉
-```
-
-### 装完跑校验
-
-```bash
-node 内部文档/工具/verify-install.mjs
-```
-
-```
-✅ 校验通过
-   bundle insert id:  dsh-tag-memory, dsh-tag-memory-tools
-   profile 覆盖 id:   无
-   dataDir:           ~/.dsh/tag-memory
-   来源:              dsh-home
 ```
 
 ---
@@ -234,19 +307,19 @@ Windows:      %USERPROFILE%\.dsh\tag-memory （= C:\Users\<你>\.dsh\tag-memory�
 ## 开发
 
 ```bash
-# 全量测试（必须带 shim，否则 preset 相关会 ERR_MODULE_NOT_FOUND）
-node --import ./tests/_shims/dsh-tools-loader.mjs \
-     --test --test-isolation=none $(ls tests/**/*.test.mjs)
+# 全量测试（零外部依赖，不需要任何 shim）
+node --test --test-isolation=none
 ```
 
 ```
-299 条测试：295 通过 / 0 失败 / 4 条视觉如实未验
+300 条测试：296 通过 / 0 失败 / 4 条视觉如实未验
 ```
 
-### 引擎零框架依赖
+### 零框架依赖
 
 `lib/engine/**` 不得 import 任何 `@deepseek-ai/*` 或 `cordis`（`purity.j.test` 强制）。
-所有引擎模块都能脱离 DSH 直接 `node --test`。
+`preset/**` 同样不 import 框架包——`define-tool.js` 是自带的（见「安装」）。
+所有模块都能脱离 DSH 直接 `node --test`。
 
 ---
 

@@ -162,7 +162,25 @@ test('P8 files 白名单覆盖全部运行时文件，且必须含 标签字典.
   )
 
   // 覆盖性：每个运行时文件都必须被某条 pattern 覆盖
-  const uncovered = allFiles.filter((f) => !files.some((p) => globToRegExp(p).test(f)))
+  //
+  // ⚠️ npm 的硬规则：无论 files 白名单写什么，下面这些**永远会进包**
+  //    （npm-packlist 内置）：package.json / README* / LICENSE* / LICENCE* /
+  //    CHANGELOG* / CHANGES* / HISTORY*，以及 main/exports 指向的文件。
+  //    它们不需要、也无法通过 files 表达"排除"，所以不算"漏发布"。
+  //    之前这里把 LICENSE / README.md 误报成漏发布 —— 是断言过严，不是真缺陷。
+  const NPM_ALWAYS_PACKED = [
+    /^(package\.json)$/,
+    /^readme(\.[^/]*)?$/i,
+    /^(licen[cs]e|copying)(\.[^/]*)?$/i,
+    /^(changelog|changes|history)(\.[^/]*)?$/i,
+  ]
+
+  const alwaysPacked = (f) => {
+    const base = f.split('/').pop()
+    return NPM_ALWAYS_PACKED.some((re) => re.test(base))
+  }
+
+  const uncovered = allFiles.filter((f) => !alwaysPacked(f) && !files.some((p) => globToRegExp(p).test(f)))
 
   // Lead 2026-11-05 建议：把"疑似临时文件"单独点名，帮助区分
   // 「真漏发布」与「有人把临时脚本/测试数据留在包根」。

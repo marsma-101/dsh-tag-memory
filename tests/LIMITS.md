@@ -66,7 +66,7 @@ services.sessionProjections = { stateOf: () => identityRef.value, ... }
 |---|---|
 | `Config` / `~standard` schema 校验 | `resolveConfig` 在 `apply` 之前，假 ctx 没有 |
 | 插件清单解析（`exports` / `dsh` 字段） | `install_bundle` 才走，我只做了静态 JSON 校验 |
-| 模块解析（`@deepseek-ai/dsh-tools` 等运行时包） | 我用 shim 顶替，**真实解析路径未验** |
+| 模块解析（`@deepseek-ai/dsh-tools` 等运行时包） | **已消除**：preset 改为自带 `define-tool.js`（零外部依赖），不再 import 任何框架包。原 shim（`tests/_shims/*`）已删除，测试现在 `node --test` 直跑 |
 | 插件生命周期（激活 / 停用 / 重载） | 未覆盖 |
 | `ctx.effect` / disposer 的真实调用时序 | 假 ctx 里是立即执行，真框架可能延后或批量 |
 

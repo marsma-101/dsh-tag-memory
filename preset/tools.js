@@ -25,7 +25,7 @@
  *   的措辞（主子明确要求），任何一层都不许改写它。
  */
 
-import { defineTool } from '@deepseek-ai/dsh-tools';
+import { defineTool } from './define-tool.js';
 import { buildToolDefs, TOOL_NAMES } from './tool-defs.js';
 import {
   formatBindResult,

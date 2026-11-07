@@ -4,7 +4,13 @@
 //       《标签字典》「工具入口（全量，各一行）」。
 // 方式：假 ctx 加载预设入口，检查 dtm_* 是否都注册（官方允许的冒烟，非模拟 DOM）。
 //
-// 运行需带 shim：node --import ./tests/_shims/dsh-tools-loader.mjs ...
+// 不需要 shim：preset 已自带 define-tool.js，零外部依赖，可直接 node --test。
+//
+// ⚠️ 断言层次：`ctx.tools.register` 收到的是**编译后**的 raw JSON Schema
+//    （`{type:'object', properties:{...}, required:[...]}`），不是作者侧 DSL。
+//    作者侧的 `required: true` 会被编译成根节点的 `required: ['编号','basis']`，
+//    属性节点上不再保留 `required`。K4~K7 按编译后形状断言（这才是宿主真正拿到的）；
+//    作者侧 DSL 的意图另由 `tool-defs.js` 直接断言（见 K5a/K7a）。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -69,22 +75,36 @@ test('K3 全部工具名以 dtm_ 开头，无裸名（且不是 dtm-ui-）', () 
 })
 
 /* ------------------------------------------------------------------ *
- * K4 parameters 非空且合法
+ * K4 parameters 非空且合法（编译后 = 宿主实际拿到的 raw JSON Schema）
  * ------------------------------------------------------------------ */
-test('K4 每个工具都有 parameters，且每项含 type（DSL）与 description', () => {
+test('K4 每个工具都有 parameters，且每项含 type 与 description（编译后 JSON Schema）', () => {
   const ctx = createFakeCtx()
   registerTools(ctx, {})
 
   for (const t of ctx.__tools) {
     assert.ok(t.parameters && typeof t.parameters === 'object', `${t.name} 缺少 parameters`)
-    const entries = Object.entries(t.parameters)
+    assert.equal(t.parameters.type, 'object', `${t.name}.parameters.type 必须是 object`)
+    assert.ok(
+      t.parameters.properties && typeof t.parameters.properties === 'object',
+      `${t.name}.parameters 缺少 properties`,
+    )
+
+    const entries = Object.entries(t.parameters.properties)
     assert.ok(entries.length > 0, `${t.name} 的 parameters 不能为空`)
 
     for (const [key, spec] of entries) {
       assert.ok(spec && typeof spec === 'object', `${t.name}.${key} 必须是对象`)
-      assert.equal(typeof spec.type, 'string', `${t.name}.${key} 缺少 type（探明结论 §1 的 DSL）`)
+      assert.equal(typeof spec.type, 'string', `${t.name}.${key} 缺少 type`)
       assert.equal(typeof spec.description, 'string', `${t.name}.${key} 缺少 description（给模型看）`)
       assert.ok(spec.description.trim().length > 0, `${t.name}.${key} 的 description 不能为空`)
+    }
+
+    // 必填键必须都真实存在于 properties（编译没漏）
+    for (const key of t.parameters.required ?? []) {
+      assert.ok(
+        Object.hasOwn(t.parameters.properties, key),
+        `${t.name}.required 里的 "${key}" 不在 properties 里`,
+      )
     }
   }
 })
@@ -92,19 +112,26 @@ test('K4 每个工具都有 parameters，且每项含 type（DSL）与 descripti
 /* ------------------------------------------------------------------ *
  * K5 dtm_retag 的 basis 必填
  * ------------------------------------------------------------------ */
-test('K5 dtm_retag 的 basis 必须 required:true（契约 §五.2、流程_整理 §七）', () => {
+test('K5 dtm_retag 的 basis 必须必填（契约 §五.2、流程_整理 §七）', () => {
   const ctx = createFakeCtx()
   registerTools(ctx, {})
 
   const retag = ctx.__tools.find((t) => t.name === 'dtm_retag')
   assert.ok(retag, '未找到 dtm_retag')
 
-  assert.ok(retag.parameters.basis, 'dtm_retag 必须有 basis 参数')
-  assert.equal(retag.parameters.basis.required, true, `basis 必须 required:true，实际 ${retag.parameters.basis.required}`)
+  const basis = retag.parameters.properties.basis
+  assert.ok(basis, 'dtm_retag 必须有 basis 参数')
+
+  // 作者侧 required:true 已编译成根节点 required 数组
+  const required = retag.parameters.required ?? []
+  assert.ok(
+    required.includes('basis'),
+    `basis 必须必填，实际 required 数组：${JSON.stringify(required)}`,
+  )
 
   // 规格：没有依据不许改 → basis 缺了就拒绝
   assert.ok(
-    String(retag.parameters.basis.description).length > 0,
+    String(basis.description).length > 0,
     'basis 必须有 description 说明"依据哪条记录"',
   )
 })
@@ -119,7 +146,7 @@ test('K6 dtm_write 参数恰为模型 5 个，绝不暴露 编号/稳定性/时�
   const write = ctx.__tools.find((t) => t.name === 'dtm_write')
   assert.ok(write, '未找到 dtm_write')
 
-  const keys = Object.keys(write.parameters)
+  const keys = Object.keys(write.parameters.properties)
 
   const MUST_HAVE = ['主要内容', '形态', '项目', '智能体', '自由标签']
   for (const f of MUST_HAVE) {
@@ -146,18 +173,23 @@ test('K7 dtm_recall：形态必填；项目/智能体可选（省略取绑定值
   const recall = ctx.__tools.find((t) => t.name === 'dtm_recall')
   assert.ok(recall, '未找到 dtm_recall')
 
-  const p = recall.parameters
+  const p = recall.parameters.properties
+  const required = recall.parameters.required ?? []
+
   assert.ok(p['形态'], 'dtm_recall 必须有 形态 参数')
-  assert.equal(p['形态'].required, true, '形态 必须 required:true（《流程_读取》§三：不给则拒查）')
+  assert.ok(
+    required.includes('形态'),
+    `形态 必须必填（《流程_读取》§三：不给则拒查），实际 required：${JSON.stringify(required)}`,
+  )
 
   // Lead 裁决：项目/智能体 在 recall 里可选，省略取当前绑定值
   for (const f of ['项目', '智能体']) {
     assert.ok(p[f], `dtm_recall 必须有 ${f} 参数`)
-    assert.notEqual(p[f].required, true, `${f} 应可选（省略取当前绑定值），不应标 required:true`)
+    assert.ok(!required.includes(f), `${f} 应可选（省略取当前绑定值），不应出现在 required 数组里`)
   }
 
   assert.ok(p['自由标签'], 'dtm_recall 必须有 自由标签 参数')
-  assert.notEqual(p['自由标签'].required, true, '自由标签应可选（留空=浏览模式）')
+  assert.ok(!required.includes('自由标签'), '自由标签应可选（留空=浏览模式）')
 })
 
 /* ------------------------------------------------------------------ *
