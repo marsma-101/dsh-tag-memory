@@ -41,16 +41,18 @@ const flag = (name, dflt) => {
 }
 const positional = argv.filter((a) => !a.startsWith('-'))
 const wantsUninstall = argv.includes('--uninstall') || positional.includes('uninstall')
+const wantsCleanup = argv.includes('--cleanup') || positional.includes('cleanup')
 const wantsApply = argv.includes('--apply') || positional.includes('apply')
-const action = wantsUninstall ? 'uninstall' : wantsApply ? 'apply' : 'check'
-/** 预演 vs 落盘：`uninstall` 单独跑是预演，`uninstall apply` / `--uninstall --apply` 才落盘。 */
+const action = wantsCleanup ? 'cleanup' : wantsUninstall ? 'uninstall' : wantsApply ? 'apply' : 'check'
+/** 预演 vs 落盘：`uninstall` / `cleanup` 单独跑是预演，带 apply 才落盘。 */
 const doIt = wantsApply
+const allProfiles = argv.includes('--all-profiles')
 const target = resolveTarget({
   home: flag('--dsh-home', undefined),
   profile: flag('--profile', undefined),
 })
-const profile = target.profile
 const home = target.home
+let profile = target.profile
 
 const profileDir = path.join(home, 'profiles', profile)
 const manifestPath = path.join(profileDir, 'package.json')
@@ -185,6 +187,145 @@ if (action === 'uninstall') {
   process.exit(0)
 }
 
+/* ── cleanup：清历史残留（0.x / 1.x 早期安装写进 profile 的东西）── */
+const LEGACY_START = /^# >>> dsh-tag-memory/
+const LEGACY_END = /^# <<< dsh-tag-memory/
+
+/** 摘掉 `# >>> dsh-tag-memory-… >>>` … `# <<< … <<<` 成对的旧安装块；没有成对结束标记就不动。 */
+function stripLegacyBlocks(text) {
+  const lines = text.split('\n')
+  const kept = []
+  let removed = 0
+  for (let i = 0; i < lines.length; i += 1) {
+    if (LEGACY_START.test(lines[i].trim())) {
+      let j = i + 1
+      while (j < lines.length && !LEGACY_END.test(lines[j].trim())) j += 1
+      if (j < lines.length) {
+        i = j
+        removed += 1
+        continue
+      }
+    }
+    kept.push(lines[i])
+  }
+  return { text: kept.join('\n'), removed }
+}
+
+/** 摘完之后如果只剩注释 + 一个 `[]`，就还原成合法的最小补丁。 */
+function normalizeEmptyPatch(text) {
+  const meaningful = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('#'))
+  return meaningful.length === 1 && meaningful[0] === '[]' ? '[]\n' : text
+}
+
+/** 算一个 profile 该清什么（只计算，不落盘）。 */
+function planCleanupFor(dir) {
+  const changes = []
+  const manifestPath = path.join(dir, 'package.json')
+  const patchPath = path.join(dir, 'cordis.patch.yml')
+  let manifestNext
+  let patchNext
+
+  const manifest = readJson(manifestPath)
+  if (manifest !== undefined) {
+    const next = structuredClone(manifest)
+    const spec = next.dependencies?.[PACKAGE_NAME]
+    let dangling = false
+    if (typeof spec === 'string') {
+      const targetPath = /^(?:link|file):/.test(spec) ? spec.replace(/^(?:link|file):/, '') : undefined
+      dangling = targetPath !== undefined && !fs.existsSync(targetPath)
+      if (dangling) {
+        delete next.dependencies[PACKAGE_NAME]
+        if (Object.keys(next.dependencies).length === 0) delete next.dependencies
+        changes.push(`摘掉悬空依赖：${PACKAGE_NAME} → ${targetPath}（目标不存在）`)
+      }
+    }
+    const bundles = next.dsh?.profile?.bundles
+    if (Array.isArray(bundles) && bundles.includes(PACKAGE_NAME) && (dangling || typeof spec !== 'string')) {
+      next.dsh.profile.bundles = bundles.filter((b) => b !== PACKAGE_NAME)
+      if (next.dsh.profile.bundles.length === 0) {
+        delete next.dsh.profile.bundles
+        if (Object.keys(next.dsh.profile).length === 0) {
+          delete next.dsh.profile
+          if (Object.keys(next.dsh).length === 0) delete next.dsh
+        }
+      }
+      changes.push('从 dsh.profile.bundles 摘掉 dsh-tag-memory')
+    }
+    if (changes.length > 0) manifestNext = JSON.stringify(next, null, 2) + '\n'
+  }
+
+  if (fs.existsSync(patchPath)) {
+    const before = fs.readFileSync(patchPath, 'utf8')
+    const { text, removed } = stripLegacyBlocks(before)
+    if (removed > 0) {
+      patchNext = normalizeEmptyPatch(text)
+      changes.push(`摘掉 cordis.patch.yml 里 ${removed} 段旧安装块（# >>> dsh-tag-memory-…）`)
+    }
+  }
+
+  return { dir, changes, manifestNext, patchNext }
+}
+
+if (action === 'cleanup') {
+  const profilesDir = path.join(home, 'profiles')
+  const names =
+    allProfiles && fs.existsSync(profilesDir)
+      ? fs
+          .readdirSync(profilesDir, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => entry.name)
+      : [profile]
+  const plans = names.map((name) => planCleanupFor(path.join(profilesDir, name)))
+
+  say(`dsh-tag-memory 残留清理  (DSH_HOME=${home}，${allProfiles ? '全部 profile' : `profile=${profile}`})`)
+  say('')
+  let total = 0
+  for (const plan of plans) {
+    if (plan.changes.length === 0) {
+      say(`· ${path.basename(plan.dir)}：干净`)
+      continue
+    }
+    say(`✎ ${path.basename(plan.dir)}：`)
+    for (const change of plan.changes) {
+      say(`    - ${change}`)
+      total += 1
+    }
+  }
+  say('')
+  if (total === 0) {
+    say('没有需要清的东西。')
+    process.exit(0)
+  }
+  say('· 不动：插件本体 <DSH_HOME>/plugins、记忆数据 <DSH_HOME>/tag-memory、其它依赖与补丁内容')
+  if (!doIt) {
+    say('\n以上是预演（一个字节没动）。加 apply 才真清。')
+    process.exit(0)
+  }
+  for (const plan of plans) {
+    if (plan.changes.length === 0) continue
+    const name = path.basename(plan.dir)
+    if (plan.manifestNext !== undefined) {
+      const mp = path.join(plan.dir, 'package.json')
+      const bak = `${mp}.bak-tag-memory-cleanup-${Date.now()}`
+      fs.copyFileSync(mp, bak)
+      fs.writeFileSync(mp, plan.manifestNext, 'utf8')
+      say(`✓ ${name}：已改清单（备份 ${bak}）`)
+    }
+    if (plan.patchNext !== undefined) {
+      const pp = path.join(plan.dir, 'cordis.patch.yml')
+      const bak = `${pp}.bak-tag-memory-cleanup-${Date.now()}`
+      fs.copyFileSync(pp, bak)
+      fs.writeFileSync(pp, plan.patchNext, 'utf8')
+      say(`✓ ${name}：已修补丁（备份 ${bak}）`)
+    }
+  }
+  say('\nCLEANUP OK。重启 dsh 后生效。')
+  process.exit(0)
+}
+
 /* ── apply：预检 ──────────────────────────────────────── */
 if (!fs.existsSync(manifestPath)) {
   problems.push(`找不到 profile「${profile}」：${manifestPath}。先启动一次 dsh（会初始化 profile），或用 --profile 指定名字。`)
@@ -239,6 +380,7 @@ if (problems.length > 0) {
 }
 
 /* ── apply：计划 ──────────────────────────────────────── */
+const legacy = planCleanupFor(profileDir)
 say(`dsh-tag-memory ${JSON.parse(fs.readFileSync(path.join(PACKAGE_DIR, 'package.json'), 'utf8')).version} → profile「${profile}」`)
 say(`  目标来源  = ${target.source}`)
 say(`  DSH_HOME = ${home}`)
@@ -247,6 +389,10 @@ say(`  链接      = ${linkPath}`)
 say(`  清单      = ${manifestPath}`)
 say('  bundle    = 会把 "dsh-tag-memory" 追加进 dsh.profile.bundles（已登记则跳过）')
 say('  不动      = profile 的 cordis.patch.yml、记忆数据目录 <DSH_HOME>/tag-memory')
+if (legacy.changes.length > 0) {
+  say(`  ⚠ 历史残留 = ${legacy.changes.length} 项（旧安装留下的悬空依赖/坏补丁块）——建议先跑 cleanup apply`)
+  for (const change of legacy.changes) say(`      - ${change}`)
+}
 say('')
 
 if (!doIt) {

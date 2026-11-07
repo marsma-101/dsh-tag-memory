@@ -2,7 +2,7 @@
 
 > 给 DSH 智能体一套**标签化、可检索、跨会话**的长期记忆。
 
-[![Version](https://img.shields.io/badge/version-1.2.0-blue)]()
+[![Version](https://img.shields.io/badge/version-1.2.1-blue)]()
 [![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1-orange)]()
 [![Tests](https://img.shields.io/badge/tests-296%20passing-brightgreen)]()
 
@@ -78,7 +78,7 @@ backup/                   改库前自动备份
 **一条命令。只要 `node ≥ 24.9` + `npx`——不需要 pnpm、git、已装插件，也不需要模型。**
 
 ```bash
-npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.2.0 apply
+npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.2.1 apply
 ```
 
 `npx` 只负责把包拉下来；真正干活的是包里的 [`scripts/install.mjs`](scripts/install.mjs)（纯 node、零依赖、约 1 秒）：
@@ -97,6 +97,8 @@ npx -y <同一个 URL> apply --profile tui        # 换 profile
 npx -y <同一个 URL> apply --dsh-home /opt/dsh  # 换 DSH_HOME
 npx -y <同一个 URL> uninstall                  # 预演卸载
 npx -y <同一个 URL> uninstall apply            # 真卸
+npx -y <同一个 URL> cleanup --all-profiles     # 预演清历史残留（0.x/早期 1.x 装的）
+npx -y <同一个 URL> cleanup --all-profiles apply  # 真清
 node scripts/install.mjs apply                 # 包已经在本地时，直接用同一个脚本
 ```
 
@@ -108,7 +110,7 @@ node scripts/install.mjs apply                 # 包已经在本地时，直接�
 
 对 agent 只需要一句话：
 
-> 从这个 URL 装 1.2.0：`npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.2.0 apply`，
+> 从这个 URL 装最新版：`npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.2.1 apply`，
 > 别手写 profile 的 `package.json` / `cordis.patch.yml`；装完把输出贴出来，等用户重启 dsh。
 
 它会自动落到容器里 `/opt/dsh/profiles/<profile>`（靠 `$DSH_PROFILE_DIR`），不需要 `--dsh-home`。
@@ -130,6 +132,8 @@ node scripts/install.mjs apply                 # 包已经在本地时，直接�
 | `uninstall apply` | 链接摘掉、依赖与 bundle 条目摘回原样；本体与记忆数据保留 |
 | profile 不存在 / 链接位是实体目录 | 拒绝安装，**一个字节没写** |
 | 带 `$DSH_PROFILE_DIR` 的 shell 里不带参数跑 | 自动定位到当前实例（`目标来源 = $DSH_PROFILE_DIR`），不会错装到 `~/.dsh` |
+| 容器实装（dsh **0.2.1-rc.2**，`/opt/dsh`） | 重启后启动日志零错误；页面 boot 表里有 `dsh-tag-memory/client.js`；问 agent 拿到全部 10 个 `dtm_*`；插件页显示「标签记忆」 |
+| `cleanup --all-profiles apply`（容器里 1.0.0 残留） | 摘掉悬空 `link:/opt/dsh/plugins/dsh-tag-memory-1.0.0`、bundle 条目、坏掉的补丁块，补丁恢复成 `[]` |
 | 从 `main`（1.1.0）装 | 自检 4 项红——所以钉 tag，不装 `main` |
 
 装完**重启 dsh**：bundle 补丁只在启动时装配，没有 `restart` 子命令——容器 `docker restart <容器名>`，
@@ -150,6 +154,22 @@ Windows 路径：`node %USERPROFILE%\.dsh\profiles\web\node_modules\dsh-tag-memo
 ### 升级
 
 换 tag 重跑同一条命令（覆盖本体、重指链接、条目已存在则跳过）。
+
+### 清理历史残留（0.x / 早期 1.x 装的）
+
+老版本（0.3.x、1.0.0）的安装脚本会往 profile 里写别的东西，卸新版不会自动帮它们清。`cleanup` 只清这三样：
+
+- `dependencies` 里那条**悬空**的 `dsh-tag-memory`（`link:` 指向的目录已经不存在）；
+- `dsh.profile.bundles` 里对应的 `dsh-tag-memory` 条目；
+- `cordis.patch.yml` 里 `# >>> dsh-tag-memory-… >>>` … `# <<< … <<<` 成对的旧安装块（摘完只剩 `[]` 就还原成合法最小补丁）。
+
+```bash
+npx -y <URL> cleanup --all-profiles        # 预演：逐 profile 列出会清什么
+npx -y <URL> cleanup --all-profiles apply  # 真清（每个文件先备份）
+```
+
+**不动**：插件本体 `<DSH_HOME>/plugins`、记忆数据 `<DSH_HOME>/tag-memory`、其它依赖与补丁内容；
+没有成对结束标记的块**不猜着删**，原样保留并报出来。
 
 ### 别用这几种写法
 
