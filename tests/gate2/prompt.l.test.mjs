@@ -16,6 +16,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 
 import { createFakeCtx } from '../_fake-ctx.mjs'
 import { apply as applyPreset } from '../../preset/index.js'
@@ -211,6 +212,46 @@ test('L4b 注入含「什么情况该写」判据，且覆盖规矩/决策/踩�
   // 字段标准与被拒处理也必须在（模型被拒后要知道回哪儿查）
   assert.ok(text.includes('字段标准'), '注入必须含字段标准表')
   assert.ok(text.includes('被拒了怎么办'), '注入必须含「被拒了怎么办」的纠正闭环')
+})
+
+/* ------------------------------------------------------------------ *
+ * L4c `标签字典.md` 必须与 `schema.json` 同步（PLAN.md Q3）
+ *
+ * 为什么需要这条：`标签字典.md` 是**给人看的**标准文档，`schema.json` 是**给程序读的**
+ * 判据源。两者一旦漂移，模型在注入里看到的标准和文档里写的不一致，
+ * 排障时会被文档误导。这里守住"取值域必须一致"这条底线。
+ * ------------------------------------------------------------------ */
+test('L4c 标签字典.md 的维度取值域与 schema.json 一致', () => {
+  const md = fs.readFileSync(new URL('../../标签字典.md', import.meta.url), 'utf8')
+  const schema = JSON.parse(
+    fs.readFileSync(new URL('../../lib/engine/templates/schema.json', import.meta.url), 'utf8'),
+  )
+
+  // 四个维度在文档里都得有独立小节
+  for (const dim of ['形态', '稳定性', '项目', '智能体']) {
+    assert.ok(md.includes(`### \`${dim}\``), `标签字典.md 缺少「${dim}」维度小节`)
+  }
+
+  // 每个取值都必须在文档里出现（反引号包起来的写法）
+  for (const shape of schema.shapes) {
+    assert.ok(md.includes(`\`${shape}\``), `标签字典.md 未收录形态值「${shape}」`)
+  }
+  for (const st of schema.stabilities) {
+    assert.ok(md.includes(`\`${st}\``), `标签字典.md 未收录稳定性值「${st}」`)
+  }
+
+  // 文档不得把 v0.3.7 已取消的三列当作现行字段（允许在"已取消"说明里提及它们）
+  // 判据：这些词不得出现在任何 markdown 表格行里——表格才是"现行标准"的载体
+  const tableRows = md.split('\n').filter((l) => l.trim().startsWith('|'))
+  for (const dead of ['`深度`', '`距离`', '`成熟度`', '常驻', '按需', '深藏']) {
+    const hit = tableRows.find((l) => l.includes(dead))
+    assert.equal(
+      hit,
+      undefined,
+      `标签字典.md 的表格里出现已取消的旧字段「${dead}」——那是 v0.3.7 的存储设计，本版已换掉。` +
+        `命中行：${hit}`,
+    )
+  }
 })
 
 /* ------------------------------------------------------------------ *
