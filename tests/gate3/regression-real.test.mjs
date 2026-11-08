@@ -80,10 +80,12 @@ test('R9【真容器缺陷①】preset 不得导出空 Config（会触发 resolv
  *   return { ok: true, 智能体: who, 项目: project };   // 存哪了？没存
  * 投影依赖 tool/call / command/run 事件，但宿主方法被**直接调用**时投影恒为空。
  * 实测现象：bind 返回 ok，紧接着 write 报 UNBOUND_IDENTITY。
+ *
+ * 2026-11-08 起：`项目` 不再是模型传的值，而是程序从工作目录取。
  * ------------------------------------------------------------------ */
 test('R10【真容器缺陷②】bindIdentity 之后 identityOf 必须立刻非 null', async () => {
   // 关键：拿一个**投影读不到**的 agent（模拟"宿主方法被直接调用"的真实形态）
-  const h = await makeHostCtx({ identity: null })
+  const h = await makeHostCtx({ identity: null, workingDir: '/work/P1' })
   try {
     const agent = { session: { id: 'qa-r10' } }
 
@@ -91,7 +93,7 @@ test('R10【真容器缺陷②】bindIdentity 之后 identityOf 必须立刻非 
     assert.equal(h.host.identityOfSync(agent), null, '（前提）绑定前 identityOfSync 应为 null')
 
     // 绑定
-    const bound = h.host.bindIdentity(agent, { 智能体: 'tester', 项目: 'P1' })
+    const bound = h.host.bindIdentity(agent, { 智能体: 'tester' })
     assert.equal(bound.ok, true, `bindIdentity 应成功，实际 ${JSON.stringify(bound)}`)
 
     // 绑定后：必须立刻能读到（这正是原缺陷：只返回不存储）
@@ -102,20 +104,21 @@ test('R10【真容器缺陷②】bindIdentity 之后 identityOf 必须立刻非 
         '会导致 bind 返回 ok 但紧接着 write 报 UNBOUND_IDENTITY',
     )
     assert.equal(after['智能体'], 'tester', `应读到绑定值，实际 ${JSON.stringify(after)}`)
-    assert.equal(after['项目'], 'P1')
+    // 项目来自工作目录（/work/P1 → P1），不是模型传的
+    assert.equal(after['项目'], 'P1', `项目 应取自工作目录名，实际 ${JSON.stringify(after)}`)
 
     // identityOf 与 identityOfSync 必须一致
     assert.deepEqual(h.host.identityOf(agent), after, 'identityOf 与 identityOfSync 必须返回相同结果')
 
-    // 端到端：绑定后写入必须成功（原缺陷的直接后果）
+    // 端到端：绑定后写入必须成功，且归属由程序填（模型一个都不传）
     const w = await h.host.writeEntry(agent, {
       主要内容: 'R10 回归：绑定后应能写入',
       形态: '事实',
-      项目: 'P1',
-      智能体: 'tester',
       自由标签: ['回归'],
     })
     assert.equal(w.ok, true, `绑定后写入必须成功，实际 ${JSON.stringify(w)}`)
+    assert.equal(w['项目'], 'P1', '项目 必须是程序取的工作目录名')
+    assert.equal(w['智能体'], 'tester', '智能体 必须是绑定身份')
 
     // 不同 agent 之间不得串（兜底缓存的 key 是 agent 对象本身）
     const other = { session: { id: 'qa-r10-other' } }
@@ -126,70 +129,86 @@ test('R10【真容器缺陷②】bindIdentity 之后 identityOf 必须立刻非 
 })
 
 /* ------------------------------------------------------------------ *
- * R11【2026-11-08 裁决】缺 项目/智能体 → 必须拒绝，不得补默认值
+ * R11【2026-11-08 裁决 v2】归属由程序填 → 模型传什么都不影响落库值
  *
- * 历史（为什么这条断言是反的）：
- *   旧实现为了让容器里「模型省略传值」能写进去，在 writeEntry/recall 里加了
- *   `|| identity.项目` 兜底。后果是**掩盖了真问题**：
- *     · 模型整场不传 项目 也能写成功 → 归属错了永远看不出来
- *     · 实测发现不了「模型没按标准填」，这类缺陷进不了生产
- *   现在改为：缺字段 → 拒 → 报错点名缺什么、合法值域、去哪查标准。
- *   模型据此补全重试，而不是程序替它做决定。
+ * 历史（为什么这条断言改过两次）：
+ *   v1（旧）：writeEntry/recall 里加 `|| identity.项目` 兜底 → 掩盖了真问题：
+ *     模型整场不传 项目 也能写成功，归属错了永远看不出来。
+ *   v2（本版）：归属不是「模型该填但可能忘」，而是**本就不该模型决定**——
+ *     项目 = 会话工作目录名（环境事实），智能体 = 绑定身份。
+ *     所以模型传的值一律丢弃，程序值说了算；程序取不到值才拒。
  * ------------------------------------------------------------------ */
-test('R11【裁决】缺 项目/智能体 → write 必须拒绝并点名字段，不得补默认值', async () => {
-  const h = await makeHostCtx({ identity: null })
+test('R11【裁决v2】归属由程序填：模型传的值被丢弃，程序取不到才拒', async () => {
+  // ① 正常态：模型传了错的项目/智能体，落库必须是程序值
+  const h = await makeHostCtx({ identity: null, workingDir: '/work/P1' })
   try {
     const agent = { session: { id: 'qa-r11' } }
-    h.host.bindIdentity(agent, { 智能体: 'tester', 项目: 'P1' })
+    h.host.bindIdentity(agent, { 智能体: 'tester' })
 
-    // 即使已绑定身份，写入时缺 项目/智能体 也必须被拒 —— 身份不是默认值来源
     const w = await h.host.writeEntry(agent, {
-      主要内容: 'R11 回归：缺字段必须被拒',
+      主要内容: 'R11 回归：模型传的归属必须被丢弃',
       形态: '事实',
-      自由标签: ['回归', '拒写'],
+      项目: '模型瞎填的项目',
+      智能体: '模型瞎填的身份',
+      自由标签: ['回归'],
     })
-    assert.equal(w.ok, false, `缺 项目/智能体 必须拒写，实际 ${JSON.stringify(w).slice(0, 200)}`)
+    assert.equal(w.ok, true, `写入应成功，实际 ${JSON.stringify(w).slice(0, 200)}`)
+    assert.equal(w['项目'], 'P1', `项目 必须是工作目录名，不是模型传的「模型瞎填的项目」`)
+    assert.equal(w['智能体'], 'tester', `智能体 必须是绑定身份，不是模型传的「模型瞎填的身份」`)
 
+    // 召回同理：模型传错项目也查得到（程序用真实归属查）
+    const r = await h.host.recall(agent, {
+      项目: '模型瞎填的项目',
+      智能体: '模型瞎填的身份',
+      形态: '事实',
+      自由标签: ['回归'],
+    })
+    assert.equal(r.ok, true, '召回应成功（程序用真实归属查，忽略模型传的）')
+    assert.equal(r.hits.length, 1, `应召回 1 条，实际 ${r.hits.length}`)
+  } finally {
+    h.cleanup()
+  }
+
+  // ② 异常态：程序取不到工作目录 → 必须拒（不猜、不兜底）
+  const h2 = await makeHostCtx({ identity: null, workingDir: '' })
+  try {
+    const agent = { session: { id: 'qa-r11b' } }
+    h2.host.bindIdentity(agent, { 智能体: 'tester' })
+
+    const w = await h2.host.writeEntry(agent, {
+      主要内容: 'R11 回归：取不到工作目录必须拒',
+      形态: '事实',
+      自由标签: ['回归'],
+    })
+    assert.equal(w.ok, false, `取不到工作目录必须拒写，实际 ${JSON.stringify(w).slice(0, 200)}`)
     const codes = (w.errors ?? []).map((e) => e.code)
     assert.ok(codes.includes('PROJECT_EMPTY'), `必须报 PROJECT_EMPTY，实际 ${codes.join(', ')}`)
-    assert.ok(codes.includes('AGENT_EMPTY'), `必须报 AGENT_EMPTY，实际 ${codes.join(', ')}`)
 
     // 报错必须说清标准与去处（模型据此才能纠正）
     const projErr = (w.errors ?? []).find((e) => e.code === 'PROJECT_EMPTY')
     assert.ok(projErr.message.includes('标签字典'), 'PROJECT_EMPTY 报错必须指向《标签字典》')
-    assert.ok(projErr.message.includes('问用户'), 'PROJECT_EMPTY 报错必须说明「不知道就问用户」')
 
     // 库必须没被写入
-    const r0 = await h.host.recall(agent, { 项目: 'P1', 智能体: 'tester', 形态: '事实', 自由标签: [] })
+    const r0 = await h2.host.recall(agent, { 形态: '事实', 自由标签: [] })
     assert.equal(r0.hits.length, 0, '拒写后库里不应有这条')
-
-    // 补齐字段后必须成功（证明被拒只是「缺参数」，不是「用不了」）
-    // 注意标签只给 1 个：召回用 1 个标签查 2 个标签的条目时 e_ratio=0.5，
-    // 不满足 veto 的 `> entryRatio(0.5)`，会被正确否决——那是引擎行为，不是缺陷。
-    const w2 = await h.host.writeEntry(agent, {
-      主要内容: 'R11 回归：补齐字段后写入成功',
-      形态: '事实',
-      项目: 'P1',
-      智能体: 'tester',
-      自由标签: ['补全'],
-    })
-    assert.equal(w2.ok, true, `补齐字段后必须写入成功，实际 ${JSON.stringify(w2).slice(0, 200)}`)
-    assert.equal(w2['项目'], 'P1')
-    assert.equal(w2['智能体'], 'tester')
-
-    // 召回同理：缺字段必须拒
-    const r = await h.host.recall(agent, { 形态: '事实', 自由标签: ['回归'] })
-    assert.equal(r.ok, false, '缺 项目/智能体 的召回必须被拒')
-    assert.ok(
-      ['PROJECT_EMPTY', 'AGENT_EMPTY'].includes(r.blocked),
-      `召回必须被前置闸门挡下，实际 blocked=${r.blocked}`,
-    )
-
-    // 补齐后能查到
-    const r2 = await h.host.recall(agent, { 项目: 'P1', 智能体: 'tester', 形态: '事实', 自由标签: ['补全'] })
-    assert.equal(r2.hits.length, 1, `补齐字段后应召回 1 条，实际 ${r2.hits.length}`)
   } finally {
-    h.cleanup()
+    h2.cleanup()
+  }
+
+  // ③ 未绑定身份 → 必须拒（且报 UNBOUND_IDENTITY，不是让模型自己填智能体）
+  const h3 = await makeHostCtx({ identity: null, workingDir: '/work/P1' })
+  try {
+    const agent = { session: { id: 'qa-r11c' } }
+    const w = await h3.host.writeEntry(agent, {
+      主要内容: 'R11 回归：未绑定身份必须拒',
+      形态: '事实',
+      智能体: '模型自己起的名',
+      自由标签: ['回归'],
+    })
+    assert.equal(w.ok, false, '未绑定身份必须拒写')
+    assert.equal(w.blocked, 'UNBOUND_IDENTITY', `应报 UNBOUND_IDENTITY，实际 ${w.blocked}`)
+  } finally {
+    h3.cleanup()
   }
 })
 
@@ -201,47 +220,36 @@ test('R11【裁决】缺 项目/智能体 → write 必须拒绝并点名字段�
  * 这两者对下一步该做什么是完全相反的动作。
  * ------------------------------------------------------------------ */
 test('R12【裁决】被拒的 recall 必须落 read.jsonl，并记 blocked + errors', async () => {
-  const h = await makeHostCtx({ identity: null })
+  const h = await makeHostCtx({ identity: null, workingDir: '/work/P1' })
   try {
     const agent = { session: { id: 'qa-r12' } }
-    h.host.bindIdentity(agent, { 智能体: 'tester', 项目: 'P1' })
 
-    // 缺字段的召回（会被前置闸门挡下）
+    // 未绑定身份的召回（会被前置闸门挡下）
     const r = await h.host.recall(agent, { 形态: '事实', 自由标签: ['cond回归'] })
-    assert.equal(r.ok, false, '缺字段召回应被拒')
+    assert.equal(r.ok, false, '未绑定身份的召回应被拒')
 
     const logs = readJsonl(join(h.dataDir, 'records', 'read.jsonl'))
     assert.equal(logs.length, 1, `被拒的召回也必须记台账，实际 ${logs.length} 条`)
 
     const log = logs[0]
     assert.equal(log.ok, false, '台账必须标 ok:false')
-    assert.ok(log.blocked, '台账必须记 blocked 原因码')
-    assert.ok(
-      ['PROJECT_EMPTY', 'AGENT_EMPTY'].includes(log.blocked),
-      `blocked 应是字段缺失码，实际「${log.blocked}」`,
-    )
+    assert.equal(log.blocked, 'UNBOUND_IDENTITY', `blocked 应是 UNBOUND_IDENTITY，实际「${log.blocked}」`)
     assert.ok(Array.isArray(log.errors) && log.errors.length > 0, '台账必须记 errors 明细')
 
-    // cond 记的是模型实际传的值（这里 项目/智能体 都空）——台账如实反映输入
-    assert.equal(log.cond['项目'], '', 'cond.项目 应如实记模型传入的空值')
-    assert.equal(log.cond['智能体'], '', 'cond.智能体 应如实记模型传入的空值')
-    assert.equal(log.cond['形态'], '事实', 'cond.形态 应记实际传入值')
-
-    // 成功召回也要落台账，且 ok 不为 false
+    // 绑定后成功召回也要落台账
+    h.host.bindIdentity(agent, { 智能体: 'tester' })
     await h.host.writeEntry(agent, {
       主要内容: 'R12 回归：成功召回也要落台账',
       形态: '事实',
-      项目: 'P1',
-      智能体: 'tester',
       自由标签: ['cond回归'],
     })
-    const ok = await h.host.recall(agent, { 项目: 'P1', 智能体: 'tester', 形态: '事实', 自由标签: ['cond回归'] })
-    assert.equal(ok.ok, true, '补齐字段后召回应成功')
+    const ok = await h.host.recall(agent, { 形态: '事实', 自由标签: ['cond回归'] })
+    assert.equal(ok.ok, true, '绑定后召回应成功')
 
     const logs2 = readJsonl(join(h.dataDir, 'records', 'read.jsonl'))
     assert.equal(logs2.length, 2, '成功召回也应记台账')
     assert.ok(logs2[1].ok !== false, '成功召回不应标 ok:false')
-    assert.equal(logs2[1].cond['项目'], 'P1', '成功召回的 cond 应记实际传入值')
+    assert.equal(logs2[1].cond['项目'], 'P1', '成功召回的 cond 应记程序填的项目值')
   } finally {
     h.cleanup()
   }

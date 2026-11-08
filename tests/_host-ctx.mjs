@@ -12,12 +12,14 @@ import { join } from 'node:path'
 /**
  * 造一个能跑 index.js apply 的假 ctx。
  *
- * @param {{ identity?: object|null, dataDir?: string }} opts
+ * @param {{ identity?: object|null, dataDir?: string, workingDir?: string }} opts
  *   identity: null = 未绑定；{ 智能体, 项目 } = 已绑定
+ *   workingDir: 会话工作目录绝对路径（`项目` 由程序从这里取 basename）
  */
 export async function makeHostCtx(opts = {}) {
   const dataDir = opts.dataDir ?? mkdtempSync(join(tmpdir(), 'qa-host-'))
   const identityRef = { value: opts.identity ?? null }
+  const workingDir = opts.workingDir ?? '/work/qa-project'
 
   const services = {}
 
@@ -83,6 +85,17 @@ export async function makeHostCtx(opts = {}) {
       ctx._identityDef = def
       return () => {}
     },
+  }
+
+  // ⚠️ workingDirectory 也必须在 apply 之前挂好
+  // 真实签名：get(session) → 绝对路径（同步）。插件用它取 `项目`
+  // （2026-11-08 起归属由程序填，不再让模型决定）。
+  services.workingDirectory = {
+    get: (_session) => workingDir,
+    async ensure() {
+      return workingDir
+    },
+    defaultDirectory: workingDir,
   }
 
   /** 造一个带 .session 的假 agent（identityOfSync 要求 agent.session 存在） */

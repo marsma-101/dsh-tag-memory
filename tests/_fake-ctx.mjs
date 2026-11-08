@@ -11,12 +11,35 @@
  * - effect           立即执行并在 dispose 时回滚
  * - get              返回注入的服务（供 preset 惰性取宿主服务）
  * - logger           空实现
+ *
+ * ⚠️ 默认注入 `workingDirectory`：真实 Host 一定有这个服务，
+ * 插件用它取 `项目`（会话工作目录名，2026-11-08 起由程序填）。
+ * 假 ctx 不提供它，插件就取不到项目 → 所有写入报 PROJECT_EMPTY，
+ * 测试会误报成「插件坏了」。所以要给一个与真实签名一致的桩：
+ * `get(session)` 同步返回绝对路径。
+ *
+ * @param {object}   [opts]
+ * @param {object}   [opts.services]  额外注入的服务（同键覆盖默认桩）
+ * @param {string}   [opts.workingDir] 工作目录绝对路径，默认 '/work/dsh-tag-memory'
  */
-export function createFakeCtx({ services = {} } = {}) {
+export function createFakeCtx({ services = {}, workingDir = '/work/dsh-tag-memory' } = {}) {
   const tools = []
   const sections = []
   const contexts = []
   const disposers = []
+
+  // 真实 Host 的 workingDirectory 服务：get(session) → 绝对路径（同步）
+  const workingDirectory = {
+    get() {
+      return workingDir
+    },
+    async ensure() {
+      return workingDir
+    },
+    get defaultDirectory() {
+      return workingDir
+    },
+  }
 
   const ctx = {
     __tools: tools,
@@ -55,7 +78,10 @@ export function createFakeCtx({ services = {} } = {}) {
     },
 
     get(name) {
-      return services[name] ?? null
+      // 调用方显式注入的服务优先（同键可覆盖默认桩）
+      if (name in services) return services[name] ?? null
+      if (name === 'workingDirectory') return workingDirectory
+      return null
     },
 
     /**

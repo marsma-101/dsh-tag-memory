@@ -162,7 +162,8 @@ function executeBind(ctx) {
     const h = requireHost(ctx);
     if (!h.ok) return h.result;
 
-    const r = await callHost(h.host, 'bindIdentity', [agentOf(exec), { 智能体: args['智能体'], 项目: args['项目'] }]);
+    // 只传 `智能体`：`项目` 由宿主按会话工作目录自动取（2026-11-08 硬性裁定）。
+    const r = await callHost(h.host, 'bindIdentity', [agentOf(exec), { 智能体: args['智能体'] }]);
     if (!r.ok) return r;
     return { ok: true, ...formatBindResult(r.result) };
   };
@@ -184,12 +185,11 @@ function executeWrite(ctx, config) {
       {
         主要内容: args['主要内容'],
         形态: args['形态'],
-        项目: args['项目'],
-        智能体: args['智能体'],
         自由标签: args['自由标签'],
-        // 不传 `稳定性`：它是程序字段，首次落库恒为「观察」。
-        // 稳定性只能由使用过程（时距累积 + feedback）经状态机事后演进，
-        // 模型单方面说「这条稳定」不算数——那是未经系统性验证的自评。
+        // 不传 `项目` / `智能体`：归属是**程序值**（2026-11-08 硬性裁定）。
+        // 项目取会话工作目录名，智能体取本次会话绑定的身份——都是环境事实，
+        // 不是模型的判断。宿主侧会用程序值覆盖，这里传了也会被丢弃。
+        // 不传 `稳定性`：首次落库恒为「观察」，由使用过程经状态机事后演进。
       },
     ]);
     if (!r.ok) return r;
@@ -207,10 +207,10 @@ function executeRecall(ctx) {
     const r = await callHost(h.host, 'recall', [
       agentOf(exec),
       {
-        项目: args['项目'],
-        智能体: args['智能体'],
         形态: args['形态'],
         自由标签: args['自由标签'],
+        // 不传 `项目` / `智能体`：归属是程序值（2026-11-08 硬性裁定）。
+        // 宿主侧会用工作目录名 + 绑定身份覆盖，这里传了也会被丢弃。
       },
     ]);
     if (!r.ok) return r;

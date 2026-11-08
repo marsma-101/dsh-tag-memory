@@ -185,7 +185,15 @@ function identityFor(ctx, context) {
 
     const id = host.identityOfSync(agent);
     if (!id) return { bound: false };
-    return { bound: true, who: id['智能体'] ?? id.who, project: id['项目'] ?? id.project };
+    // `项目` 取**实时**工作目录名（宿主 projectOfSync），不是绑定时的快照：
+    // 落库用的是实时值，注入若显示旧值，模型看到的和实际写的就不是一回事。
+    // 取不到时回落到绑定值（此时写入也会被 PROJECT_EMPTY 拒，注入只是提示）。
+    let project = id['项目'] ?? id.project;
+    if (typeof host.projectOfSync === 'function') {
+      const live = host.projectOfSync(agent);
+      if (live) project = live;
+    }
+    return { bound: true, who: id['智能体'] ?? id.who, project };
   } catch {
     // 注入永远不该因为读身份失败而崩掉整个 prompt
     return { bound: false };

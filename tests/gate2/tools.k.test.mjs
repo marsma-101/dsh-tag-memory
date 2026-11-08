@@ -137,9 +137,9 @@ test('K5 dtm_retag 的 basis 必须必填（契约 §五.2、流程_整理 §七
 })
 
 /* ------------------------------------------------------------------ *
- * K6 dtm_write 只暴露模型 5 个字段
+ * K6 dtm_write 只暴露模型 3 个字段（内容 / 形态 / 标签）
  * ------------------------------------------------------------------ */
-test('K6 dtm_write 参数恰为模型 5 个，绝不暴露 编号/时距/状态/稳定性', () => {
+test('K6 dtm_write 参数恰为模型 3 个，绝不暴露 归属/程序字段', () => {
   const ctx = createFakeCtx()
   registerTools(ctx, {})
 
@@ -148,32 +148,31 @@ test('K6 dtm_write 参数恰为模型 5 个，绝不暴露 编号/时距/状态/
 
   const keys = Object.keys(write.parameters.properties)
 
-  // 2026-11-08 硬性裁定：`稳定性` 是**程序字段**，首次落库恒为「观察」。
-  // 新记忆是模型单方面写下的、未经系统性验证，自称「稳定」不算数；
-  // 稳定性只能由使用过程（时距累积 + feedback）经状态机事后演进。
-  // 所以它连参数都不该暴露——暴露了模型就会去填，填了还得丢弃，等于骗它。
-  const MUST_HAVE = ['主要内容', '形态', '项目', '智能体', '自由标签']
+  // 2026-11-08 硬性裁定：模型只决定**内容、形态、自由标签**这三件。
+  const MUST_HAVE = ['主要内容', '形态', '自由标签']
   for (const f of MUST_HAVE) {
     assert.ok(keys.includes(f), `dtm_write 必须含模型字段「${f}」，实际参数：${keys.join(', ')}`)
   }
 
-  // 程序字段，绝不能暴露给模型
-  const FORBIDDEN = ['编号', '时距', '状态', '稳定性']
+  // 归属由程序填（项目=工作目录名，智能体=绑定身份）：
+  // 这是环境事实，不是模型的判断。让模型填会拿「主题」当项目，召回永远对不上。
+  // 程序字段（编号/时距/状态/稳定性）同理——暴露了模型就会填，填了还得丢弃，等于骗它。
+  const FORBIDDEN = ['项目', '智能体', '编号', '时距', '状态', '稳定性']
   for (const f of FORBIDDEN) {
     assert.equal(
       keys.includes(f),
       false,
-      `dtm_write 绝不能暴露程序字段「${f}」，实际参数：${keys.join(', ')}`,
+      `dtm_write 绝不能暴露「${f}」（归属归程序 / 程序字段），实际参数：${keys.join(', ')}`,
     )
   }
 
-  assert.equal(keys.length, 5, `dtm_write 参数必须恰好 5 个，实际 ${keys.length}：${keys.join(', ')}`)
+  assert.equal(keys.length, 3, `dtm_write 参数必须恰好 3 个，实际 ${keys.length}：${keys.join(', ')}`)
 })
 
 /* ------------------------------------------------------------------ *
- * K7 dtm_recall 参数：项目/智能体 可选（省略取绑定值）、形态必填、标签可选
+ * K7 dtm_recall 参数：形态必填、标签可选；归属不暴露
  * ------------------------------------------------------------------ */
-test('K7 dtm_recall：形态/项目/智能体 三者必填；自由标签可选', () => {
+test('K7 dtm_recall：形态必填；自由标签可选；不暴露 项目/智能体', () => {
   const ctx = createFakeCtx()
   registerTools(ctx, {})
 
@@ -183,14 +182,13 @@ test('K7 dtm_recall：形态/项目/智能体 三者必填；自由标签可选'
   const p = recall.parameters.properties
   const required = recall.parameters.required ?? []
 
-  // 2026-11-08 裁决：不补默认值 → 三个字段都必须由模型显式给出。
-  // 曾经 项目/智能体 可选（省略取绑定值），后果是「模型没按标准填」被兜底掩盖。
-  for (const f of ['形态', '项目', '智能体']) {
-    assert.ok(p[f], `dtm_recall 必须有 ${f} 参数`)
-    assert.ok(
-      required.includes(f),
-      `${f} 必须必填（不补默认值），实际 required：${JSON.stringify(required)}`,
-    )
+  // 2026-11-08 裁决 v2：归属（项目/智能体）是程序值，不暴露给模型。
+  // 模型只决定「找哪类东西（形态）」和「按什么标签找」。
+  assert.ok(p['形态'], 'dtm_recall 必须有 形态 参数')
+  assert.ok(required.includes('形态'), `形态 必须必填，实际 required：${JSON.stringify(required)}`)
+
+  for (const f of ['项目', '智能体']) {
+    assert.equal(p[f], undefined, `dtm_recall 不该暴露「${f}」（归属由程序填）`)
   }
 
   assert.ok(p['自由标签'], 'dtm_recall 必须有 自由标签 参数')

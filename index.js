@@ -424,7 +424,6 @@ function createHostService(ctx, config) {
    */
   function bindIdentity(agent, { 智能体, 项目 } = {}) {
     const who = str(智能体);
-    const project = str(项目);
     if (who === '') {
       return {
         ok: false,
@@ -432,11 +431,14 @@ function createHostService(ctx, config) {
         message: '智能体 不能为空：不知道“我是谁”就不读写记忆。先问用户这次会话以什么名字负责。',
       };
     }
+    // 项目由程序取工作目录名（2026-11-08 硬性裁定），模型传的 `项目` 一律忽略。
+    // 保留形参只是为了兼容旧调用方，值不采纳。
+    const programProject = projectOfSync(agent) || str(项目);
     // 进程内兜底：key 是 agent 对象本身；没有 agent 时不缓存（无从归属）。
     if (agent && typeof agent === 'object') {
-      identityFallback.set(agent, { 智能体: who, 项目: project });
+      identityFallback.set(agent, { 智能体: who, 项目: programProject });
     }
-    return { ok: true, 智能体: who, 项目: project };
+    return { ok: true, 智能体: who, 项目: programProject };
   }
 
   /**
@@ -471,6 +473,40 @@ function createHostService(ctx, config) {
 
   function identityOf(agent) {
     return identityOfSync(agent);
+  }
+
+  /**
+   * 读当前会话的工作目录名（同步），用作 `项目` 的**程序值**。
+   *
+   * 为什么项目要由程序定（2026-11-08 硬性裁定）：
+   *   「这条属于谁的活儿」= 会话在哪个目录下干活，这是**环境事实**，
+   *   不是模型的判断。让模型填，它会拿「主题」当项目（"插件开发" 不是项目，
+   *   `dsh-tag-memory` 才是），而且同一次会话里能填出好几个不同的值，
+   *   归属一乱，召回就永远对不上。
+   *
+   * 取的是 `ctx.workingDirectory.get(session)`——Host 的权威来源，
+   * 与模型看到的 WORKING_DIRECTORY 段同源。取不到返回 ''，由调用方报
+   * `PROJECT_EMPTY`（不猜、不兜底）。
+   *
+   * @param {object} agent
+   * @returns {string} 目录名（basename），拿不到则 ''
+   */
+  function projectOfSync(agent) {
+    try {
+      const session = agent?.session;
+      if (!session) return '';
+      const wd = ctx.get?.('workingDirectory');
+      if (!wd || typeof wd.get !== 'function') return '';
+      const dir = String(wd.get(session) ?? '').trim();
+      if (dir === '') return '';
+      // 取最后一段：`/opt/dsh` → `dsh`，`G:\proj\dsh-tag-memory` → `dsh-tag-memory`
+      // 两种分隔符都要处理（容器是 POSIX，本机是 Windows）
+      const parts = dir.split(/[\\/]+/).filter(Boolean);
+      const base = parts.length > 0 ? parts[parts.length - 1] : '';
+      return base === '' ? '' : base;
+    } catch {
+      return ''; // 注入渲染用，绝不能抛
+    }
   }
 
   /**
@@ -528,17 +564,30 @@ function createHostService(ctx, config) {
     const { schema, scoring } = await loadConfigs();
     await ensureDirs(layout);
 
-    // ⚠️ 不补默认值（2026-11-08 裁决）：模型没给 `项目`/`智能体` 就让它被 engine 拒，
-    // 拒写信息会点名缺哪个字段、合法值是什么、去哪查标准。
-    // 曾经这里用 `|| identity.项目` 兜底，后果是：
-    //   · 模型整场不传 `项目` 也能写成功 → 归属错了永远看不出来
-    //   · 实测时「模型没按标准填」这个真问题被兜底掩盖，进不了生产
-    // 兜底不属于「程序帮模型省事」，属于「程序替模型做决定」——归属是模型的判断，不是程序的。
+    // ⚠️ 归属（`项目`/`智能体`）是**程序值**，不是模型的判断（2026-11-08 硬性裁定）。
+    //
+    // 程序定这两个字段，理由：
+    //   · `项目` = 会话工作目录名，是**环境事实**。让模型填，它会拿「主题」当项目
+    //     （"插件开发" 不是项目，`dsh-tag-memory` 才是），同一次会话还能填出几个
+    //     不同的值——归属一乱，召回就永远对不上。
+    //   · `智能体` = 本次会话绑定的身份，绑一次就该全库一致，每次写都让模型重填
+    //     既啰嗦又容易漂（实测就漂过：同一个会话写出过 `萧潇` 和 `萧潇 `）。
+    //
+    // 模型给的值一律**丢弃**（不报错、不采纳）——它不是越权，是这活儿本就不该它干。
+    // 程序取不到值时报 `PROJECT_EMPTY` / `UNBOUND_IDENTITY`，让模型去补**环境**
+    // （问用户身份、确认工作目录），而不是让它猜一个字符串塞进来。
+    const programProject = projectOfSync(agent);
+    const effectiveInput = {
+      ...input,
+      项目: programProject,
+      智能体: identity.智能体,
+    };
+
     let built;
     const lockResult = await withFileLock(layout.lockFile, async () => {
       const { records } = await readLibraryCsv(layout.libraryCsv, schema);
       const existingIds = records.map((r) => r['编号']);
-      built = buildNewRecord({ input, existingIds, schema, now: new Date() });
+      built = buildNewRecord({ input: effectiveInput, existingIds, schema, now: new Date() });
       if (!built.ok) return { ok: false, errors: built.errors };
       await appendRecordCsv(layout.libraryCsv, built.record, schema);
       return { ok: true };
@@ -546,7 +595,7 @@ function createHostService(ctx, config) {
 
     // 台账：成功与失败都记（失败是整理阶段定位“字典问题 vs 程序误伤”的素材）
     const log = buildWriteLog({
-      input,
+      input: effectiveInput,
       identity: { who: identity.智能体 },
       result: built?.ok ? { ok: true, record: built.record } : { ok: false, errors: built?.errors },
       schema,
@@ -625,13 +674,18 @@ function createHostService(ctx, config) {
     await withFileLock(layout.lockFile, async () => {
       const { records } = await readLibraryCsv(layout.libraryCsv, schema);
 
-      // ⚠️ 不补默认值（2026-11-08 裁决，与 writeEntry 同一口径）：
-      // `项目`/`智能体` 缺了就交给 engine 判 PROJECT_EMPTY / AGENT_EMPTY 拒查，
-      // 返回里点名缺哪个字段。曾经这里用 `|| identity.项目` 兜底，后果是
-      // 「模型没按标准填」这个真问题被掩盖——查不到东西时以为是库的问题。
+      // ⚠️ 归属同样由**程序**填（2026-11-08 硬性裁定，与 writeEntry 同一口径）。
+      // 查什么项目、以谁的身份查，是环境事实，不是模型的判断——模型只决定
+      // 「按什么形态、什么标签查」。让模型填 `项目` 的后果实测过：
+      // 它会填成主题词，查出来的东西和库里存的归属对不上，召回恒为空。
+      const effectiveQuery = {
+        ...query,
+        项目: projectOfSync(agent),
+        智能体: identity.智能体,
+      };
       result = engineRecall({
         records,
-        query,
+        query: effectiveQuery,
         identity: { bound: true, who: identity.智能体 },
         schema,
         config: scoring,
@@ -646,7 +700,7 @@ function createHostService(ctx, config) {
       }
     });
 
-    await appendRecord('read', buildReadLog({ query, result, identity: { who: identity.智能体 }, now: new Date() }));
+    await appendRecord('read', buildReadLog({ query: result.echo ?? query, result, identity: { who: identity.智能体 }, now: new Date() }));
 
     return {
       ok: result.ok !== false,
@@ -1723,10 +1777,11 @@ function createHostService(ctx, config) {
   }
 
   const serviceObj = {
-    // 身份
+    // 身份 / 归属
     bindIdentity,
     identityOf,
     identityOfSync,
+    projectOfSync,
     // 写 / 读
     writeEntry,
     recall,
