@@ -126,128 +126,122 @@ test('R10【真容器缺陷②】bindIdentity 之后 identityOf 必须立刻非 
 })
 
 /* ------------------------------------------------------------------ *
- * R11【真容器缺陷③】writeEntry / recall 省略 项目/智能体 时必须用绑定值兜底
+ * R11【2026-11-08 裁决】缺 项目/智能体 → 必须拒绝，不得补默认值
  *
- * 原实现：
- *   · writeEntry 不兜底 → engine 判 PROJECT_EMPTY / AGENT_EMPTY 拒写
- *   · recall 只兜底 智能体 不兜底 项目 → 空串参与硬筛 → filtered 归零，查不到自己刚写的
+ * 历史（为什么这条断言是反的）：
+ *   旧实现为了让容器里「模型省略传值」能写进去，在 writeEntry/recall 里加了
+ *   `|| identity.项目` 兜底。后果是**掩盖了真问题**：
+ *     · 模型整场不传 项目 也能写成功 → 归属错了永远看不出来
+ *     · 实测发现不了「模型没按标准填」，这类缺陷进不了生产
+ *   现在改为：缺字段 → 拒 → 报错点名缺什么、合法值域、去哪查标准。
+ *   模型据此补全重试，而不是程序替它做决定。
  * ------------------------------------------------------------------ */
-test('R11【真容器缺陷③】省略 项目/智能体 → write 与 recall 都必须用绑定值兜底', async () => {
+test('R11【裁决】缺 项目/智能体 → write 必须拒绝并点名字段，不得补默认值', async () => {
   const h = await makeHostCtx({ identity: null })
   try {
     const agent = { session: { id: 'qa-r11' } }
     h.host.bindIdentity(agent, { 智能体: 'tester', 项目: 'P1' })
 
-    // 写入时**故意省略** 项目/智能体（模型常见行为）
+    // 即使已绑定身份，写入时缺 项目/智能体 也必须被拒 —— 身份不是默认值来源
     const w = await h.host.writeEntry(agent, {
-      主要内容: 'R11 回归：省略项目与智能体也应写入成功',
+      主要内容: 'R11 回归：缺字段必须被拒',
       形态: '事实',
-      自由标签: ['回归', '兜底'],
+      自由标签: ['回归', '拒写'],
     })
-    assert.equal(
-      w.ok,
-      true,
-      `省略 项目/智能体 时必须用绑定值兜底后写入成功，实际 ${JSON.stringify(w)} —— ` +
-        '原缺陷：engine 会判 PROJECT_EMPTY/AGENT_EMPTY',
-    )
-    assert.equal(w['项目'], 'P1', `落库的项目应是绑定值 P1，实际「${w['项目']}」`)
-    assert.equal(w['智能体'], 'tester', `落库的智能体应是绑定值 tester，实际「${w['智能体']}」`)
+    assert.equal(w.ok, false, `缺 项目/智能体 必须拒写，实际 ${JSON.stringify(w).slice(0, 200)}`)
 
-    // 召回时**故意省略** 项目/智能体 —— 两个都必须兜底，否则硬筛用空串 → filtered 归零
-    const r = await h.host.recall(agent, { 形态: '事实', 自由标签: ['兜底', '回归'] })
-    assert.equal(
-      r.filtered,
-      1,
-      `省略 项目/智能体 的召回，硬筛后应剩 1 条，实际 ${r.filtered} —— ` +
-        '原缺陷：只兜底智能体不兜底项目，空串参与硬筛导致 filtered 归零',
-    )
-    assert.equal(r.hits.length, 1, `应召回刚写的那条，实际 ${r.hits.length} 条`)
-    assert.equal(r.hits[0]['主要内容'], 'R11 回归：省略项目与智能体也应写入成功')
+    const codes = (w.errors ?? []).map((e) => e.code)
+    assert.ok(codes.includes('PROJECT_EMPTY'), `必须报 PROJECT_EMPTY，实际 ${codes.join(', ')}`)
+    assert.ok(codes.includes('AGENT_EMPTY'), `必须报 AGENT_EMPTY，实际 ${codes.join(', ')}`)
 
-    // 显式给值时，必须优先于绑定值（不能被兜底覆盖）
+    // 报错必须说清标准与去处（模型据此才能纠正）
+    const projErr = (w.errors ?? []).find((e) => e.code === 'PROJECT_EMPTY')
+    assert.ok(projErr.message.includes('标签字典'), 'PROJECT_EMPTY 报错必须指向《标签字典》')
+    assert.ok(projErr.message.includes('问用户'), 'PROJECT_EMPTY 报错必须说明「不知道就问用户」')
+
+    // 库必须没被写入
+    const r0 = await h.host.recall(agent, { 项目: 'P1', 智能体: 'tester', 形态: '事实', 自由标签: [] })
+    assert.equal(r0.hits.length, 0, '拒写后库里不应有这条')
+
+    // 补齐字段后必须成功（证明被拒只是「缺参数」，不是「用不了」）
+    // 注意标签只给 1 个：召回用 1 个标签查 2 个标签的条目时 e_ratio=0.5，
+    // 不满足 veto 的 `> entryRatio(0.5)`，会被正确否决——那是引擎行为，不是缺陷。
     const w2 = await h.host.writeEntry(agent, {
-      主要内容: 'R11 回归：显式值优先',
+      主要内容: 'R11 回归：补齐字段后写入成功',
       形态: '事实',
-      项目: 'P2',
+      项目: 'P1',
       智能体: 'tester',
-      自由标签: ['显式优先'],
+      自由标签: ['补全'],
     })
-    assert.equal(w2.ok, true)
-    assert.equal(w2['项目'], 'P2', '模型显式给的 项目 必须优先于绑定值')
+    assert.equal(w2.ok, true, `补齐字段后必须写入成功，实际 ${JSON.stringify(w2).slice(0, 200)}`)
+    assert.equal(w2['项目'], 'P1')
+    assert.equal(w2['智能体'], 'tester')
+
+    // 召回同理：缺字段必须拒
+    const r = await h.host.recall(agent, { 形态: '事实', 自由标签: ['回归'] })
+    assert.equal(r.ok, false, '缺 项目/智能体 的召回必须被拒')
+    assert.ok(
+      ['PROJECT_EMPTY', 'AGENT_EMPTY'].includes(r.blocked),
+      `召回必须被前置闸门挡下，实际 blocked=${r.blocked}`,
+    )
+
+    // 补齐后能查到
+    const r2 = await h.host.recall(agent, { 项目: 'P1', 智能体: 'tester', 形态: '事实', 自由标签: ['补全'] })
+    assert.equal(r2.hits.length, 1, `补齐字段后应召回 1 条，实际 ${r2.hits.length}`)
   } finally {
     h.cleanup()
   }
 })
 
 /* ------------------------------------------------------------------ *
- * R12【缺陷④】read.jsonl 的 cond 必须记**实际硬筛值**，且与 echo 一致
+ * R12【裁决】被拒也必须落台账，且台账要记清拒绝原因
  *
- * 原实现：`buildReadLog({ query: 原始query })` —— 模型省略 项目/智能体 时，
- * cond 记成空串，而实际硬筛用的是绑定值。
- *
- * 为什么是真问题（不只是"字段不好看"）：
- *   cond 的用途是整理阶段追根因。
- *   记空串会让整理得出**错误结论**："模型没传项目所以查不到"，
- *   而真相是"用 P1 查了但库里没有"。
- *   → 整理会去改**本来正确**的行为，而不是去补缺失的条目。**归因被台账带偏。**
+ * 为什么：模型要靠「被拒记录」纠正下一次调用。
+ * 台账里没有拒绝原因，整理阶段也分不清「库真没有」和「参数不合规被挡」——
+ * 这两者对下一步该做什么是完全相反的动作。
  * ------------------------------------------------------------------ */
-test('R12【真容器缺陷④】省略 项目/智能体 召回 → read.jsonl 的 cond 记绑定值，且与 echo 一致', async () => {
+test('R12【裁决】被拒的 recall 必须落 read.jsonl，并记 blocked + errors', async () => {
   const h = await makeHostCtx({ identity: null })
   try {
     const agent = { session: { id: 'qa-r12' } }
     h.host.bindIdentity(agent, { 智能体: 'tester', 项目: 'P1' })
 
-    // 先写一条，确保库非空（否则可能走不同分支）
-    const w = await h.host.writeEntry(agent, {
-      主要内容: 'R12 回归：cond 必须记实际硬筛值',
+    // 缺字段的召回（会被前置闸门挡下）
+    const r = await h.host.recall(agent, { 形态: '事实', 自由标签: ['cond回归'] })
+    assert.equal(r.ok, false, '缺字段召回应被拒')
+
+    const logs = readJsonl(join(h.dataDir, 'records', 'read.jsonl'))
+    assert.equal(logs.length, 1, `被拒的召回也必须记台账，实际 ${logs.length} 条`)
+
+    const log = logs[0]
+    assert.equal(log.ok, false, '台账必须标 ok:false')
+    assert.ok(log.blocked, '台账必须记 blocked 原因码')
+    assert.ok(
+      ['PROJECT_EMPTY', 'AGENT_EMPTY'].includes(log.blocked),
+      `blocked 应是字段缺失码，实际「${log.blocked}」`,
+    )
+    assert.ok(Array.isArray(log.errors) && log.errors.length > 0, '台账必须记 errors 明细')
+
+    // cond 记的是模型实际传的值（这里 项目/智能体 都空）——台账如实反映输入
+    assert.equal(log.cond['项目'], '', 'cond.项目 应如实记模型传入的空值')
+    assert.equal(log.cond['智能体'], '', 'cond.智能体 应如实记模型传入的空值')
+    assert.equal(log.cond['形态'], '事实', 'cond.形态 应记实际传入值')
+
+    // 成功召回也要落台账，且 ok 不为 false
+    await h.host.writeEntry(agent, {
+      主要内容: 'R12 回归：成功召回也要落台账',
       形态: '事实',
+      项目: 'P1',
+      智能体: 'tester',
       自由标签: ['cond回归'],
     })
-    assert.equal(w.ok, true)
+    const ok = await h.host.recall(agent, { 项目: 'P1', 智能体: 'tester', 形态: '事实', 自由标签: ['cond回归'] })
+    assert.equal(ok.ok, true, '补齐字段后召回应成功')
 
-    // 故意省略 项目/智能体 召回
-    const query = { 形态: '事实', 自由标签: ['cond回归'] }
-    const r = await h.host.recall(agent, query)
-    assert.equal(r.ok, true, `召回应成功，实际 ${JSON.stringify(r).slice(0, 200)}`)
-
-    // 读台账
-    const logs = readJsonl(join(h.dataDir, 'records', 'read.jsonl'))
-    assert.equal(logs.length, 1, `应记 1 条读取台账，实际 ${logs.length}`)
-    const cond = logs[0].cond
-
-    assert.ok(cond, '台账必须有 cond 字段')
-
-    // 核心断言：cond 必须记**实际使用的绑定值**，不是空串
-    assert.equal(
-      cond['项目'],
-      'P1',
-      `cond.项目 必须记实际硬筛用的绑定值 P1，实际「${cond['项目']}」—— ` +
-        '原缺陷：记原始 query 的空串，会让整理误判"模型没传项目"',
-    )
-    assert.equal(
-      cond['智能体'],
-      'tester',
-      `cond.智能体 必须记实际硬筛用的绑定值 tester，实际「${cond['智能体']}」`,
-    )
-
-    // cond 与 echo 必须一致（两者都是"实际用了什么条件"的回显）
-    assert.equal(cond['项目'], r.echo['项目'], 'cond.项目 必须与 echo.项目 一致')
-    assert.equal(cond['智能体'], r.echo['智能体'], 'cond.智能体 必须与 echo.智能体 一致')
-    assert.equal(cond['形态'], r.echo['形态'], 'cond.形态 必须与 echo.形态 一致')
-
-    // 反向：cond 不得是空串（这是原缺陷的直接形态）
-    assert.notEqual(cond['项目'], '', 'cond.项目 不得为空串')
-    assert.notEqual(cond['智能体'], '', 'cond.智能体 不得为空串')
-
-    // 显式传值时，cond 应记显式值（不是绑定值）—— 证明记的是"实际用的"
-    await h.host.recall(agent, { 项目: 'P-other', 智能体: 'tester', 形态: '事实', 自由标签: ['cond回归'] })
     const logs2 = readJsonl(join(h.dataDir, 'records', 'read.jsonl'))
-    assert.equal(logs2.length, 2, '第二次召回也应记台账')
-    assert.equal(
-      logs2[1].cond['项目'],
-      'P-other',
-      `显式传值时 cond 必须记显式值 P-other，实际「${logs2[1].cond['项目']}」（证明记的是实际用的，不是绑定值）`,
-    )
+    assert.equal(logs2.length, 2, '成功召回也应记台账')
+    assert.ok(logs2[1].ok !== false, '成功召回不应标 ok:false')
+    assert.equal(logs2[1].cond['项目'], 'P1', '成功召回的 cond 应记实际传入值')
   } finally {
     h.cleanup()
   }

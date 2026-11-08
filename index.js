@@ -528,29 +528,25 @@ function createHostService(ctx, config) {
     const { schema, scoring } = await loadConfigs();
     await ensureDirs(layout);
 
-    // 已绑定：用绑定身份兜底填 `项目`/`智能体`，模型显式给的值优先。
-    // （与 `recall` 的 effective 处理一致；《流程_写入》§二：这两个字段可省略=取当前绑定值）
-    // ⚠️ 装进真容器后实测到：不做这一步，preset 省略传值时会被 engine 判 PROJECT_EMPTY/AGENT_EMPTY 拒写。
-    const effectiveInput = {
-      ...input,
-      项目: str(input['项目']) || identity.项目,
-      智能体: str(input['智能体']) || identity.智能体,
-    };
-
+    // ⚠️ 不补默认值（2026-11-08 裁决）：模型没给 `项目`/`智能体` 就让它被 engine 拒，
+    // 拒写信息会点名缺哪个字段、合法值是什么、去哪查标准。
+    // 曾经这里用 `|| identity.项目` 兜底，后果是：
+    //   · 模型整场不传 `项目` 也能写成功 → 归属错了永远看不出来
+    //   · 实测时「模型没按标准填」这个真问题被兜底掩盖，进不了生产
+    // 兜底不属于「程序帮模型省事」，属于「程序替模型做决定」——归属是模型的判断，不是程序的。
     let built;
     const lockResult = await withFileLock(layout.lockFile, async () => {
       const { records } = await readLibraryCsv(layout.libraryCsv, schema);
       const existingIds = records.map((r) => r['编号']);
-      built = buildNewRecord({ input: effectiveInput, existingIds, schema, now: new Date() });
+      built = buildNewRecord({ input, existingIds, schema, now: new Date() });
       if (!built.ok) return { ok: false, errors: built.errors };
       await appendRecordCsv(layout.libraryCsv, built.record, schema);
       return { ok: true };
     });
 
     // 台账：成功与失败都记（失败是整理阶段定位“字典问题 vs 程序误伤”的素材）
-    // 用 effectiveInput：台账里记的应是**实际落盘的**项目/智能体，不是模型省略后的空值。
     const log = buildWriteLog({
-      input: effectiveInput,
+      input,
       identity: { who: identity.智能体 },
       result: built?.ok ? { ok: true, record: built.record } : { ok: false, errors: built?.errors },
       schema,
@@ -585,7 +581,7 @@ function createHostService(ctx, config) {
     const identity = identityOfSync(agent);
     if (!identity) {
       const blocked = unboundResult();
-      return {
+      const rejected = {
         ok: false,
         blocked: 'UNBOUND_IDENTITY',
         hits: [],
@@ -599,6 +595,26 @@ function createHostService(ctx, config) {
         browseMode: false,
         message: blocked.message,
       };
+      // 未绑定也算「模型想查但没查成」，照样落台账——
+      // 与 writeEntry 的未绑定分支对称（那边 L508 起）。少了这条，
+      // read.jsonl 就只剩「查成功」和「已绑定但字段缺失」两种，
+      // 整理阶段看不到「因为没绑身份而丢掉的召回」，模型也无从据此纠正。
+      try {
+        const { schema } = await loadConfigs();
+        await appendRecord(
+          'read',
+          buildReadLog({
+            query: { 项目: str(query['项目']), 智能体: str(query['智能体']), 形态: str(query['形态']), 自由标签: arr(query['自由标签']) },
+            result: { ok: false, blocked: 'UNBOUND_IDENTITY', errors: [{ code: 'UNBOUND_IDENTITY', message: blocked.message }] },
+            identity: { who: '' },
+            now: new Date(),
+            schema,
+          }),
+        );
+      } catch {
+        /* 台账写不进去也不能盖住真正的「未绑定」结论 */
+      }
+      return rejected;
     }
 
     const { layout } = await resolveLayout();
@@ -606,26 +622,21 @@ function createHostService(ctx, config) {
     await ensureDirs(layout);
 
     let result;
-    // 台账要记「实际硬筛用的条件」，所以把 effective 提到锁外可见。
-    // ⚠️ 装进真容器后实测到过：这里若传原始 query，模型省略 项目/智能体 时
-    // read.jsonl 的 cond 会记成空串，而实际硬筛用的是绑定值 —— 台账与真相不符，
-    // 整理阶段就追不回「这次到底按什么条件查的」（《流程_读取》§七 cond 原样不改写）。
-    let effectiveQuery = null;
     await withFileLock(layout.lockFile, async () => {
       const { records } = await readLibraryCsv(layout.libraryCsv, schema);
 
-      // 已绑定：用绑定身份兜底填充，模型显式给的值优先（《流程_读取》§一 第 0 步）
-      // ⚠️ 两个维度都要兜底。装进真容器后实测到：只兜 `智能体` 不兜 `项目` 时，
-      // 省略传 `项目` 会让硬筛用空字符串去匹配，`filtered` 直接归零、查不到自己刚写的记忆。
-      const effective = {
-        项目: str(query['项目']) || identity.项目,
-        智能体: str(query['智能体']) || identity.智能体,
-        形态: str(query['形态']),
-        自由标签: arr(query['自由标签']),
-      };
-      effectiveQuery = effective;
-
-      result = engineRecall({ records, query: effective, identity: { bound: true, who: identity.智能体 }, schema, config: scoring, equivalence });
+      // ⚠️ 不补默认值（2026-11-08 裁决，与 writeEntry 同一口径）：
+      // `项目`/`智能体` 缺了就交给 engine 判 PROJECT_EMPTY / AGENT_EMPTY 拒查，
+      // 返回里点名缺哪个字段。曾经这里用 `|| identity.项目` 兜底，后果是
+      // 「模型没按标准填」这个真问题被掩盖——查不到东西时以为是库的问题。
+      result = engineRecall({
+        records,
+        query,
+        identity: { bound: true, who: identity.智能体 },
+        schema,
+        config: scoring,
+        equivalence,
+      });
 
       // 命中条目时距 +1，其余一律不动（《流程_读取》§六）
       const ids = arr(result.hits).map((h) => h['编号']);
@@ -635,7 +646,7 @@ function createHostService(ctx, config) {
       }
     });
 
-    await appendRecord('read', buildReadLog({ query: effectiveQuery ?? query, result, identity: { who: identity.智能体 }, now: new Date() }));
+    await appendRecord('read', buildReadLog({ query, result, identity: { who: identity.智能体 }, now: new Date() }));
 
     return {
       ok: result.ok !== false,
@@ -1014,23 +1025,12 @@ function createHostService(ctx, config) {
 
       const existingIds = records.map((r) => r['编号']);
 
-      // 已绑定：用绑定身份兜底填 项目/智能体，模型显式给的值优先。
-      // 与 writeEntry / recall 的 effectiveInput 同一口径。
-      // 实测缺陷（2026-11-06）：dtm_supersede 只传旧编号/主要内容/形态/自由标签/basis
-      // 时被 engine 判 PROJECT_EMPTY + AGENT_EMPTY 打回，模型不得不补传
-      // 项目/智能体 才成功，而身份早就绑好了。writeEntry 已兜底，supersede 漏了。
-      const prevRec = records[idx];
-      const effectiveInput = {
-        主要内容: input['主要内容'],
-        形态: input['形态'],
-        自由标签: input['自由标签'],
-        // 模型没给就沿用它要顶替的那条（归属不变），再兜底到绑定身份
-        项目: str(input['项目']) || str(prevRec && prevRec['项目']) || identity['项目'],
-        智能体: str(input['智能体']) || str(prevRec && prevRec['智能体']) || identity['智能体'],
-      };
-
+      // ⚠️ 不补默认值（2026-11-08 裁决）：新条必须**显式**给 `项目`/`智能体`。
+      // 不沿用旧条的归属——新条可能真的换项目了（旧条在 A 项目、新做法在 B 项目），
+      // 沿用旧条等于程序替模型决定了归属，错了看不出来。
+      // 也不回退到绑定身份：那会让「模型漏填」再次被掩盖。
       const built = buildNewRecord({
-        input: effectiveInput,
+        input,
         existingIds,
         schema,
         now: new Date(),

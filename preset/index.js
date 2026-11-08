@@ -27,11 +27,29 @@
  */
 
 import { registerTools } from './tools.js';
-import { renderInjection, SECTION_NAME, SECTION_ORDER } from './prompt.js';
+import {
+  renderInjection,
+  renderIdentityContext,
+  SECTION_NAME,
+  SECTION_ORDER,
+  IDENTITY_CONTEXT_NAME,
+  IDENTITY_CONTEXT_ORDER,
+} from './prompt.js';
 import { HOST_SERVICE } from './tools.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** Cordis 插件名（Loader 诊断用） */
 export const name = 'dsh-tag-memory-preset';
+
+/**
+ * 包根目录。schema.json 在 `lib/engine/templates/` 下，
+ * 与 host 侧 `loadConfigs()` 读的是同一个文件——两边取同一份 `writeRoutes`，
+ * 不各存一份（v0.3.7 的做法：判据只在 schema 里，渲染方各自读）。
+ */
+const PACKAGE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const TEMPLATE_DIR = path.join(PACKAGE_DIR, 'lib', 'engine', 'templates');
 
 /** 确定存在的服务（`ctx.tools` / `ctx.systemPrompt` 由 dsh-tools / dsh-system-prompt 提供） */
 export const inject = ['tools', 'systemPrompt'];
@@ -74,19 +92,77 @@ export function apply(ctx, config = {}) {
     }
   }
 
-  /* ---- 2. 每轮注入（精简字典 + 身份状态）---- */
+  /* ---- 2. 每轮注入（固定判据 + 动态身份）----
+   *
+   * ⚠️ 拆成 section + context 是 **KV cache 硬约束**，不是风格选择：
+   *   · section 进系统提示词前缀，内容一变，**其后所有缓存全废**（工具定义、历史）。
+   *     所以它只能放**与身份无关、字节恒定**的判据与字段标准。
+   *   · context 官方定义为 "durable user-role snapshot"，按 order 进历史、
+   *     以 user 角色追加。身份变了只多一条消息，**不动已有前缀**。
+   * 把身份塞进 section 曾导致：`dtm_bind` 一执行，整段注入变化 → 每轮重建缓存。
+   */
   ctx.effect(() =>
     ctx.systemPrompt.section({
       name: SECTION_NAME,
       order: SECTION_ORDER,
       // ⚠️ 必须 false：注入文本含 `|` 与 `{}` 一类字符，
-      // 默认的 `{{variable}}` 插值遇到未解析引用会让**整个 assembly 抛错**（探明结论 §2）。
+      // 默认的 `{{variable}}` 插值遇到未解析引用会让**整个 assembly 抛错**。
       interpolate: false,
-      // 身份每轮可能变（这轮绑没绑），所以用 provider 形式：
-      // 官方支持 `text: (context) => string`（dsh-system-prompt 的 PromptSection.text）。
-      text: (context) => renderInjection({ identity: identityFor(ctx, context) }),
+      // 与身份无关 → 同一插件版本下字节恒定，缓存可复用。
+      text: () => renderInjection({ writeRoutes: writeRoutesFor(), dimensions: dimensionsFor() }),
     }),
   );
+
+  ctx.effect(() =>
+    ctx.systemPrompt.context({
+      name: IDENTITY_CONTEXT_NAME,
+      order: IDENTITY_CONTEXT_ORDER,
+      // 空文本贡献不了任何东西（官方："Empty text contributes nothing"），
+      // 所以拿不到会话时返回空串而不是占位文字。
+      text: (context) => renderIdentityContext(identityFor(ctx, context)),
+      interpolate: false,
+    }),
+  );
+}
+
+/**
+ * 读 schema 里的写入判据，供注入渲染。
+ *
+ * **每轮重读**（按 mtime 缓存），理由同 v0.3.7：
+ * 用户改了 `schema.json` 的判据措辞，不该还要重启宿主才生效。
+ *
+ * **绝不抛错**：注入渲染失败会让整个 prompt assembly 失败，
+ * 比少一段判据严重得多。读不到就返回 null，`renderWriteRoutes` 会跳过该节。
+ *
+ * 为什么同步读文件而不是用 `loadSchema`（async）：注入的 `text` 必须同步返回 string。
+ * 判据文件很小（几 KB），且按 mtime 缓存，命中时零 IO。
+ */
+let routesCache = { mtimeMs: -1, routes: null };
+
+function writeRoutesFor() {
+  const schema = schemaFor();
+  return schema?.writeRoutes ?? null;
+}
+
+/** 维度判据（照 v0.3.7 的 `dimensions` 结构），同一份缓存。 */
+function dimensionsFor() {
+  const schema = schemaFor();
+  return schema?.dimensions ?? null;
+}
+
+/** 同步读 schema（按 mtime 缓存）；读不到返回 null，绝不抛错。 */
+function schemaFor() {
+  try {
+    const file = path.join(TEMPLATE_DIR, 'schema.json');
+    const stat = fs.statSync(file);
+    if (stat.mtimeMs === routesCache.mtimeMs) return routesCache.schema;
+
+    const schema = JSON.parse(fs.readFileSync(file, 'utf8'));
+    routesCache = { mtimeMs: stat.mtimeMs, schema };
+    return schema;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -139,7 +139,7 @@ test('K5 dtm_retag 的 basis 必须必填（契约 §五.2、流程_整理 §七
 /* ------------------------------------------------------------------ *
  * K6 dtm_write 只暴露模型 5 个字段
  * ------------------------------------------------------------------ */
-test('K6 dtm_write 参数恰为模型 5 个，绝不暴露 编号/稳定性/时距/状态', () => {
+test('K6 dtm_write 参数恰为模型 6 个，绝不暴露 编号/时距/状态', () => {
   const ctx = createFakeCtx()
   registerTools(ctx, {})
 
@@ -148,25 +148,35 @@ test('K6 dtm_write 参数恰为模型 5 个，绝不暴露 编号/稳定性/时�
 
   const keys = Object.keys(write.parameters.properties)
 
-  const MUST_HAVE = ['主要内容', '形态', '项目', '智能体', '自由标签']
+  // 2026-11-08：`稳定性` 从程序字段改为模型可判（「这条会不会变」只有写它的模型知道）。
+  const MUST_HAVE = ['主要内容', '形态', '项目', '智能体', '自由标签', '稳定性']
   for (const f of MUST_HAVE) {
     assert.ok(keys.includes(f), `dtm_write 必须含模型字段「${f}」，实际参数：${keys.join(', ')}`)
   }
 
-  const FORBIDDEN = ['编号', '稳定性', '时距', '状态']
+  // 编号/时距/状态 仍是程序字段，绝不能暴露给模型
+  const FORBIDDEN = ['编号', '时距', '状态']
   for (const f of FORBIDDEN) {
     assert.equal(
       keys.includes(f),
       false,
-      `dtm_write 绝不能暴露程序字段「${f}」（《流程_写入》§三：模型不传这些），实际参数：${keys.join(', ')}`,
+      `dtm_write 绝不能暴露程序字段「${f}」，实际参数：${keys.join(', ')}`,
     )
   }
+
+  // 稳定性必须给出合法值域（enum），否则模型会瞎填
+  const st = write.parameters.properties['稳定性']
+  assert.ok(Array.isArray(st.enum) && st.enum.length === 3, `稳定性 必须带 3 个 enum 值，实际：${JSON.stringify(st.enum)}`)
+  assert.ok(
+    !(write.parameters.required ?? []).includes('稳定性'),
+    '稳定性 应可选（不给则落状态机起点「观察」）',
+  )
 })
 
 /* ------------------------------------------------------------------ *
  * K7 dtm_recall 参数：项目/智能体 可选（省略取绑定值）、形态必填、标签可选
  * ------------------------------------------------------------------ */
-test('K7 dtm_recall：形态必填；项目/智能体可选（省略取绑定值）；自由标签可选', () => {
+test('K7 dtm_recall：形态/项目/智能体 三者必填；自由标签可选', () => {
   const ctx = createFakeCtx()
   registerTools(ctx, {})
 
@@ -176,16 +186,14 @@ test('K7 dtm_recall：形态必填；项目/智能体可选（省略取绑定值
   const p = recall.parameters.properties
   const required = recall.parameters.required ?? []
 
-  assert.ok(p['形态'], 'dtm_recall 必须有 形态 参数')
-  assert.ok(
-    required.includes('形态'),
-    `形态 必须必填（《流程_读取》§三：不给则拒查），实际 required：${JSON.stringify(required)}`,
-  )
-
-  // Lead 裁决：项目/智能体 在 recall 里可选，省略取当前绑定值
-  for (const f of ['项目', '智能体']) {
+  // 2026-11-08 裁决：不补默认值 → 三个字段都必须由模型显式给出。
+  // 曾经 项目/智能体 可选（省略取绑定值），后果是「模型没按标准填」被兜底掩盖。
+  for (const f of ['形态', '项目', '智能体']) {
     assert.ok(p[f], `dtm_recall 必须有 ${f} 参数`)
-    assert.ok(!required.includes(f), `${f} 应可选（省略取当前绑定值），不应出现在 required 数组里`)
+    assert.ok(
+      required.includes(f),
+      `${f} 必须必填（不补默认值），实际 required：${JSON.stringify(required)}`,
+    )
   }
 
   assert.ok(p['自由标签'], 'dtm_recall 必须有 自由标签 参数')
@@ -217,12 +225,14 @@ test('K8 每个工具都有 output.schema 与 output.render（否则模型看不
 /* ------------------------------------------------------------------ *
  * K-附加 预设入口 apply 能跑通，且注册与注入都发生
  * ------------------------------------------------------------------ */
-test('K-附加 preset/index.js 的 apply 能完整跑通：注册 10 工具 + 注册 1 段注入', () => {
+test('K-附加 preset/index.js 的 apply 能完整跑通：注册 10 工具 + 1 段注入 + 1 段身份上下文', () => {
   const ctx = createFakeCtx()
   applyPreset(ctx, {})
 
   assert.equal(ctx.__tools.length, 10, `apply 后应注册 10 个工具，实际 ${ctx.__tools.length}`)
-  assert.equal(ctx.__sections.length, 1, `应注册 1 段系统提示注入，实际 ${ctx.__sections.length}`)
+  assert.equal(ctx.__sections.length, 1, `应注册 1 段固定注入（section），实际 ${ctx.__sections.length}`)
+  // 身份必须走 context 而非 section —— 否则每轮毁掉系统提示词缓存前缀
+  assert.equal(ctx.__contexts.length, 1, `应注册 1 段身份上下文（context），实际 ${ctx.__contexts.length}`)
 
   // HOST_SERVICE 必须是个非空字符串（preset 惰性取宿主服务的键）
   assert.equal(typeof HOST_SERVICE, 'string')

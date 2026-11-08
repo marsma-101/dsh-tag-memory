@@ -236,12 +236,12 @@ test('D12 标签 ["a","","a","b"] → 去重滤空得 ["a","b"]，不报错，�
 /* ------------------------------------------------------------------ *
  * D13 程序填的 4 个字段；模型硬塞 → 忽略并覆盖，不报错
  * ------------------------------------------------------------------ */
-test('D13 程序填 4 字段；模型硬塞 稳定性/时距/状态/编号 → 忽略并覆盖为程序值，不报错', () => {
+test('D13 程序填 3 字段；模型给的 稳定性 采纳（合法时），时距/状态/编号 一律覆盖', () => {
   const now = new Date(2026, 10, 5, 12, 0, 0) // 本地 2026-11-05 12:00
   const existingIds = ['M-20261105-007']
 
   const input = baseInput({
-    稳定性: '稳定', // 硬塞：程序值应是 观察
+    稳定性: '稳定', // 模型可判（2026-11-08 起）：合法 → 采纳
     时距: 99, // 硬塞：程序值应是 1
     状态: '已归档', // 硬塞：程序值应是 生效
     编号: 'M-19990101-999', // 硬塞：程序应自己取号
@@ -251,17 +251,48 @@ test('D13 程序填 4 字段；模型硬塞 稳定性/时距/状态/编号 → �
 
   assert.equal(built.ok, true, `硬塞程序字段不得导致失败，实际错误：${built.errors.map((e) => e.code).join(',')}`)
 
-  // 4 个程序字段必须被覆盖为程序值
+  // 编号/时距/状态 是程序字段，必须被覆盖
   assert.equal(built.record['编号'], 'M-20261105-008', `编号必须是程序取的号，实际「${built.record['编号']}」`)
-  assert.equal(built.record['稳定性'], '观察', `稳定性必须是「观察」，实际「${built.record['稳定性']}」`)
   assert.equal(built.record['时距'], 1, `时距必须是 1，实际 ${built.record['时距']}`)
   assert.equal(built.record['状态'], '生效', `状态必须是「生效」，实际「${built.record['状态']}」`)
 
-  // ignored 应记录被丢弃的程序字段（供排查，不是错误）
+  // 稳定性归模型判：给了合法值就采纳，不再强制「观察」
+  assert.equal(
+    built.record['稳定性'],
+    '稳定',
+    `模型给的合法 稳定性 应被采纳，实际「${built.record['稳定性']}」`,
+  )
+
+  // ignored 只记真正的程序字段（稳定性不再是程序字段）
   assert.ok(Array.isArray(built.ignored), 'ignored 应是数组')
-  for (const f of ['稳定性', '时距', '状态', '编号']) {
+  for (const f of ['时距', '状态', '编号']) {
     assert.ok(built.ignored.includes(f), `ignored 应含「${f}」，实际：${built.ignored.join(',')}`)
   }
+  assert.ok(
+    !built.ignored.includes('稳定性'),
+    `稳定性 已归模型判，不应出现在 ignored 里，实际：${built.ignored.join(',')}`,
+  )
+})
+
+/* ------------------------------------------------------------------ *
+ * D13b 稳定性：不给 → 状态机起点「观察」；给非法值 → 拒
+ * ------------------------------------------------------------------ */
+test('D13b 稳定性缺省 → 落「观察」起点；给非法值 → STABILITY_INVALID 拒写', () => {
+  const now = new Date(2026, 10, 5, 12, 0, 0)
+  const existingIds = []
+
+  // 不给：落状态机起点「观察」，**不报错**（缺它不是错误，是「还没验证过」）
+  const a = buildNewRecord({ input: baseInput({}), existingIds, schema, now })
+  assert.equal(a.ok, true, '不给 稳定性 不应拒写')
+  assert.equal(a.record['稳定性'], '观察', `缺省应落「观察」起点，实际「${a.record['稳定性']}」`)
+
+  // 给非法值：必须拒，并点名合法值域
+  const b = buildNewRecord({ input: baseInput({ 稳定性: '很稳' }), existingIds, schema, now })
+  assert.equal(b.ok, false, '非法 稳定性 必须拒写')
+  const err = b.errors.find((e) => e.code === 'STABILITY_INVALID')
+  assert.ok(err, `必须报 STABILITY_INVALID，实际：${b.errors.map((e) => e.code).join(',')}`)
+  assert.deepEqual(err.detail.allowed, schema.stabilities, '报错必须给出合法值域')
+  assert.ok(err.message.includes('会不会变'), '报错必须给出判据')
 })
 
 /* ------------------------------------------------------------------ *
@@ -375,13 +406,13 @@ test("D18 自由标签 = ['',''] → 滤空后为空 → 拒写 TAGS_EMPTY", () 
 /* ------------------------------------------------------------------ *
  * D-附加 MODEL_FIELDS / PROGRAM_FIELDS 契约
  * ------------------------------------------------------------------ */
-test('D-附加 MODEL_FIELDS 恰为 5 个、PROGRAM_FIELDS 恰为 4 个，且与 9 列互补', () => {
-  assert.equal(MODEL_FIELDS.length, 5, `模型字段必须是 5 个，实际 ${MODEL_FIELDS.length}`)
-  assert.equal(PROGRAM_FIELDS.length, 4, `程序字段必须是 4 个，实际 ${PROGRAM_FIELDS.length}`)
+test('D-附加 MODEL_FIELDS 6 个、PROGRAM_FIELDS 3 个，且与 9 列互补', () => {
+  assert.equal(MODEL_FIELDS.length, 6, `模型字段必须是 6 个，实际 ${MODEL_FIELDS.length}`)
+  assert.equal(PROGRAM_FIELDS.length, 3, `程序字段必须是 3 个，实际 ${PROGRAM_FIELDS.length}`)
 
   const union = [...MODEL_FIELDS, ...PROGRAM_FIELDS].sort()
   const columns = [...schema.columns].sort()
-  assert.deepEqual(union, columns, '模型 5 + 程序 4 必须恰好覆盖 9 列，不多不少')
+  assert.deepEqual(union, columns, '模型 6 + 程序 3 必须恰好覆盖 9 列，不多不少')
 
   // 交集必须为空（不能有字段既是模型填又是程序填）
   const overlap = MODEL_FIELDS.filter((f) => PROGRAM_FIELDS.includes(f))

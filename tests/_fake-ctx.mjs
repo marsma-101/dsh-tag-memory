@@ -6,7 +6,8 @@
 /**
  * 造一个最小 ctx。
  * - tools.register   收集工具定义
- * - systemPrompt.section 收集注入段
+ * - systemPrompt.section 收集注入段（固定判据，进系统提示词前缀）
+ * - systemPrompt.context 收集动态上下文（身份状态，进历史、不毁缓存）
  * - effect           立即执行并在 dispose 时回滚
  * - get              返回注入的服务（供 preset 惰性取宿主服务）
  * - logger           空实现
@@ -14,11 +15,13 @@
 export function createFakeCtx({ services = {} } = {}) {
   const tools = []
   const sections = []
+  const contexts = []
   const disposers = []
 
   const ctx = {
     __tools: tools,
     __sections: sections,
+    __contexts: contexts,
     __disposers: disposers,
 
     tools: {
@@ -33,6 +36,12 @@ export function createFakeCtx({ services = {} } = {}) {
     systemPrompt: {
       section(opts) {
         sections.push(opts)
+        const dispose = () => {}
+        disposers.push(dispose)
+        return dispose
+      },
+      context(opts) {
+        contexts.push(opts)
         const dispose = () => {}
         disposers.push(dispose)
         return dispose
