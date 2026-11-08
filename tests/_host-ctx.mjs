@@ -78,7 +78,17 @@ export async function makeHostCtx(opts = {}) {
 
   // ⚠️ 投影服务必须在 apply 之前挂好
   // 真实签名：stateOf(session, key) —— 不是 stateOf()
-  const fakeSession = { id: 'qa-session' }
+  //
+  // 语义要对齐真实宿主：`stateOf` 读的是**投影状态**，而 `dtm_bind` 会写它。
+  // 所以这里不能返回一个永远不变的常量——否则 bindIdentity 绑了也白绑，
+  // 测试会看到"绑定无效"的假象（2026-11-08 踩过：F1b 因此失败）。
+  const fakeSession = {
+    id: 'qa-session',
+    // 真实 session 用 append 记录事件；投影服务据事件更新状态
+    append(_type, data) {
+      if (data && typeof data === 'object') identityRef.value = data
+    },
+  }
   services.sessionProjections = {
     stateOf: (_session, _key) => identityRef.value,
     register: (def) => {

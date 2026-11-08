@@ -449,7 +449,27 @@ function createHostService(ctx, config) {
    */
   function identityOfSync(agent) {
     try {
-      // 1) 投影优先：能读到就以投影为准（resume/fork 可重建，是正路）
+      // ⚠️ **进程内绑定优先，投影兜底**（2026-11-08 修正，此前顺序相反）。
+      //
+      // 为什么必须这个顺序：`bindIdentity` 不 append 自造事件（`practices.md:21`
+      // 禁止新 event type），所以它只写进程内 WeakMap。而投影是从**既有事件**
+      // （`tool/call`、`command/run`）fold 出来的。
+      //
+      // 旧顺序（投影优先）在真实容器里会出一个死结：会话里已经 fold 出一个身份
+      // （比如上一次 `dtm_bind` 留下的 `qa-agent`），用户这次调 `dtm_bind` 换一个
+      // 名字，WeakMap 写了新值，但 `identityOfSync` 先读投影、拿到旧值，
+      // **新绑定被静默丢弃**——表现为"绑了没生效，写进去还是旧身份"。
+      // F1b 测试就是这么发现的。
+      //
+      // 反过来（WeakMap 优先）是对的：WeakMap 里的值就是本次会话**最近一次
+      // 显式 `dtm_bind`** 的结果，语义上比投影里的历史值更新。
+      // 投影仍然重要——它让 resume/fork 后身份能重建（此时 WeakMap 已随进程消失，
+      // 自然落到投影分支）。
+      if (agent && typeof agent === 'object') {
+        const cached = identityFallback.get(agent);
+        if (cached && cached.智能体) return { ...cached };
+      }
+      // 投影：resume / fork 后重建身份的正路
       const session = agent?.session;
       if (session) {
         const projections = ctx.get?.('sessionProjections');
@@ -459,11 +479,6 @@ function createHostService(ctx, config) {
             return { 智能体: state.智能体, 项目: state.项目 ?? '' };
           }
         }
-      }
-      // 2) 进程内兜底：投影读不到（宿主方法被直接调用 / 事件还没进投影）时用它
-      if (agent && typeof agent === 'object') {
-        const cached = identityFallback.get(agent);
-        if (cached && cached.智能体) return { ...cached };
       }
       return null;
     } catch {
@@ -817,12 +832,23 @@ function createHostService(ctx, config) {
     }
 
     const count = (s) => records.filter((r) => str(r['状态']) === s).length;
+
+    // `byStatus` 是给 UI 用的**自描述**结构：状态名 + 条数，顺序取自字典
+    // （`schema.statuses`）。这样前端不需要知道有哪几个状态、也不需要维护
+    // 「状态名 → 字段名」的映射表——加一个状态只改字典，界面自动跟上。
+    //
+    // 保留 active/superseded/archived 三个具名字段是为了兼容既有调用方
+    // （契约里已声明），但它们不该是 UI 的唯一来源。
+    const statuses = arr(schema.statuses).filter((s) => str(s) !== '');
+    const byStatus = statuses.map((s) => ({ 状态: str(s), 数量: count(str(s)) }));
+
     return {
       ok: true,
       total: records.length,
       active: count('生效'),
       superseded: count('被取代'),
       archived: count('已归档'),
+      byStatus,
       dataDir: layout.dataDir,
       dataDirSource: source,
       libraryIncompatible: false,

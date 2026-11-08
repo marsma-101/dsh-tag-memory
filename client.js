@@ -97,6 +97,8 @@ window.__ModuleLoader__.load({
 .dtm-input:disabled{color:var(--dsw-alias-label-caption);cursor:default}
 .dtm-input-sm{height:28px;font-size:12px;padding:0 8px;width:auto;min-width:64px}
 textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px}
+/* 新建值的输入框：跟上面的下拉框贴紧，用顶部虚线表示"这是新开的" */
+.dtm-input-new{margin-top:6px;border-style:dashed}
 
 /* ---- 筛选栏 ---- */
 .dtm-filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;align-items:end}
@@ -830,14 +832,19 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
     // 这条比"设 readonly 属性"更彻底：攻击面为零，因为压根没有可写的入口。
     // ────────────────────────────────────────────────────────────────
 
-    /** 六个形态（取值域来自《功能说明》§四，顺序固定）。 */
-    const SHAPES = ['技能', '流程', '规则', '偏好', '事实', '模板']
-    /** 稳定性三态（《架构说明》§八）。 */
-    const STABILITIES = ['观察', '稳定', '易变']
-    /** 状态三态（《架构说明》§八）。 */
-    const STATUSES = ['生效', '被取代', '已归档']
-    /** 两个隔离维度的通用取值（《架构说明》§九）。 */
-    const UNIVERSAL = ['通用', '引入']
+    // ────────────────────────────────────────────────────────────────
+    // **取值域一律来自宿主，前端不写死任何业务值**（2026-11-08 用户裁定）
+    //
+    // 之前这里写死过 SHAPES / STABILITIES / STATUSES / UNIVERSAL 四个常量，
+    // 并在宿主取不到时"退回"它们。那是兜底，而且是有害的兜底：
+    //   · 字典改了（加形态、改稳定性），前端还在用旧值，界面上就出现
+    //     一批宿主不认的选项 —— 用户选了，写入被拒，还以为是自己操作错
+    //   · 库是空的、或某个维度还没有任何值，前端照样显示"标准答案"，
+    //     掩盖了"这里确实还没有值"这个事实
+    //
+    // 现在：宿主 getFacets() 给什么就显示什么。给空数组就显示空。
+    // 拿不到 facets 就什么都不显示，并把问题暴露出来（而不是假装正常）。
+    // ────────────────────────────────────────────────────────────────
 
     /** 自由标签上限（《功能说明》§6.4）。 */
     const TAGS_MAX = 20
@@ -889,18 +896,13 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       const tagId = 'dtm-filter-tags'
       // 宿主 getFacets() 用**中文键**返回（与 CSV 列名/台账字段一致，零映射）：
       //   { 项目:[], 智能体:[], 形态:[], 状态:[], 稳定性:[], allowedShapes:[], ... }
+      //
+      // 这里**不给兜底**：宿主没给就是没有，显示空列表。
+      // 理由见上面取值域说明——退回硬编码会让界面和宿主说两套话。
       const projects = (facets && facets['项目']) || []
       const agents = (facets && facets['智能体']) || []
-      // 取值域优先用宿主给的 allowed*（来自 schema.json），拿不到再退回内置常量，
-      // 这样以后改取值域只改宿主侧，前端不用跟。
-      const shapeOptions =
-        facets && Array.isArray(facets.allowedShapes) && facets.allowedShapes.length
-          ? facets.allowedShapes
-          : SHAPES
-      const statusOptions =
-        facets && Array.isArray(facets.allowedStatuses) && facets.allowedStatuses.length
-          ? facets.allowedStatuses
-          : STATUSES
+      const shapeOptions = (facets && facets.allowedShapes) || []
+      const statusOptions = (facets && facets.allowedStatuses) || []
 
       return h(
         'div',
@@ -927,7 +929,10 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
           h(
             'datalist',
             { id: 'dtm-facet-projects' },
-            UNIVERSAL.concat(projects).map(function (opt) {
+            // 不额外拼「通用/引入」：它们是库里的**记录值**，真被用过就已在
+            // facets['项目'] 里；没人用过就不该出现在候选里（凭空出现会让人
+            // 以为这是个可以随便选的维度值）。
+            projects.map(function (opt) {
               return h('option', { key: opt, value: opt })
             }),
           ),
@@ -952,7 +957,7 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
           h(
             'datalist',
             { id: 'dtm-facet-agents' },
-            UNIVERSAL.concat(agents).map(function (opt) {
+            agents.map(function (opt) {
               return h('option', { key: opt, value: opt })
             }),
           ),
@@ -1182,11 +1187,23 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       const { overview } = props
       if (!overview) return null
 
-      function countOf(status) {
-        const field = STATUS_COUNT_FIELD[status]
-        const n = field ? overview[field] : undefined
-        return String(n == null ? 0 : n)
-      }
+      // 状态统计**只遍历宿主给的 byStatus**（自描述：状态名 + 条数）。
+      //
+      // 之前这里写死了「生效/被取代/已归档」三个名字，并维护一张
+      // 状态名 → 字段名 的映射表。那是兜底式假设：字典若增删状态，
+      // 界面要么少显示一栏，要么显示一栏恒为 0 的僵尸统计。
+      //
+      // 宿主没给 byStatus（旧版宿主）就退到具名字段——这是**兼容旧宿主**，
+      // 不是猜业务值：字段名来自契约，不是业务字典。
+      const stats = Array.isArray(overview.byStatus) && overview.byStatus.length > 0
+        ? overview.byStatus.map(function (s) {
+            return { label: String(s['状态']), n: String(s['数量'] == null ? 0 : s['数量']) }
+          })
+        : [
+            { label: '生效', n: String(overview.active == null ? 0 : overview.active) },
+            { label: '被取代', n: String(overview.superseded == null ? 0 : overview.superseded) },
+            { label: '已归档', n: String(overview.archived == null ? 0 : overview.archived) },
+          ]
 
       return h(
         'div',
@@ -1197,12 +1214,12 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
           h('span', { className: 'dtm-stat-num' }, String(overview.total == null ? 0 : overview.total)),
           h('span', { className: 'dtm-caption' }, t('statTotal')),
         ),
-        STATUSES.map(function (s) {
+        stats.map(function (s) {
           return h(
             'div',
-            { className: 'dtm-stat', key: s },
-            h('span', { className: 'dtm-stat-num' }, countOf(s)),
-            h('span', { className: 'dtm-caption' }, s),
+            { className: 'dtm-stat', key: s.label },
+            h('span', { className: 'dtm-stat-num' }, s.n),
+            h('span', { className: 'dtm-caption' }, s.label),
           )
         }),
         overview.dataDir
@@ -1368,23 +1385,19 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
         })
       }
 
+      // 哪个 combo 字段切到了「新建…」（null = 都在选择态）
+      const [creating, setCreating] = React.useState(null)
+
       // 宿主 getFacets() 用中文键（与 CSV 列名一致）
+      //
+      // **一律不给兜底**：宿主返回什么就显示什么，返回空数组就显示空。
+      // 前端写死取值域是有害的——字典改了这里不跟，用户会选到宿主不认的值，
+      // 提交被拒还以为是自己的问题。
       const projects = (facets && facets['项目']) || []
       const agents = (facets && facets['智能体']) || []
-      // 取值域优先取宿主 allowed*（来自 lib/engine/templates/schema.json），
-      // 拿不到再退回内置常量 —— 改取值域只改宿主，前端不用跟。
-      const shapeOptions =
-        facets && Array.isArray(facets.allowedShapes) && facets.allowedShapes.length
-          ? facets.allowedShapes
-          : SHAPES
-      const stabilityOptions =
-        facets && Array.isArray(facets.allowedStabilities) && facets.allowedStabilities.length
-          ? facets.allowedStabilities
-          : STABILITIES
-      const statusOptions =
-        facets && Array.isArray(facets.allowedStatuses) && facets.allowedStatuses.length
-          ? facets.allowedStatuses
-          : STATUSES
+      const shapeOptions = (facets && facets.allowedShapes) || []
+      const stabilityOptions = (facets && facets.allowedStabilities) || []
+      const statusOptions = (facets && facets.allowedStatuses) || []
 
       function submit() {
         // 只提交 6 个可改字段；`before` 供宿主写 tidy.jsonl 的改动前后值。
@@ -1433,31 +1446,85 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
         )
       }
 
+      /**
+       * `项目` / `智能体` 的可选可填控件。
+       *
+       * **为什么不用 `<input list>` + `<datalist>`**（2026-11-08 用户反馈）：
+       * 浏览器会按输入框当前内容**过滤** datalist 候选。编辑时输入框预填了
+       * 原值（如 `dsh`），点开只显示匹配 `dsh` 的那一项——看起来"只有一个值，
+       * 就是原有的"，等于改不了。筛选栏没这问题，因为初始为空。
+       *
+       * 改成 `<select>`：全部已有值 + 「通用/引入」+ 一个「新建…」项。
+       * 选「新建…」才切到输入框，避免下拉里塞满输入框。
+       */
       function comboRow(labelKey, key, options) {
         const id = 'dtm-edit-' + key
-        const listId = 'dtm-edit-list-' + key
+        const createId = 'dtm-edit-create-' + key
+        const CREATE = '__dtm_create__'
+
+        // 候选**只有库里真实出现过的值**（宿主 getFacets 扫库得到）。
+        // 不额外拼「通用/引入」——它们若真被用过就已经在 options 里了；
+        // 凭空加进去会让人以为可以随便选，实际选了个没人用过的值只会让
+        // 这条记忆跟谁都对不上。
+        //
+        // 当前值若不在候选里，也要补进去：否则 select 找不到匹配项会显示
+        // 成空白，原值看着像被清掉了。
+        const seen = new Set()
+        const cands = []
+        for (const v of options) {
+          const s = String(v == null ? '' : v)
+          if (s !== '' && !seen.has(s)) { seen.add(s); cands.push(s) }
+        }
+        const current = String(draft[key] == null ? '' : draft[key])
+        if (current !== '' && !seen.has(current)) cands.push(current)
+
+        // 正在新建：草稿值不在候选里，或用户主动切到了「新建…」
+        const isNew = current !== '' && !seen.has(current)
+        const showInput = isNew || creating === key
+
+        function onSelect(e) {
+          const v = e.target.value
+          if (v === CREATE) {
+            setCreating(key)
+            // 切到输入框，清掉原值让用户直接打新的
+            set(key, '')
+            return
+          }
+          setCreating(null)
+          set(key, v)
+        }
+
         return h(
           'div',
           { className: 'dtm-field' },
           h('label', { className: 'dtm-field-label', htmlFor: id }, t(labelKey)),
-          h('input', {
-            id,
-            className: 'dtm-input',
-            type: 'text',
-            list: listId,
-            value: draft[key],
-            disabled: !!busy,
-            autoComplete: 'off',
-            // 候选来自宿主已有值 —— 防打错字导致隔离失效（§10.3 硬要求）
-            onChange: function (e) { set(key, e.target.value) },
-          }),
           h(
-            'datalist',
-            { id: listId },
-            UNIVERSAL.concat(options).map(function (opt) {
-              return h('option', { key: opt, value: opt })
+            'select',
+            {
+              id,
+              className: 'dtm-input',
+              value: showInput ? CREATE : current,
+              disabled: !!busy,
+              onChange: onSelect,
+            },
+            h('option', { value: '' }, '—'),
+            cands.map(function (opt) {
+              return h('option', { key: opt, value: opt }, opt)
             }),
+            h('option', { key: CREATE, value: CREATE }, t('optCreateNew')),
           ),
+          showInput
+            ? h('input', {
+                id: createId,
+                className: 'dtm-input dtm-input-new',
+                type: 'text',
+                value: current,
+                disabled: !!busy,
+                autoComplete: 'off',
+                placeholder: t('phCreateNew'),
+                onChange: function (e) { set(key, e.target.value) },
+              })
+            : null,
         )
       }
 
@@ -1816,14 +1883,25 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       const [exportErr, setExportErr] = React.useState(false)
       const [notice, setNotice] = React.useState(null)
 
+      // 字典预览卡片要显示**宿主真实的取值域**（不是前端写死的常量），
+      // 所以这里一并取 facets —— 它带 allowedShapes/allowedStabilities/
+      // allowedStatuses，正是 schema.json 里那份字典。
+      const [facets, setFacets] = React.useState(null)
+
       const load = React.useCallback(function () {
         if (!api) return
         let alive = true
         setBusy(true)
         setError(null)
-        Promise.resolve()
-          .then(function () { return api.getSettings() })
-          .then(function (value) { if (alive) setSettings(value || null) })
+        Promise.all([
+          api.getSettings().catch(function () { return null }),
+          api.getFacets().catch(function () { return null }),
+        ])
+          .then(function (results) {
+            if (!alive) return
+            setSettings(results[0] || null)
+            setFacets(results[1] || null)
+          })
           .catch(function (err) {
             if (alive) setError(err && err.message ? err.message : String(err))
           })
@@ -1941,6 +2019,28 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       }
 
       const s = settings || {}
+
+      /**
+       * 字典卡片的一行：标签 + chips。
+       *
+       * 值来自宿主 facets（= schema.json）。宿主没给就显示「—」并说明原因，
+       * **不退回写死的常量**——那会让界面显示的字典和宿主实际认的不是一回事。
+       */
+      function dictRow(labelKey, values) {
+        const list = Array.isArray(values) ? values.filter(function (x) { return String(x || '') !== '' }) : []
+        return h(
+          'div',
+          { className: 'dtm-kv' },
+          h('span', { className: 'dtm-kv-key' }, t(labelKey)),
+          h(
+            'span',
+            { className: 'dtm-kv-val dtm-chips' },
+            list.length > 0
+              ? list.map(function (x) { return h('span', { key: String(x), className: 'dtm-chip' }, String(x)) })
+              : h('span', { className: 'dtm-caption' }, t('dictUnavailable')),
+          ),
+        )
+      }
       // 数据目录来源：宿主直接给字符串（`resolveDataDir` 原生返回值，零转换）
       //   'config'   → 部署配置（优先级 ①，搬家不生效）
       //   'env'      → 环境变量（优先级 ②，搬家不生效）
@@ -2266,36 +2366,11 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
             h('p', { className: 'dtm-title' }, t('cardDictTitle')),
             h('p', { className: 'dtm-desc' }, t('cardDictDesc')),
           ),
-          h(
-            'div',
-            { className: 'dtm-kv' },
-            h('span', { className: 'dtm-kv-key' }, t('dictShapes')),
-            h(
-              'span',
-              { className: 'dtm-kv-val dtm-chips' },
-              SHAPES.map(function (x) { return h('span', { key: x, className: 'dtm-chip' }, x) }),
-            ),
-          ),
-          h(
-            'div',
-            { className: 'dtm-kv' },
-            h('span', { className: 'dtm-kv-key' }, t('dictStabilities')),
-            h(
-              'span',
-              { className: 'dtm-kv-val dtm-chips' },
-              STABILITIES.map(function (x) { return h('span', { key: x, className: 'dtm-chip' }, x) }),
-            ),
-          ),
-          h(
-            'div',
-            { className: 'dtm-kv' },
-            h('span', { className: 'dtm-kv-key' }, t('dictStatuses')),
-            h(
-              'span',
-              { className: 'dtm-kv-val dtm-chips' },
-              STATUSES.map(function (x) { return h('span', { key: x, className: 'dtm-chip' }, x) }),
-            ),
-          ),
+          // 三行 chips 全部来自宿主 facets（= schema.json 的字典），
+          // 前端不写死任何取值域。宿主没给就显示「—」，不假装有值。
+          dictRow('dictShapes', facets && facets.allowedShapes),
+          dictRow('dictStabilities', facets && facets.allowedStabilities),
+          dictRow('dictStatuses', facets && facets.allowedStatuses),
           s.dictText
             ? h('pre', { className: 'dtm-dict-pre' }, s.dictText)
             : null,
@@ -2699,6 +2774,9 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       editorNoApi: '尚未连接到宿主，无法保存。',
       editorSaved: '已保存。',
       editorReadonlyHint: '以下三项只读：原文是一手材料、编号是唯一标识、时距是程序计数器。',
+      optCreateNew: '＋ 新建…',
+      phCreateNew: '输入新值',
+      dictUnavailable: '—（宿主未提供，检查插件是否正常装配）',
       editorNote: '只改标签，原文不动。保存后会记入 tidy.jsonl（action=user_edit）。',
       editorSave: '保存',
       editorSaving: '保存中…',
@@ -2843,6 +2921,9 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       editorNoApi: 'Not connected to the host, so nothing can be saved.',
       editorSaved: 'Saved.',
       editorReadonlyHint: 'The three fields below are read-only: the original text is source material, the ID is the unique identity, and the tick is a program counter.',
+      optCreateNew: '+ New…',
+      phCreateNew: 'Enter a new value',
+      dictUnavailable: '— (not provided by host; check plugin assembly)',
       editorNote: 'Only tags change; the original text stays untouched. Saving records `action=user_edit` in tidy.jsonl.',
       editorSave: 'Save',
       editorSaving: 'Saving…',
