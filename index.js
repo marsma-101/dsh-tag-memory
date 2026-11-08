@@ -765,6 +765,18 @@ function createHostService(ctx, config) {
       return true;
     });
 
+    // 新的排前面（2026-11-08 用户反馈：界面里越早的越靠前，反直觉）。
+    //
+    // CSV 是追加写的，`records` 的天然顺序 = 从旧到新。界面直接用它，
+    // 结果是"最新的沉在最后一页"——想找刚记的那条得翻到底。
+    //
+    // 按 `编号` 倒序：编号格式 `M-YYYYMMDD-NNN`，日期与当日序号都单调递增，
+    // 所以字符串倒序 == 时间倒序。**不解析日期**——编号里已经带了顺序信息，
+    // 再解析一遍日期只会多一个出错的地方（跨日、补录、手工改号都会让它失准）。
+    // 用 localeCompare 而非裸比较：编号是纯 ASCII 数字，两者等价，但前者
+    // 在将来编号格式变动时不会因为编码差异给出意外结果。
+    matched.sort((a, b) => str(b['编号']).localeCompare(str(a['编号'])));
+
     const offset = Number.isFinite(filter.offset) ? Math.max(0, Math.trunc(filter.offset)) : 0;
     const limit = Number.isFinite(filter.limit) ? Math.max(0, Math.trunc(filter.limit)) : 50;
     const page = matched.slice(offset, offset + limit);
