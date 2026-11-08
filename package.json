@@ -1,6 +1,6 @@
 {
   "name": "dsh-tag-memory",
-  "version": "1.2.7",
+  "version": "1.2.8",
   "private": true,
   "type": "module",
   "description": "Tag-based long-term memory for DSH agents.",

@@ -899,8 +899,37 @@ function createHostService(ctx, config) {
    *
    * 只允许改 6 个字段；`编号`/`主要内容`/`时距` 出现即拒——**不信任前端**，
    * 「程序强制」意味着唯一实现里必须自己拦。
+   *
+   * ⚠️ **两种调用形状都要支持**（2026-11-08 修，此前只支持双参）：
+   *   · 工具侧：`retagEntry(agent, payload)` —— 有会话，身份从 agent 取
+   *   · UI 侧：  `retagEntry(payload)`        —— 远程端点只有 1 个参数
+   *     （`REMOTE_SIGNATURES.retagEntry = ['request']`），没有 agent
+   *
+   * 之前只声明双参，远程端点把 `request` 传进 `agent` 位、payload 位收到
+   * `undefined`，于是恒报 `ID_REQUIRED`——**界面上点保存看起来成功了，
+   * 其实什么都没改**（用户反馈的"改完保存刷新后没变化"就是这个）。
+   *
+   * 判别方式：看第一个实参**是不是 payload**（有 `编号`/`id`/`patch` 任一键
+   * 且没有 `.session`），是则整体右移一位。用形状判别而不是 arity，
+   * 因为远程包装器是用 `new Function` 生成的、`length` 不可靠。
    */
-  async function retagEntry(agent, { 编号, id, patch, basis, who, before } = {}) {
+  async function retagEntry(agentOrPayload, payloadArg) {
+    let agent = agentOrPayload;
+    let payload = payloadArg;
+
+    // UI 单参调用：第一个实参本身就是 payload
+    const looksLikePayload =
+      agentOrPayload &&
+      typeof agentOrPayload === 'object' &&
+      !agentOrPayload.session &&
+      ('编号' in agentOrPayload || 'id' in agentOrPayload || 'patch' in agentOrPayload);
+
+    if (looksLikePayload) {
+      agent = null;
+      payload = agentOrPayload;
+    }
+
+    const { 编号, id, patch, basis, who, before } = payload ?? {};
     const targetId = str(编号) || str(id);
     if (targetId === '') {
       return reject('ID_REQUIRED', '必须给出要改的条目 编号。', '编号');
