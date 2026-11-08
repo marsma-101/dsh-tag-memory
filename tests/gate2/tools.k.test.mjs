@@ -139,7 +139,7 @@ test('K5 dtm_retag 的 basis 必须必填（契约 §五.2、流程_整理 §七
 /* ------------------------------------------------------------------ *
  * K6 dtm_write 只暴露模型 5 个字段
  * ------------------------------------------------------------------ */
-test('K6 dtm_write 参数恰为模型 6 个，绝不暴露 编号/时距/状态', () => {
+test('K6 dtm_write 参数恰为模型 5 个，绝不暴露 编号/时距/状态/稳定性', () => {
   const ctx = createFakeCtx()
   registerTools(ctx, {})
 
@@ -148,14 +148,17 @@ test('K6 dtm_write 参数恰为模型 6 个，绝不暴露 编号/时距/状态'
 
   const keys = Object.keys(write.parameters.properties)
 
-  // 2026-11-08：`稳定性` 从程序字段改为模型可判（「这条会不会变」只有写它的模型知道）。
-  const MUST_HAVE = ['主要内容', '形态', '项目', '智能体', '自由标签', '稳定性']
+  // 2026-11-08 硬性裁定：`稳定性` 是**程序字段**，首次落库恒为「观察」。
+  // 新记忆是模型单方面写下的、未经系统性验证，自称「稳定」不算数；
+  // 稳定性只能由使用过程（时距累积 + feedback）经状态机事后演进。
+  // 所以它连参数都不该暴露——暴露了模型就会去填，填了还得丢弃，等于骗它。
+  const MUST_HAVE = ['主要内容', '形态', '项目', '智能体', '自由标签']
   for (const f of MUST_HAVE) {
     assert.ok(keys.includes(f), `dtm_write 必须含模型字段「${f}」，实际参数：${keys.join(', ')}`)
   }
 
-  // 编号/时距/状态 仍是程序字段，绝不能暴露给模型
-  const FORBIDDEN = ['编号', '时距', '状态']
+  // 程序字段，绝不能暴露给模型
+  const FORBIDDEN = ['编号', '时距', '状态', '稳定性']
   for (const f of FORBIDDEN) {
     assert.equal(
       keys.includes(f),
@@ -164,13 +167,7 @@ test('K6 dtm_write 参数恰为模型 6 个，绝不暴露 编号/时距/状态'
     )
   }
 
-  // 稳定性必须给出合法值域（enum），否则模型会瞎填
-  const st = write.parameters.properties['稳定性']
-  assert.ok(Array.isArray(st.enum) && st.enum.length === 3, `稳定性 必须带 3 个 enum 值，实际：${JSON.stringify(st.enum)}`)
-  assert.ok(
-    !(write.parameters.required ?? []).includes('稳定性'),
-    '稳定性 应可选（不给则落状态机起点「观察」）',
-  )
+  assert.equal(keys.length, 5, `dtm_write 参数必须恰好 5 个，实际 ${keys.length}：${keys.join(', ')}`)
 })
 
 /* ------------------------------------------------------------------ *

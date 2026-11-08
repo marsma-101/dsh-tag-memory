@@ -1345,6 +1345,9 @@ function createHostService(ctx, config) {
       promoteCandidates,
       config: {
         stableOkThreshold: Number(scoring?.stableOkThreshold ?? 3),
+        // 升格还必须「用过一段时间」：时距（被召回次数）≥ 门槛才允许升稳定。
+        // 只召回 1 次就升稳定 = 把「没被检验过」当成「检验通过」。
+        stableMinTick: Number(scoring?.stableMinTick ?? 3),
         promoteMinDistinct: Number(scoring?.promoteMinDistinct ?? 4),
         inductionMinOccasions: Number(scoring?.inductionMinOccasions ?? 3),
       },

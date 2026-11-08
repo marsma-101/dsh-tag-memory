@@ -85,36 +85,56 @@ test('K6 foldFeedback：空输入不抛', () => {
 })
 
 // ── nextStability（状态机）─────────────────────────────────
+//
+// 2026-11-08 硬性裁定：升格的第一前提是「用过一段时间」。
+// 时距（被召回次数）就是「用了多久」的量化——只召回 1 次就说它稳定，
+// 等于把「没被检验过」当成「检验通过」。所以升格必须同时满足时距门槛。
+// 降格不看时距：错了就是错了，越早降越好。
 
-test('K7 状态机：观察 + ok 达阈值 → 稳定', () => {
-  const r = nextStability({ 稳定性: '观察' }, { ok: 3, wrong: 0 }, { stableOkThreshold: 3 })
+test('K7 状态机：观察 + ok 达阈值 + 时距够 → 稳定', () => {
+  const r = nextStability({ 稳定性: '观察', 时距: 3 }, { ok: 3, wrong: 0 }, { stableOkThreshold: 3, stableMinTick: 3 })
   assert.equal(r.next, '稳定')
 })
 
-test('K8 状态机：ok 未达阈值不动', () => {
-  assert.equal(nextStability({ 稳定性: '观察' }, { ok: 2, wrong: 0 }, { stableOkThreshold: 3 }), null)
+test('K7b 状态机：ok 够了但时距不足 → 不升（留在观察继续积累）', () => {
+  const r = nextStability({ 稳定性: '观察', 时距: 1 }, { ok: 9, wrong: 0 }, { stableOkThreshold: 3, stableMinTick: 3 })
+  assert.equal(r, null, '时距 1 < 门槛 3：反馈再多也不许升——没用够久就是没验证过')
 })
 
-test('K9 状态机：有 wrong → 降易变', () => {
-  const r = nextStability({ 稳定性: '稳定' }, { ok: 9, wrong: 1 })
-  assert.equal(r.next, '易变')
+test('K7c 状态机：时距恰达门槛 → 允许升', () => {
+  const r = nextStability({ 稳定性: '观察', 时距: 3 }, { ok: 3, wrong: 0 }, { stableMinTick: 3 })
+  assert.equal(r.next, '稳定', '时距 3 >= 门槛 3 应放行')
+})
+
+test('K7d 状态机：时距缺省按 0 算 → 不升', () => {
+  const r = nextStability({ 稳定性: '观察' }, { ok: 99, wrong: 0 }, { stableMinTick: 3 })
+  assert.equal(r, null, '没有时距字段按 0 处理，达不到门槛')
+})
+
+test('K8 状态机：ok 未达阈值不动', () => {
+  assert.equal(nextStability({ 稳定性: '观察', 时距: 9 }, { ok: 2, wrong: 0 }, { stableOkThreshold: 3 }), null)
+})
+
+test('K9 状态机：有 wrong → 降易变（降格不看时距）', () => {
+  const r = nextStability({ 稳定性: '稳定', 时距: 1 }, { ok: 9, wrong: 1 }, { stableMinTick: 3 })
+  assert.equal(r.next, '易变', '时距再小也不妨碍降格——错了就该立刻降')
 })
 
 test('K10 状态机：已稳定不重复升', () => {
-  assert.equal(nextStability({ 稳定性: '稳定' }, { ok: 99, wrong: 0 }, { stableOkThreshold: 3 }), null)
+  assert.equal(nextStability({ 稳定性: '稳定', 时距: 9 }, { ok: 99, wrong: 0 }, { stableOkThreshold: 3 }), null)
 })
 
 test('K11 状态机：已易变且有 wrong 不重复降', () => {
-  assert.equal(nextStability({ 稳定性: '易变' }, { ok: 0, wrong: 5 }), null)
+  assert.equal(nextStability({ 稳定性: '易变', 时距: 9 }, { ok: 0, wrong: 5 }), null)
 })
 
 test('K12 状态机：易变安静 → 回观察（自愈）', () => {
-  const r = nextStability({ 稳定性: '易变' }, { ok: 0, wrong: 0 })
+  const r = nextStability({ 稳定性: '易变', 时距: 9 }, { ok: 0, wrong: 0 })
   assert.equal(r.next, '观察')
 })
 
 test('K13 状态机：无 feedback 不动', () => {
-  assert.equal(nextStability({ 稳定性: '观察' }, null), null)
+  assert.equal(nextStability({ 稳定性: '观察', 时距: 9 }, null), null)
 })
 
 // ── planPromote（升通用）──────────────────────────────────
@@ -228,7 +248,27 @@ test('K24 越界：不在白名单的字段也拒绝', () => {
 
 // ── planTidy（汇总）──────────────────────────────────────
 
-test('K25 planTidy：完整流程产出稳定性变更', () => {
+test('K25 planTidy：完整流程产出稳定性变更（时距够）', () => {
+  const r = planTidy({
+    records: [
+      { 编号: 'M-1', 稳定性: '观察', 形态: '技能', 项目: 'P', 智能体: 'A', 主要内容: 'x', 时距: 3, 状态: '生效' },
+    ],
+    readLogs: [
+      readOk('M-1', '2026-11-01T10:00:00+08:00'),
+      readOk('M-1', '2026-11-02T10:00:00+08:00'),
+      readOk('M-1', '2026-11-03T10:00:00+08:00'),
+    ],
+    writeLogs: [],
+    config: { stableOkThreshold: 3, stableMinTick: 3 },
+  })
+  assert.equal(r.changes.length, 1)
+  assert.equal(r.changes[0].field, '稳定性')
+  assert.equal(r.changes[0].after, '稳定')
+  assert.ok(r.changes[0].basis.includes('feedback'))
+  assert.ok(r.changes[0].basis.includes('时距'), '依据里必须写明时距，否则看不出凭什么升')
+})
+
+test('K25b planTidy：反馈够了但时距不足 → 不升格', () => {
   const r = planTidy({
     records: [
       { 编号: 'M-1', 稳定性: '观察', 形态: '技能', 项目: 'P', 智能体: 'A', 主要内容: 'x', 时距: 1, 状态: '生效' },
@@ -239,12 +279,9 @@ test('K25 planTidy：完整流程产出稳定性变更', () => {
       readOk('M-1', '2026-11-03T10:00:00+08:00'),
     ],
     writeLogs: [],
-    config: { stableOkThreshold: 3 },
+    config: { stableOkThreshold: 3, stableMinTick: 3 },
   })
-  assert.equal(r.changes.length, 1)
-  assert.equal(r.changes[0].field, '稳定性')
-  assert.equal(r.changes[0].after, '稳定')
-  assert.ok(r.changes[0].basis.includes('feedback'))
+  assert.equal(r.changes.length, 0, '时距 1 < 门槛 3：ok 再多也不许升稳定')
 })
 
 test('K26 planTidy：无反馈时零改动', () => {

@@ -1,12 +1,14 @@
-// 闸门② K8 组：工具层到宿主层的**字段透传**。
+// 闸门② K8 组：工具层到宿主层的**字段边界**。
 //
 // 为什么单独测这个：工具 schema 声明了某参数、宿主方法与 engine 也支持它，
-// 但中间层 `preset/tools.js` 漏传，是**静默降级**——不报错、不抛异常，
-// 模型给的判断被悄悄丢掉，落库值变成默认。
+// 但中间层 `preset/tools.js` 的透传清单，决定了模型给的值能不能到达 engine。
+// 清单多一项 → 越权字段漏进去；少一项 → 合法字段被静默丢弃。
+// 两种都是静默的：不报错、不抛异常，只有比对落库值才能发现。
 //
-// 真实事故（2026-11-08 容器实测）：`dtm_write` 声明了 `稳定性`，
-// 模型明确传 `稳定性="稳定"`，落库却是 `观察`——因为 executeWrite
-// 只透传了 5 个字段。这条测试守住它。
+// 2026-11-08 硬性裁定：`稳定性` 是**程序字段**，首次落库恒为 `观察`。
+// 新记忆是模型单方面写下的、未经系统性验证，自称「稳定」不算数；
+// 稳定性只能由使用过程（时距累积 + feedback）经状态机事后演进。
+// 所以它连参数都不暴露（见 K6），更不该被透传。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -40,9 +42,9 @@ function setup(result = { ok: true }) {
 const EXEC = { agent: { id: 'a1' } }
 
 /* ------------------------------------------------------------------ *
- * K8 dtm_write 必须把 6 个模型字段全部透传给宿主
+ * K8 dtm_write 只透传 5 个模型字段
  * ------------------------------------------------------------------ */
-test('K8 dtm_write 把 6 个模型字段全部透传（含 稳定性）', async () => {
+test('K8 dtm_write 只透传 5 个模型字段', async () => {
   const { calls, tool } = setup()
   const w = tool('dtm_write')
   assert.ok(w, 'dtm_write 必须注册')
@@ -54,7 +56,6 @@ test('K8 dtm_write 把 6 个模型字段全部透传（含 稳定性）', async 
       项目: '测试文件夹',
       智能体: '萧潇',
       自由标签: ['实测'],
-      稳定性: '稳定',
     },
     EXEC,
   )
@@ -64,23 +65,33 @@ test('K8 dtm_write 把 6 个模型字段全部透传（含 稳定性）', async 
   const payload = call.args[1]
   assert.ok(payload, 'writeEntry 第二个实参是写入内容')
 
-  for (const f of ['主要内容', '形态', '项目', '智能体', '自由标签', '稳定性']) {
-    assert.ok(f in payload, `dtm_write 必须透传「${f}」，否则模型给的判断被静默丢掉`)
+  for (const f of ['主要内容', '形态', '项目', '智能体', '自由标签']) {
+    assert.ok(f in payload, `dtm_write 必须透传「${f}」，否则合法字段被静默丢弃`)
   }
-  assert.equal(payload['稳定性'], '稳定', '稳定性 必须原样透传，不得在工具层改写或丢弃')
 })
 
 /* ------------------------------------------------------------------ *
- * K8b 不给 稳定性 时不伪造值（undefined 透传，由 engine 决定起点）
+ * K8b 稳定性 绝不透传：模型硬塞也进不去 engine
  * ------------------------------------------------------------------ */
-test('K8b dtm_write 不伪造 稳定性：没给就是 undefined', async () => {
+test('K8b 模型硬塞 稳定性 时，工具层不透传给宿主（程序字段）', async () => {
   const { calls, tool } = setup()
   await tool('dtm_write').execute(
-    { 主要内容: 'x', 形态: '事实', 项目: 'p', 智能体: 'a', 自由标签: ['t'] },
+    {
+      主要内容: 'x',
+      形态: '事实',
+      项目: 'p',
+      智能体: 'a',
+      自由标签: ['t'],
+      稳定性: '稳定', // 越权：schema 里根本没这个参数，模型硬塞也不该到 engine
+    },
     EXEC,
   )
   const payload = calls.find((c) => c.method === 'writeEntry').args[1]
-  assert.equal(payload['稳定性'], undefined, '模型没给时工具层不得自行填值（起点由 engine 定）')
+  assert.equal(
+    payload['稳定性'],
+    undefined,
+    '稳定性 是程序字段，首次落库恒为「观察」；工具层不得把它透传给 engine',
+  )
 })
 
 /* ------------------------------------------------------------------ *
