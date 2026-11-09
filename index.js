@@ -2027,44 +2027,6 @@ function registerTimer(ctx, service, config) {
  * `result` 用 `src-json`，不要求 create/encode，返回形状自由。
  * ------------------------------------------------------------------ */
 
-/** 透传 parser：只为过 `strict` 形状检查，实际校验在业务层。 */
-const passthroughCodec = (typeSymbol) => ({
-  mode: 'strict',
-  typeSymbol,
-  create: () => ({ parse: (value) => value }),
-});
-
-/** 一个无参方法的描述符。 */
-const noParamMethod = (method, description) => ({
-  id: `dsh-tag-memory#${REMOTE_NAMESPACE}/${method}`,
-  namespace: REMOTE_NAMESPACE,
-  method,
-  service: SERVICE_NAME,
-  description,
-  invocation: { kind: 'direct' },
-  parameters: [],
-  result: { mode: 'src-json' },
-});
-
-/** 一个带一个对象参数的方法描述符。 */
-const oneParamMethod = (method, description, paramName) => ({
-  id: `dsh-tag-memory#${REMOTE_NAMESPACE}/${method}`,
-  namespace: REMOTE_NAMESPACE,
-  method,
-  service: SERVICE_NAME,
-  description,
-  invocation: { kind: 'direct' },
-  parameters: [
-    {
-      name: paramName,
-      wire: paramName,
-      source: 'json', // ⚠️ 必须显式写：缺省会掉进 lookup 分支并抛错
-      codec: passthroughCodec(`dsh-tag-memory/types#${method}Params`),
-    },
-  ],
-  result: { mode: 'src-json' },
-});
-
 async function registerRemote(ctx, service) {
   /*
    * ⚠️ 这里是 Remote 端点注册的**唯一正确做法**，踩过四个坑：

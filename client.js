@@ -83,6 +83,7 @@ window.__ModuleLoader__.load({
 .dtm-error-title{color:var(--dsw-alias-state-error-primary);font-size:13px;font-weight:500;line-height:20px;margin:0}
 .dtm-error-body{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;margin:0;white-space:pre-wrap;word-break:break-word}
 .dtm-warn{border:.5px solid var(--dsw-alias-state-warn-primary);border-radius:8px;background:var(--dsw-alias-bg-layer-1);padding:8px 12px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
+.dtm-error-text{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px;margin:0}
 
 /* ---- 无障碍：仅屏幕阅读器可见 ---- */
 .dtm-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
@@ -1172,16 +1173,9 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
      * 库概况：总数 / 各状态计数 / 数据目录 / 生效来源。
      * 数据由宿主给（`getOverview`），这里只负责画。
      *
-     * 宿主返回的是**扁平计数**（不是 byStatus 对象）：
-     *   { total, active, superseded, archived, dataDir, dataDirSource }
-     * 所以按状态名映射到对应字段，而不是去查 byStatus。
+     * 状态计数走宿主的 `byStatus`（自描述：状态名 + 条数），
+     * 前端不维护「状态名 → 计数字段」的映射表——那样每加一个状态都要改前端。
      */
-    const STATUS_COUNT_FIELD = {
-      生效: 'active',
-      被取代: 'superseded',
-      已归档: 'archived',
-    }
-
     function OverviewBar(props) {
       const t = translateOf(props)
       const { overview } = props
