@@ -179,3 +179,73 @@ test('dispose() 幂等：连续调用两次不抛错', async () => {
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+/* ------------------------------------------------------------------ *
+ * 整理提醒分支（autoTidyIntervalHours）
+ *
+ * 背景：这条用例是**补漏**。
+ *   上面三条用例全部只传 `autoBackupIntervalHours`，
+ *   于是 `autoTidyIntervalHours > 0` 这条分支**从未被执行过**。
+ *   真实缺陷就藏在这个盲区里：`tidyTimer` 被赋值、被 unref、被 clearInterval，
+ *   但**从来没有 `let tidyTimer` 声明** —— ESM 严格模式下那是 ReferenceError。
+ *   后果：配了整理间隔的用户，startTimer 在第二个 setInterval 处抛错，
+ *   被 registerTimer 的 try/catch 吞成一行容易忽略的 warn，
+ *   整理提醒从来没响过，连已建好的备份定时器也一并失去管理。
+ *
+ * 纪律：一个配置分支如果没有用例走过它，就等于没实现。
+ * ------------------------------------------------------------------ */
+test('整理提醒分支：autoTidyIntervalHours>0 时不得抛错，且两个句柄都能被 dispose 清掉', async () => {
+  const real = globalThis.setInterval
+  const created = []
+  globalThis.setInterval = function (...args) {
+    const t = real.apply(this, args)
+    created.push(t)
+    return t
+  }
+
+  const dir = mkdtempSync(join(tmpdir(), 'qa-timer-tidy-'))
+  const warns = []
+  let dispose = null
+  try {
+    const { apply } = await import('../../index.js')
+    const ctx = makeCtx().__init()
+    // 记下 warn：定时任务启动失败时 registerTimer 会打一条 warn
+    ctx.logger.warn = (...a) => warns.push(a.join(' '))
+    dispose = apply(ctx, { dataDir: dir, autoTidyIntervalHours: 1, autoBackupIntervalHours: 1 })
+  } finally {
+    globalThis.setInterval = real
+  }
+
+  try {
+    // ① 两个分支都应各建一个 timer（备份 + 整理）
+    assert.equal(
+      created.length,
+      2,
+      `应创建 2 个 setInterval（备份 + 整理），实际 ${created.length} 个 —— `
+        + '少于 2 说明某个分支在创建前就抛错了',
+    )
+
+    // ② 不得出现「定时任务启动失败」
+    assert.deepEqual(
+      warns.filter((w) => w.includes('定时任务启动失败')),
+      [],
+      `定时任务启动失败：${warns.join(' | ')}`,
+    )
+
+    // ③ 两个 timer 都应已 unref（不阻塞进程退出）
+    for (const [i, t] of created.entries()) {
+      assert.equal(t.hasRef(), false, `第 ${i + 1} 个 timer 应已 unref，实际 hasRef()=${t.hasRef()}`)
+    }
+
+    // ④ dispose 后两个句柄都应归 null（通过重复 dispose 不抛错间接验证句柄可清）
+    assert.doesNotThrow(() => dispose(), 'dispose() 不应抛错')
+    assert.doesNotThrow(() => dispose(), 'dispose() 幂等')
+  } finally {
+    try {
+      if (typeof dispose === 'function') dispose()
+    } catch {
+      /* 卸载期忽略 */
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

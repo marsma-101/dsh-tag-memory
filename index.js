@@ -88,7 +88,12 @@ import {
 import { buildNewRecord, buildWriteLog } from './lib/engine/write.mjs';
 import { recall as engineRecall, buildReadLog } from './lib/engine/read.mjs';
 import { applyTick } from './lib/engine/tick.mjs';
-import { backupLibrary, listBackups as engineListBackups, restoreBackup } from './lib/engine/backup.mjs';
+import {
+  backupLibrary,
+  backupStamp,
+  listBackups as engineListBackups,
+  restoreBackup,
+} from './lib/engine/backup.mjs';
 import { planTidy } from './lib/engine/tidy.mjs';
 import { isBackupDue, isTidyDue } from './lib/engine/schedule.mjs';
 import { canMigrate, verifyMigration } from './lib/engine/migrate.mjs';
@@ -135,7 +140,15 @@ export const REMOTE_SIGNATURES = Object.freeze({
   exportLibrary: ['request'],
 });
 
-/** Remote 方法名列表（顺序稳定，供两个消费者共用）。 */
+/**
+ * Remote 方法名列表。
+ *
+ * @deprecated 包内**零消费者**——镜像循环（serviceObj → HostServiceProto）
+ * 与 `registerRemote` 都直接写 `Object.keys(REMOTE_SIGNATURES)`，
+ * 早先那句「供两个消费者共用」的注释与事实不符。
+ * 保留导出只因它已在公开包面（删掉对第三方是 breaking change），
+ * 新代码请直接用 `REMOTE_SIGNATURES`。
+ */
 export const REMOTE_METHOD_NAMES = Object.freeze(Object.keys(REMOTE_SIGNATURES));
 
 /** 允许用户手动改的 6 个字段（《功能说明》§10.3）。 */
@@ -178,6 +191,21 @@ function fail(errors, code) {
     errors: list,
     message: list[0]?.message ?? '未知失败',
   };
+}
+
+/**
+ * 从读库错误里挑出「表头不兼容」这一类致命错误。
+ *
+ * 为什么要单拎出来：`HEADER_MISSING` 意味着**一行都没读进来**，
+ * 与"库是空的"是两回事。调用方必须把它转成明确失败而不是空结果，
+ * 否则用户看到的是"我的记忆全没了"，而真相是"格式不兼容"。
+ *
+ * 只统一**判定**，不统一**返回体**——`listEntries` 要 items/rows/offset/limit，
+ * `getOverview` 要 total/active/superseded/archived，两者字段集不同，
+ * 强行合并会让返回值多出无关字段。
+ */
+function headerFatal(errors) {
+  return arr(errors).filter((e) => e.code === 'HEADER_MISSING');
 }
 
 /**
@@ -243,6 +271,8 @@ function createHostService(ctx, config) {
   let cfgCache = null;
   /** 定时任务句柄。 */
   let timer = null;
+  /** 整理提醒句柄。与 `timer` 分开持有：两者周期独立，各自可能单独关闭。 */
+  let tidyTimer = null;
   /** 上次备份时间（settings 里展示）。 */
   let lastBackupAt = null;
 
@@ -288,11 +318,20 @@ function createHostService(ctx, config) {
     }
   }
 
-  /** ⑤ 包内兜底的告警文案（UI 与日志共用同一句话，避免两处不一致）。 */
+  /**
+   * ⑤ 包内兜底的告警文案——**唯一来源**。
+   *
+   * 为什么要有这个函数：这段文案原先在 UI 与日志里各写一遍，
+   * 措辞已经漂了（一处 `**粗体**`、一处 `%s` 占位、连"重装/升级"的斜杠都不同），
+   * 而注释却写着"共用同一句话"。现在只保留这一份，两边都从这里取。
+   *
+   * 参数用模板拼而不是 `%s`：UI 侧拿到的必须是最终字符串，
+   * 日志侧自己再 `console.warn(text)` 即可，两边永远不会漂。
+   */
   function packageFallbackWarning(source, dir) {
     if (source !== 'package') return null;
     return (
-      `数据目录落在插件包内（${dir}）——**pnpm 重装或升级插件会整个删除这个目录，数据会丢**。` +
+      `数据目录落在插件包内（${dir}）——pnpm 重装或升级插件会整个删除这个目录，数据会丢。` +
       '请把 cordis.patch.yml 里本插件的 config.dataDir 指到包外（例如 $DSH_HOME/tag-memory）。'
     );
   }
@@ -307,11 +346,8 @@ function createHostService(ctx, config) {
   function warnPackageFallbackOnce(dir) {
     if (packageFallbackWarned) return;
     packageFallbackWarned = true;
-    ctx.logger?.warn?.(
-      '[dsh-tag-memory] ⚠️ 数据目录落在插件包内（%s）：pnpm 重装/升级会整个删除该目录，数据会丢。' +
-        '请把 cordis.patch.yml 的 config.dataDir 指到包外（例如 $DSH_HOME/tag-memory）。',
-      dir,
-    );
+    // 与 UI 同一份文案（见 packageFallbackWarning），只多一个前缀。
+    ctx.logger?.warn?.('[dsh-tag-memory] ⚠️ ' + packageFallbackWarning('package', dir));
   }
 
   /** 锁定时告诉用户**改哪一行**（《功能说明》§10.5 明确要求）。 */
@@ -484,10 +520,6 @@ function createHostService(ctx, config) {
     } catch {
       return null; // 注入渲染用，绝不能抛
     }
-  }
-
-  function identityOf(agent) {
-    return identityOfSync(agent);
   }
 
   /**
@@ -749,7 +781,7 @@ function createHostService(ctx, config) {
     // 真实场景：旧版 8 列库（缺「自由标签」）会得到 HEADER_MISSING；
     // 若这里吞掉 errors 只返回 total:0，用户看到的是"我的记忆全没了"，
     // 而真相是"格式不兼容，一行都没读进来"——两者处置完全不同。
-    const fatal = arr(errors).filter((e) => e.code === 'HEADER_MISSING');
+    const fatal = headerFatal(errors);
     if (fatal.length > 0) {
       return {
         ...fail(fatal, 'LIBRARY_FORMAT_MISMATCH'),
@@ -817,7 +849,7 @@ function createHostService(ctx, config) {
 
     // 与 listEntries 同理：库读不进来时必须让 UI 知道，
     // 否则概况显示 total:0 会被误解成"记忆丢了"。
-    const fatal = arr(errors).filter((e) => e.code === 'HEADER_MISSING');
+    const fatal = headerFatal(errors);
     if (fatal.length > 0) {
       return {
         ...fail(fatal, 'LIBRARY_FORMAT_MISMATCH'),
@@ -1355,7 +1387,7 @@ function createHostService(ctx, config) {
     const { schema } = await loadConfigs();
     const { records } = await readLibraryCsv(layout.libraryCsv, schema);
 
-    const dest = str(target) || path.join(layout.backupDir, `export-${stamp()}.csv`);
+    const dest = str(target) || path.join(layout.backupDir, `export-${backupStamp()}.csv`);
     await fsp.mkdir(path.dirname(dest), { recursive: true });
 
     let bytes = 0;
@@ -1682,20 +1714,6 @@ function createHostService(ctx, config) {
     return ra > rb;
   }
 
-  function idNewerThan(a, b) {
-    const pa = parseIdParts(a);
-    const pb = parseIdParts(b);
-    if (!pa || !pb) return false;
-    if (pa.date !== pb.date) return pa.date > pb.date;
-    return pa.seq > pb.seq;
-  }
-
-  function parseIdParts(id) {
-    const m = /^M-(\d{8})-(\d+)$/.exec(str(id));
-    if (!m) return null;
-    return { date: m[1], seq: Number(m[2]) };
-  }
-
   /** 搬家：把数据目录搬到新位置。①② 优先级锁定时拒绝并说明改哪一行。 */
   async function migrateDataDir({ target } = {}) {
     const dest = str(target);
@@ -1846,7 +1864,9 @@ function createHostService(ctx, config) {
   const serviceObj = {
     // 身份 / 归属
     bindIdentity,
-    identityOf,
+    // `identityOf` 是 `identityOfSync` 的历史别名（同步实现，无异步版）。
+    // 两个名字都要保留：preset 与既有调用方按 `identityOf` 取，测试按 `identityOfSync` 取。
+    identityOf: identityOfSync,
     identityOfSync,
     projectOfSync,
     // 写 / 读
@@ -2115,11 +2135,3 @@ async function registerRemote(ctx, service) {
  * 但 gateway 的 methodParameterNames() 只在 prototype 链上找方法实现，所以调用方必须把方法也镜像到 proto（见 createHostService 末尾）。
  */
 const HostServiceProto = Object.create(Object.prototype);
-
-function stamp(now = new Date()) {
-  const p = (n) => String(n).padStart(2, '0');
-  return (
-    `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}` +
-    `-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`
-  );
-}
