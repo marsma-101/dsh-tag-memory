@@ -10,6 +10,12 @@
  *   node scripts/install.mjs apply --profile web --dsh-home <path>
  *   node scripts/install.mjs apply --json
  *
+ * 卸载选项（`uninstall` 之后）：
+ *   --keep-runtime    运行期产物全部保留（连台账/备份/参数都不清）
+ *   --keep-backups    只保留 backup/，其余运行期产物照清
+ *   --profile <名>    指定 profile
+ *   --dsh-home <path> 指定 DSH_HOME
+ *
  * 它做什么（照 0.3.7 的离线安装思路，按 1.2.0 的结构重写）：
  *   1. 校验**本包自己**：名字/版本、bundle 补丁、exports、零框架依赖（不通过就一个字节不写）
  *   2. 把本体拷到稳定位置 <DSH_HOME>/plugins/dsh-tag-memory
@@ -18,8 +24,18 @@
  *   4. 改 profile 的 package.json：依赖 + dsh.profile.bundles（先备份）
  *   5. 用 checks.mjs 的同一套判据验收；不过就报出来，不谎报成功
  *
- * 不改的东西：profile 的 cordis.patch.yml（bundle 自带补丁，不需要）、
- * 记忆数据目录（<DSH_HOME>/tag-memory 一个字节不碰）。
+ * 卸载做什么（install 的镜像，`uninstall` 段）：
+ *   摘链接 → 摘清单条目（依赖 + bundles）→ 清运行期产物
+ *   **保留**：记忆库 store/memory.csv、本体副本 <DSH_HOME>/plugins/、
+ *            以及用户自己的导出 CSV。
+ *
+ * 为什么卸载逻辑写在这个脚本里、而不是做成 `dtm_uninstall` 工具：
+ *   DSH 的 `dsh plugin remove` 会 `pnpm remove` 把整个包目录删掉，
+ *   之后**没有任何插件代码还能执行**。把清理做成工具等于把"清完再卸"
+ *   这个时序责任推给用户，而且一旦用户忘了，包没了就再也补不上。
+ *   脚本在包外跑，不受这个限制——所以卸载必须在脚本里。
+ *
+ * 不改的东西：profile 的 cordis.patch.yml（bundle 自带补丁，不需要）。
  */
 
 import fs from 'node:fs'
@@ -104,6 +120,135 @@ function removeLink(p) {
   else fs.unlinkSync(p)
 }
 
+/* ── 数据目录定位（卸载清理用）─────────────────────────────
+ *
+ * 必须与插件运行时的 5 级优先级**逐条对齐**（lib/engine/core.mjs 的 resolveDataDir），
+ * 否则会出现最坏的结局：卸载脚本以为库在 A，实际库在 B，脚本「成功」了，
+ * 用户重装后发现记忆没了。所以这里不猜、不兜底，逐级照抄并说明来源。
+ *
+ * 差别只有一处：①config 和 ②env 在这里只用于**定位**，不参与清理决策——
+ * 那两处是用户显式指定的位置，脚本无权假设它归自己管。
+ */
+const DATA_DIR_NAME = 'tag-memory'
+
+/** 读插件包内 config/data-dir.json（设置页选的库位置）。读不到返回 null。 */
+function readSettingsDir(packageDir) {
+  const file = path.join(packageDir, 'config', 'data-dir.json')
+  if (!fs.existsSync(file)) return null
+  const obj = readJson(file)
+  return typeof obj?.dataDir === 'string' && obj.dataDir.trim() !== '' ? obj.dataDir.trim() : null
+}
+
+/**
+ * 按运行时同一套优先级定位数据目录。
+ * @returns {{dir: string, source: string, locked: boolean}}
+ */
+function locateDataDir() {
+  const cfg = readJson(manifestPath)
+  const cfgDir = cfg?.dsh?.profile?.config?.dataDir ?? cfg?.config?.dataDir
+  if (typeof cfgDir === 'string' && cfgDir.trim() !== '') {
+    return { dir: cfgDir.trim(), source: '①profile 清单里的 config.dataDir', locked: true }
+  }
+  const envDir = (process.env.DSH_TAG_MEMORY_DATA_DIR ?? '').trim()
+  if (envDir !== '') return { dir: envDir, source: '②环境变量 DSH_TAG_MEMORY_DATA_DIR', locked: true }
+
+  const settingsDir = readSettingsDir(PACKAGE_DIR)
+  if (settingsDir !== null) return { dir: settingsDir, source: '③设置页选择的库位置', locked: false }
+
+  return { dir: path.join(home, DATA_DIR_NAME), source: '④$DSH_HOME/tag-memory（默认）', locked: false }
+}
+
+/** 递归统计目录大小与文件数；读不到就当 0（预演不能因为没权限就崩）。 */
+function measure(target) {
+  let bytes = 0
+  let files = 0
+  const walk = (p) => {
+    let st
+    try {
+      st = fs.statSync(p)
+    } catch {
+      return
+    }
+    if (st.isDirectory()) {
+      let names = []
+      try {
+        names = fs.readdirSync(p)
+      } catch {
+        return
+      }
+      for (const n of names) walk(path.join(p, n))
+      return
+    }
+    bytes += st.size
+    files += 1
+  }
+  walk(target)
+  return { bytes, files }
+}
+
+/**
+ * 列出卸载时**要清掉**的运行期产物。
+ *
+ * 判据（主子 2026-11-09 明确要求「库保留，其他删除」）：
+ *   保留 · store/memory.csv      记忆库本体——用户的资产，删了不可恢复
+ *   保留 · store/.memory.lock    空锁文件，正在被用着，删了反而危险
+ *   清理 · records/*.jsonl       台账，只用于审计
+ *   清理 · backup/               自动备份，库还在就不需要历史备份
+ *   清理 · settings.json         运行参数（备份/整理间隔）
+ *   清理 · <包根>/config/        设置页选的库位置
+ *
+ * `keepBackups` 时 backup/ 转为保留——给"想留一份兜底"的用户。
+ */
+function planRuntimePurge({ dataDir, keepBackups = false }) {
+  const items = [
+    { rel: 'records', kind: 'dir', label: '台账（write/read/tidy 的 jsonl）' },
+    { rel: 'backup', kind: 'dir', label: '自动备份' },
+    { rel: 'settings.json', kind: 'file', label: '运行参数（备份/整理间隔）' },
+  ]
+    .filter((i) => !(keepBackups && i.rel === 'backup'))
+    .map((i) => {
+      const target = path.join(dataDir, i.rel)
+      const stat = measure(target)
+      return { ...i, path: target, exists: fs.existsSync(target), ...stat }
+    })
+
+  // 包内的设置页状态单独算：它在包根，不在数据目录
+  const cfgDir = path.join(PACKAGE_DIR, 'config')
+  const cfgStat = measure(cfgDir)
+  items.push({
+    rel: 'config',
+    kind: 'dir',
+    label: '设置页选择的库位置（data-dir.json）',
+    path: cfgDir,
+    exists: fs.existsSync(cfgDir),
+    ...cfgStat,
+  })
+
+  const libPath = path.join(dataDir, 'store', 'memory.csv')
+  const libStat = measure(libPath)
+  const library = {
+    rel: 'store/memory.csv',
+    path: libPath,
+    exists: fs.existsSync(libPath),
+    ...libStat,
+  }
+
+  return {
+    items,
+    library,
+    totalBytes: items.reduce((n, i) => n + i.bytes, 0),
+    totalFiles: items.reduce((n, i) => n + i.files, 0),
+  }
+}
+
+/** 人类可读字节数。 */
+function humanBytes(n) {
+  const v = Number(n) || 0
+  if (v < 1024) return `${v} B`
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`
+  return `${(v / 1024 / 1024).toFixed(1)} MB`
+}
+
 /* ── 0. 本包自检（不通过就停，绝不带病安装）───────────── */
 const self = verifyPackage(PACKAGE_DIR, { minVersion: MIN_VERSION })
 if (!self.ok) {
@@ -166,10 +311,43 @@ if (action === 'uninstall') {
 
   say(plan.join('\n'))
   say('')
-  say(`· 本体副本留在 ${bodyDir}（不删：它可能被当作数据目录兜底，删了有丢数据的风险）`)
-  say('· 记忆数据目录（<DSH_HOME>/tag-memory）一个字节不碰')
+
+  /* ── 运行期产物清理（库保留）──────────────────────────
+   * 默认就清（主子要求「库保留，其他删除」），但**先摆出清单**让用户看见。
+   * `--keep-runtime` 可整段跳过；`--keep-backups` 只留备份。 */
+  const keepRuntime = argv.includes('--keep-runtime')
+  const keepBackups = argv.includes('--keep-backups')
+  const located = locateDataDir()
+  let purge = null
+  let purged = null
+
+  if (keepRuntime) {
+    say(`· 数据目录 ${located.dir}（${located.source}）：按 --keep-runtime 全部保留`)
+  } else {
+    purge = planRuntimePurge({ dataDir: located.dir, keepBackups })
+    say(`数据目录：${located.dir}`)
+    say(`  （来源：${located.source}${located.locked ? '，该位置由配置/环境变量指定' : ''}）`)
+    say('')
+    if (purge.library.exists) {
+      say(`✓ 保留记忆库：store/memory.csv（${humanBytes(purge.library.bytes)}，${purge.library.files} 个文件）`)
+    } else {
+      say(`· 记忆库不存在（${purge.library.path}）—— 清理前就没有，不是本次删的`)
+    }
+    if (keepBackups) say('✓ 保留 backup/（--keep-backups）')
+
+    const willPurge = purge.items.filter((i) => i.exists)
+    if (willPurge.length > 0) {
+      say('')
+      say(`将清理 ${willPurge.length} 项运行期产物，共 ${humanBytes(purge.totalBytes)}：`)
+      for (const i of willPurge) say(`  · ${i.rel}  ${i.label}  ${humanBytes(i.bytes)}`)
+    } else {
+      say('· 没有运行期产物需要清理')
+    }
+  }
+
+  say('')
   if (!doIt) {
-    say('\n以上是预演（一个字节没动）。加 apply 才真卸。')
+    say('以上是预演（一个字节没动）。加 apply 才真卸。')
     process.exit(0)
   }
 
@@ -183,8 +361,54 @@ if (action === 'uninstall') {
     fs.writeFileSync(manifestPath, manifestNext, 'utf8')
     say(`✓ 已摘清单条目（备份 ${bak}）`)
   }
+
+  /* ── 执行清理：逐项删、逐项报，单项失败不影响其他项 ──
+   * 为什么不用一把梭：Windows 上文件可能被占用，一把梭会在第一个错误处
+   * 中断并留下半清理状态。逐项删才能如实报出「哪些没删成、为什么」。 */
+  if (purge !== null) {
+    const deleted = []
+    const failed = []
+    for (const item of purge.items) {
+      if (!item.exists) continue
+      try {
+        fs.rmSync(item.path, { recursive: item.kind === 'dir', force: true })
+        if (fs.existsSync(item.path)) {
+          failed.push({ rel: item.rel, error: '删除后仍存在（可能被其他程序占用）' })
+          continue
+        }
+        deleted.push(item.rel)
+      } catch (err) {
+        failed.push({ rel: item.rel, error: err?.message ?? String(err) })
+      }
+    }
+
+    // 唯一不能出错的事：库必须还在
+    if (purge.library.exists && !fs.existsSync(purge.library.path)) {
+      say('')
+      say(`✗✗ 严重：清理后记忆库不见了！${purge.library.path}`)
+      say('   立即从 backup/ 恢复（若 backup 已被清，从你自己的备份恢复）。')
+      process.exitCode = 1
+    } else {
+      if (deleted.length > 0) {
+        say('')
+        say(`✓ 已清理 ${deleted.length} 项运行期产物：${deleted.join('、')}`)
+      }
+      if (failed.length > 0) {
+        say('')
+        say(`⚠ ${failed.length} 项没删成（不影响记忆库）：`)
+        for (const f of failed) say(`   · ${f.rel}：${f.error}`)
+        say('   关掉占用它的程序后重试，或手动删除。')
+        process.exitCode = 1
+      }
+      if (purge.library.exists) {
+        say(`✓ 记忆库完好：${purge.library.path}`)
+      }
+    }
+  }
+
   say('\nUNINSTALL OK。重启 dsh 后工具才会消失。')
-  process.exit(0)
+  say('重装后记忆库可直接继续用（它不在插件包内，卸载不碰它）。')
+  process.exit(process.exitCode ?? 0)
 }
 
 /* ── cleanup：清历史残留（0.x / 1.x 早期安装写进 profile 的东西）── */

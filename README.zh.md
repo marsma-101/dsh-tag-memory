@@ -112,12 +112,34 @@ npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1
 npx -y <同一个 URL>                            # 只预检 + 打计划，一个字节不动
 npx -y <同一个 URL> apply --profile tui        # 换 profile
 npx -y <同一个 URL> apply --dsh-home /opt/dsh  # 换 DSH_HOME
-npx -y <同一个 URL> uninstall                  # 预演卸载
-npx -y <同一个 URL> uninstall apply            # 真卸
+npx -y <同一个 URL> uninstall                  # 预演卸载（打印将清理什么）
+npx -y <同一个 URL> uninstall apply            # 真卸（保留记忆库）
+npx -y <同一个 URL> uninstall apply --keep-backups  # 连 backup/ 也留着
+npx -y <同一个 URL> uninstall apply --keep-runtime  # 运行期产物全留，只摘插件
 npx -y <同一个 URL> cleanup --all-profiles     # 预演清历史残留（0.x/早期 1.x 装的）
 npx -y <同一个 URL> cleanup --all-profiles apply  # 真清
 node scripts/install.mjs apply                 # 包已经在本地时，直接用同一个脚本
 ```
+
+**卸载保留什么、清掉什么**（`uninstall` 段的判据）：
+
+| | 内容 | 为什么 |
+|---|---|---|
+| ✅ 保留 | `store/memory.csv`（记忆库本体） | 你的资产，删了不可恢复。重装后直接继续用 |
+| ✅ 保留 | `store/.memory.lock` | 空锁文件，可能正在被用 |
+| ✅ 保留 | `<DSH_HOME>/plugins/dsh-tag-memory`（本体副本） | 它可能是数据目录兜底，删了有丢数据风险 |
+| 🗑 清理 | `records/*.jsonl`（台账） | 只用于审计，库还在就能重建 |
+| 🗑 清理 | `backup/`（自动备份） | 库还在就不需要历史备份（`--keep-backups` 可留） |
+| 🗑 清理 | `settings.json`（运行参数） | 备份/整理间隔，重装后重设即可 |
+| 🗑 清理 | `<包根>/config/`（设置页选的库位置） | 插件都卸了，这个选择没意义了 |
+
+卸载**先摆清单再动手**：不带 `apply` 只预演，一个字节不动。真卸时逐项删、逐项报，
+某项删不掉（比如被占用）不影响其他项，且**删完会复查库还在不在**——万一不在会明确报错，
+不会假装成功。
+
+> ⚠️ 为什么卸载必须用这个脚本、而不是先 `dsh plugin remove` 再清理：
+> `dsh plugin remove` 走 `pnpm remove`，会把整个包目录删掉，之后**没有任何插件代码还能执行**。
+> 所以清理只能发生在卸载之前，且必须在包外跑。
 
 **装到哪个实例不用猜**：不带参数时，脚本先认 `$DSH_PROFILE_DIR`（DSH 在每个 shell 调用里都会带它），
 直接落进**当前正在跑的那个 profile**；没有它才看 `$DSH_HOME`，最后才是 `~/.dsh`。输出里会打印
@@ -146,7 +168,8 @@ node scripts/install.mjs apply                 # 包已经在本地时，直接�
 | `npx` 从 HTTP tarball 装（等价于 codeload URL） | exit 0，13 项验收全绿；profile 里出现 `link:` 依赖与 `dsh.profile.bundles` 条目 |
 | 装完 `dsh --profile e2e --dump-config` | 两条行都在：`dsh-tag-memory` + `dsh-tag-memory/preset` |
 | 重复 `apply` | 幂等，manifest 不变 |
-| `uninstall apply` | 链接摘掉、依赖与 bundle 条目摘回原样；本体与记忆数据保留 |
+| `uninstall apply` | 链接摘掉、依赖与 bundle 条目摘回原样；**记忆库保留**，台账/备份/参数/config 清掉；删完复查库完好 |
+| 卸载 → 重装（2026-11-09 实测） | 3 条记忆完整保留，`getOverview` 总数 3、召回 3 条，重装后继续写入编号接续 `M-20261109-004` |
 | profile 不存在 / 链接位是实体目录 | 拒绝安装，**一个字节没写** |
 | 带 `$DSH_PROFILE_DIR` 的 shell 里不带参数跑 | 自动定位到当前实例（`目标来源 = $DSH_PROFILE_DIR`），不会错装到 `~/.dsh` |
 | 容器实装（dsh **0.2.1-rc.2**，`/opt/dsh`） | 重启后启动日志零错误；页面 boot 表里有 `dsh-tag-memory/client.js`；问 agent 拿到全部 10 个 `dtm_*`；插件页显示「标签记忆」 |

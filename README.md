@@ -116,11 +116,34 @@ Common variants:
 npx -y <same URL>                                  # dry run: preflight + plan, writes nothing
 npx -y <same URL> apply --profile tui              # another profile
 npx -y <same URL> apply --dsh-home /opt/dsh        # another DSH_HOME
-npx -y <same URL> uninstall                        # dry-run uninstall
-npx -y <same URL> uninstall apply                  # really uninstall
+npx -y <same URL> uninstall                        # dry-run uninstall (prints the purge plan)
+npx -y <same URL> uninstall apply                  # really uninstall (memory library kept)
+npx -y <same URL> uninstall apply --keep-backups   # also keep backup/
+npx -y <same URL> uninstall apply --keep-runtime   # keep all runtime artifacts, unlink only
 npx -y <same URL> cleanup --all-profiles           # dry-run: clean leftovers from old versions
 node scripts/install.mjs apply                     # package already local: same script
 ```
+
+**What uninstall keeps and what it purges:**
+
+| | Item | Why |
+|---|---|---|
+| ✅ kept | `store/memory.csv` (the library itself) | your data; unrecoverable if deleted. Reuse it right after reinstall |
+| ✅ kept | `store/.memory.lock` | empty lock file, may be in use |
+| ✅ kept | `<DSH_HOME>/plugins/dsh-tag-memory` (body copy) | may serve as data-dir fallback; deleting risks data loss |
+| 🗑 purged | `records/*.jsonl` (audit logs) | audit only; rebuildable while the library exists |
+| 🗑 purged | `backup/` (auto backups) | unneeded while the library survives (`--keep-backups` keeps it) |
+| 🗑 purged | `settings.json` (runtime params) | backup/tidy intervals; reset on reinstall |
+| 🗑 purged | `<package>/config/` (library location picked in settings) | meaningless once the plugin is gone |
+
+Uninstall **shows the plan before acting**: without `apply` it is a dry run that writes nothing.
+The real run deletes item by item and reports each one — a failure on one item does not affect the
+others — and it **re-checks that the library still exists afterwards**. If it ever went missing, the
+script fails loudly instead of claiming success.
+
+> ⚠️ Why uninstall must use this script rather than `dsh plugin remove` followed by cleanup:
+> `dsh plugin remove` runs `pnpm remove`, which deletes the whole package directory — after that
+> **no plugin code can run at all**. Cleanup therefore has to happen before removal, from outside the package.
 
 **No guessing which instance**: with no arguments the script checks `$DSH_PROFILE_DIR` (DSH sets it in
 every shell call) and lands in **the profile that is actually running**; without it, `$DSH_HOME`, then
