@@ -44,9 +44,12 @@ export function formatBindResult(bound) {
  * dtm_write
  * ------------------------------------------------------------------ */
 
-export function formatWriteResult(result, identity) {
+export function formatWriteResult(result) {
   const id = String(result?.id ?? result?.编号 ?? '').trim();
-  const who = String(identity?.who ?? '').trim();
+  // 宿主在返回值里已经带了 who（= 落库后的 智能体），直接读它。
+  // 早先这里是第二个形参 identity.who，但调用方只传一个实参，
+  // 导致归属行永远不输出——宿主那条 who 白算了。
+  const who = String(result?.who ?? '').trim();
 
   const lines = [`已记下：${id || '（编号未返回）'}`];
   if (who) lines.push(`归属：智能体=\`${who}\``);

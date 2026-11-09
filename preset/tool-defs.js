@@ -24,25 +24,6 @@ export const SHAPE_HINTS = {
   模板: '可复用格式/清单',
 };
 
-/** `通用` / `引入` 的语义（《功能说明》§9.2：两者可见性同、语义不同，不许混用） */
-export const UNIVERSAL_HINT =
-  '`通用`=所有项目/身份都该知道（一个判断结论）；`引入`=外面搬来的、来源没写归属。' +
-  '不知道归属填 `引入`，别填 `通用`。';
-
-/** 工具分类：写入只追加、读取只读、改库全归整理（《功能说明》§十二 末句） */
-export const TOOL_CATEGORY = {
-  dtm_bind: 'write',
-  dtm_write: 'write',
-  dtm_recall: 'read',
-  dtm_supersede: 'tidy',
-  dtm_archive: 'tidy',
-  dtm_retag: 'tidy',
-  dtm_review: 'read',
-  dtm_records: 'read',
-  dtm_export: 'tidy',
-  dtm_merge: 'tidy',
-};
-
 /**
  * 10 个工具（顺序即注入顺序，也是 qa K2 的逐个点名顺序）。
  *
@@ -62,8 +43,6 @@ const DEFS = [
       '绑定本次会话的身份。**第一次读写记忆之前必须先问用户「这次会话我以什么名字负责」，'
       + '拿到回答立刻调本工具。**未绑定时写入被拒（`UNBOUND_IDENTITY`）、召回返空。' +
       '一次会话绑一次即可。',
-    target: 'host',
-    hostMethod: 'bindIdentity',
     params: () => ({
       智能体: {
         type: 'string',
@@ -86,8 +65,6 @@ const DEFS = [
     description:
       '追加一条记忆到库。只在值得长期留下时调。' +
       '只追加、不改旧条；不查重，所以不要先调 dtm_recall 确认再写，直接写。',
-    target: 'engine',
-    engineFn: 'writeMemory',
     params: (d) => ({
       主要内容: {
         type: 'string',
@@ -127,8 +104,6 @@ const DEFS = [
     description:
       '按标签召回记忆，返回候选 + 每条为什么被命中。' +
       '想浏览某形态的全部条目时，自由标签留空即可。',
-    target: 'engine',
-    engineFn: 'recallMemory',
     params: (d) => ({
       // 注意：**没有 `项目` / `智能体` 参数**（2026-11-08 硬性裁定）。
       // 查哪个项目、以谁的身份查，由程序填（工作目录名 + 绑定身份）。
@@ -157,8 +132,6 @@ const DEFS = [
     description:
       '用一条新记忆顶替旧条：写新条，旧条标为「被取代」。两条都留在库里，行不删。' +
       '只是想改旧条的标签、内容不变时用 dtm_retag，不要用这个。',
-    target: 'host',
-    hostMethod: 'supersedeEntry',
     params: (d) => ({
       旧编号: {
         type: 'string',
@@ -198,8 +171,6 @@ const DEFS = [
     description:
       '让一条记忆退场：标记为「已归档」，行不删、以后翻得回来。' +
       '有新的条顶替它时用 dtm_supersede，不要用这个。',
-    target: 'host',
-    hostMethod: 'archiveEntry',
     params: () => ({
       编号: { type: 'string', required: true, description: '要退场的条目编号。' },
       basis: {
@@ -216,8 +187,6 @@ const DEFS = [
     description:
       '改某条记忆的标签字段。属整理动作：**必须给依据**，没有依据不许改。' +
       '编号、主要内容、时距不可改——那是唯一标识、一手材料和程序计数器。',
-    target: 'host',
-    hostMethod: 'retagEntry',
     params: (d) => ({
       编号: { type: 'string', required: true, description: '要改的条目编号。' },
       basis: {
@@ -245,8 +214,6 @@ const DEFS = [
     when: '复查一批条目 / 整理时通览候选（只读为主）',
     description:
       '只读地通览一批条目，整理时用来找候选。不改任何条目、不计时距、不写读取台账。',
-    target: 'engine',
-    engineFn: 'listMemory',
     params: (d) => ({
       形态: { type: 'string', enum: d.shapes, description: '只看这个形态。省略=不限。' },
       项目: { type: 'string', description: '只看这个项目。省略=不限。' },
@@ -271,8 +238,6 @@ const DEFS = [
     name: 'dtm_records',
     when: '查读写/整理的台账记录',
     description: '查 records/{write,read,tidy}.jsonl 台账，用于追根因与审计。只读。',
-    target: 'engine',
-    engineFn: 'readRecords',
     params: (d) => ({
       kind: {
         type: 'string',
@@ -295,8 +260,6 @@ const DEFS = [
     description:
       '把记忆库导出成 CSV 文件。库本体就是 CSV，导出的就是原文件，可直接给人看或交接。' +
       '与 UI 里的导出是同一个能力。',
-    target: 'host',
-    hostMethod: 'exportLibrary',
     params: () => ({
       path: {
         type: 'string',
@@ -311,8 +274,6 @@ const DEFS = [
     when: '合并两份记忆库（搬家/导入导出）',
     description:
       '把另一份记忆库合并进当前库：编号唯一，同号保留较新的，行只追加。合并前自动备份。',
-    target: 'host',
-    hostMethod: 'mergeLibrary',
     params: () => ({
       path: { type: 'string', required: true, description: '要合并进来的 CSV 文件路径。' },
       dryRun: {
@@ -337,9 +298,14 @@ export const TOOL_WHENS = DEFS.map((d) => ({ name: d.name, when: d.when }));
 /**
  * 构造工具定义（把取值域注入参数 schema）。
  *
+ * 只产出 `ctx.tools.register()` 真正会读的四个字段：name / when / description / parameters。
+ * 早先还带 `target` / `engineFn` / `hostMethod` / `category`，但**没有任何消费方**，
+ * 且 `target` 的值是错的——标 `'engine'` 的四个工具（write/recall/review/records）
+ * 实际全部经 `callHost()` 走宿主方法。留着只会误导后来者，故删除。
+ *
  * @param {{shapes:string[], stabilities:string[], statuses:string[]}} domain
- *        来自 engine 的 `templates/schema.json`（经 Config 覆盖后的最终值）
- * @returns {Array<{name,when,description,target,engineFn?,hostMethod?,parameters}>}
+ *        来自 engine 的 `templates/schema.json`（由 preset 的 `domainFor()` 同步读出）
+ * @returns {Array<{name,when,description,parameters}>}
  */
 export function buildToolDefs(domain) {
   const d = {
@@ -352,10 +318,6 @@ export function buildToolDefs(domain) {
     name: def.name,
     when: def.when,
     description: def.description,
-    target: def.target,
-    engineFn: def.engineFn,
-    hostMethod: def.hostMethod,
-    category: TOOL_CATEGORY[def.name],
     parameters: def.params(d),
   }));
 }

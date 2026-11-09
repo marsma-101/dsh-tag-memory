@@ -175,7 +175,7 @@ function executeBind(ctx) {
  * 未绑定拒写由**宿主方法先于一切强制**（host-dev §3），preset 不再重复判定，
  * 直接透传它的 `UNBOUND_IDENTITY`。但注入文本里仍要写清"未绑定先问用户"。
  */
-function executeWrite(ctx, config) {
+function executeWrite(ctx) {
   return async (args, exec) => {
     const h = requireHost(ctx);
     if (!h.ok) return h.result;
@@ -410,19 +410,16 @@ function unboundWrite() {
  * 注册 10 个工具。
  *
  * @param {object} ctx    Cordis 上下文（需 `ctx.tools`）
- * @param {object} config 插件 Config（可覆盖取值域）
+ * @param {object} [domain] 取值域（形态 / 稳定性 / 状态），由 `domainFor()` 从 schema.json 读出。
+ *                          不传时 `buildToolDefs` 用它自带的兜底（仅用于无 schema 的降级场景）。
  * @returns {{defs: Array, dispose: Function[]}}
  */
-export function registerTools(ctx, config) {
-  const defs = buildToolDefs({
-    shapes: config?.shapes,
-    stabilities: config?.stabilities,
-    statuses: config?.statuses,
-  });
+export function registerTools(ctx, domain) {
+  const defs = buildToolDefs(domain);
 
   const executors = {
     dtm_bind: executeBind(ctx),
-    dtm_write: executeWrite(ctx, config),
+    dtm_write: executeWrite(ctx),
     dtm_recall: executeRecall(ctx),
     dtm_supersede: executeSupersede(ctx),
     dtm_archive: executeArchive(ctx),

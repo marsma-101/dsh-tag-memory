@@ -26,7 +26,7 @@
  *   `tools` / `systemPrompt` 放进 inject，宿主服务惰性取。
  */
 
-import { registerTools } from './tools.js';
+import { registerTools, HOST_SERVICE } from './tools.js';
 import {
   renderInjection,
   renderIdentityContext,
@@ -35,7 +35,6 @@ import {
   IDENTITY_CONTEXT_NAME,
   IDENTITY_CONTEXT_ORDER,
 } from './prompt.js';
-import { HOST_SERVICE } from './tools.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -83,7 +82,7 @@ export const inject = ['tools', 'systemPrompt'];
  */
 export function apply(ctx, config = {}) {
   /* ---- 1. 注册 10 个工具 ---- */
-  const { dispose } = registerTools(ctx, config);
+  const { dispose } = registerTools(ctx, domainFor());
   // 注册是 effect：插件卸载时自动撤销。这里再挂一层保险，
   // 保证 ctx 被回收时不会留下悬空注册（官方 práctica：registration 由 owning context 拥有）。
   if (typeof ctx.effect === 'function') {
@@ -148,6 +147,26 @@ function writeRoutesFor() {
 function dimensionsFor() {
   const schema = schemaFor();
   return schema?.dimensions ?? null;
+}
+
+/**
+ * 工具参数里的取值域（形态 / 稳定性 / 状态），来自 `templates/schema.json`。
+ *
+ * ⚠️ 早先这里传的是 `config?.shapes`，但宿主**刻意不导出 Config**（见文件头 §"故意不导出 Config"），
+ * 于是 config 恒为 `{}` → domain 恒为 undefined → `buildToolDefs` 只能走它自带的硬编码兜底。
+ * 结果：用户改 schema.json 加一种形态，注入段会显示 7 个，工具 enum 还是 6 个，
+ * 模型选了新值会被 schema 校验拒掉。现在改成与注入同一份来源（`schemaFor()`），两边永远一致。
+ *
+ * 读不到时返回 null，由 `buildToolDefs` 自行兜底（它必须能在无 schema 时工作）。
+ */
+function domainFor() {
+  const schema = schemaFor();
+  if (!schema) return null;
+  return {
+    shapes: schema.shapes,
+    stabilities: schema.stabilities,
+    statuses: schema.statuses,
+  };
 }
 
 /** 同步读 schema（按 mtime 缓存）；读不到返回 null，绝不抛错。 */

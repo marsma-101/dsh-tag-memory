@@ -65,7 +65,6 @@ window.__ModuleLoader__.load({
 .dtm-section{border:.5px solid var(--dsw-alias-border-l4);border-radius:12px;background:var(--dsw-alias-bg-layer-1);padding:16px;margin-bottom:12px}
 .dtm-section-head{display:flex;flex-direction:column;gap:4px;margin-bottom:12px}
 .dtm-row{display:flex;align-items:center;gap:8px}
-.dtm-row-between{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .dtm-stack{display:flex;flex-direction:column;gap:8px}
 .dtm-empty{padding:32px 16px;text-align:center;color:var(--dsw-alias-label-tertiary);font-size:13px}
 
@@ -132,10 +131,6 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
 .dtm-col-id{white-space:nowrap;width:104px;font-family:var(--ds-font-family-code, ui-monospace, monospace);font-size:12px}
 /* 操作列固定在右侧，窄 */
 .dtm-cell-actions{white-space:nowrap;width:1%;text-align:right}
-
-/* 兼容：自由标签列已从表格移除（用户不能改，且纵向排列把行撑太高） */
-.dtm-cell-tags{display:none}
-.dtm-cell-actions{white-space:nowrap;text-align:right}
 .dtm-chip{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dtm-btn-sm{height:28px;padding:0 10px;font-size:12px}
 
@@ -1876,6 +1871,11 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       const [exportMsg, setExportMsg] = React.useState(null)
       const [exportErr, setExportErr] = React.useState(false)
       const [notice, setNotice] = React.useState(null)
+      // 备份 / 恢复 / 合并：三者走弹窗（《功能说明》§10.4「不占常驻空间」）。
+      // null = 全关；'backup' | 'restore' | 'merge' = 当前打开的弹窗。
+      const [dialog, setDialog] = React.useState(null)
+      const [dialogBusy, setDialogBusy] = React.useState(false)
+      const [dialogError, setDialogError] = React.useState(null)
 
       // 字典预览卡片要显示**宿主真实的取值域**（不是前端写死的常量），
       // 所以这里一并取 facets —— 它带 allowedShapes/allowedStabilities/
@@ -2230,9 +2230,50 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
               )
             : null,
           h(
-            'p',
-            { className: 'dtm-caption' },
-            t('backupViaDialog'),
+            'div',
+            { className: 'dtm-row', style: { marginTop: '10px' } },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dtm-btn',
+                'data-dtm-action': 'backup-now',
+                disabled: busy,
+                onClick: function () {
+                  setDialogError(null)
+                  setDialog('backup')
+                },
+              },
+              t('backupNow'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dtm-btn',
+                'data-dtm-action': 'restore-open',
+                disabled: busy,
+                onClick: function () {
+                  setDialogError(null)
+                  setDialog('restore')
+                },
+              },
+              t('restoreOpen'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dtm-btn',
+                'data-dtm-action': 'merge-open',
+                disabled: busy,
+                onClick: function () {
+                  setDialogError(null)
+                  setDialog('merge')
+                },
+              },
+              t('mergeOpen'),
+            ),
           ),
 
           // ---- 导出到指定目录（沙箱内）----
@@ -2387,6 +2428,31 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
             h('li', null, t('readonlyTickWhy')),
           ),
         ),
+
+        // 弹窗挂在最后：它是覆盖层，DOM 顺序靠后便于 Tab 焦点循环。
+        dialog
+          ? h(BackupDialogs, {
+              mode: dialog,
+              api: api,
+              busy: dialogBusy,
+              error: dialogError,
+              onClose: function () {
+                setDialog(null)
+                setDialogError(null)
+              },
+              onDone: function (mode) {
+                setDialog(null)
+                setDialogError(null)
+                // 备份完成要刷新「上次备份时间」；恢复/合并会动库，整页重取。
+                if (mode === 'backup') {
+                  setNotice(t('backupDone'))
+                } else {
+                  setNotice(t('backupDone'))
+                }
+                load()
+              },
+            })
+          : null,
       )
     }
 
@@ -2823,7 +2889,10 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       cardBackupDesc: '备份 / 恢复 / 合并都走弹窗，不占常驻空间。',
       backupAuto: '自动备份',
       backupLast: '上次备份',
-      backupViaDialog: '用「备份 / 恢复 / 合并」按钮操作（弹窗形式）。',
+      backupNow: '立即备份',
+      restoreOpen: '恢复',
+      mergeOpen: '合并',
+      backupDone: '操作已完成，记忆库已重新载入。',
 
       // 弹窗：备份 / 恢复 / 合并（§10.4）
       modalClose: '关闭',
@@ -2966,7 +3035,10 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       cardBackupDesc: 'Backup, restore, and merge open as dialogs and take no permanent space.',
       backupAuto: 'Automatic backup',
       backupLast: 'Last backup',
-      backupViaDialog: 'Use the Backup / Restore / Merge button (dialog).',
+      backupNow: 'Back up now',
+      restoreOpen: 'Restore',
+      mergeOpen: 'Merge',
+      backupDone: 'Done. The library has been reloaded.',
 
       modalClose: 'Close',
       backupTitle: 'Back up the library',
