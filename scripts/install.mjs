@@ -40,6 +40,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { PACKAGE_NAME, MIN_VERSION, resolveTarget, readJson, verifyPackage, verifyProfile } from './checks.mjs'
 
@@ -669,6 +670,34 @@ say('')
 if (report.ok) {
   say('INSTALL OK：装好了，重启 dsh 后才生效（bundle 补丁只在启动时装配）。')
   say('容器：docker restart <容器名>；本机前台：Ctrl-C 再起。之后 10 个 dtm_* 工具会出来。')
+
+  /* ── 顺带播种（空库才有意义；已有内容则跳过，不打扰）──────────
+   *
+   * 为什么放在 install 而不是插件启动时：启动时写库会与用户自己的写入
+   * 抢锁，且插件被禁用/重装时行为不可控。安装是一次性动作，适合做这件事。
+   *
+   * 为什么只在「库为空」时播：用户已经积累记忆后再塞种子，就是污染。
+   */
+  if (!argv.includes('--no-seed')) {
+    try {
+      const seedPath = path.join(PACKAGE_DIR, 'scripts', 'seed.mjs')
+      if (fs.existsSync(seedPath)) {
+        say('')
+        say('── 初始记忆（空库才播）────────────────────────────')
+        const r = spawnSync(process.execPath, [seedPath, 'apply'], {
+          stdio: 'inherit',
+          env: { ...process.env, DSH_HOME: home },
+        })
+        if (r.status !== 0) {
+          // 播种失败不影响安装结论：插件已装好，种子只是锦上添花
+          say('（播种没成功，不影响插件使用；可稍后手动 node scripts/seed.mjs apply）')
+        }
+      }
+    } catch (e) {
+      say(`（播种跳过：${e?.message ?? e}）`)
+    }
+  }
+
   process.exit(0)
 }
 say('INSTALL FAILED：上面有红项，安装没完成。把这段输出贴出来再排查。')

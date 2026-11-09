@@ -166,6 +166,84 @@ node ~/.dsh/profiles/web/node_modules/dsh-tag-memory/scripts/verify-install.mjs
 
 ---
 
+## Initial memories (seeds)
+
+A freshly installed library is empty: the UI shows nothing and the agent has no idea what to look for.
+So a successful install also **seeds a few entries** (`scripts/seed.mjs`).
+
+```bash
+node scripts/seed.mjs                # dry run: print what would be written
+node scripts/seed.mjs apply          # write (skipped automatically when the library is not empty)
+node scripts/seed.mjs apply --force  # add even if the library already has entries
+```
+
+Every seed is `项目=通用` and `智能体=通用`, so **any project and any identity can see them**.
+
+### What is seeded, and what is deliberately not
+
+Not seeded: "introduce this plugin", "describe the 10 tools", "ask the user for an identity".
+Those are already in the injection, in more detail — the injection is a fixed prefix present in
+every session (5916 bytes), whereas seeds are retrieved **on demand**. Copying the injection into
+the library would make `dtm_recall` return self-introductions when asked about tools, crowding out
+real entries. **Whatever is needed every time belongs in the injection; only "look it up occasionally"
+belongs in the library.**
+
+Six entries are seeded, all things the injection cannot provide:
+
+| Seed | Shape | Point |
+|---|---|---|
+| Where the library lives | fact | actual `store/memory.csv` path, editable/backup-able, survives uninstall |
+| Seed origin | fact | these are seeds, rewritable and archivable, not project conclusions |
+| Empty-recall triage | skill | empty on a new install is normal; do not "try another wording" |
+| Tidy | skill | what tidy does, how it triggers, restore from `backup/` |
+| Anti-pollution | rule | seeds are not user facts; reading them is not knowing the user |
+| Subagent identity | skill | the correct way to hand an identity to a subagent (below) |
+
+### Why exactly three tags per entry
+
+This is forced by the recall gate, not a style choice. The hard gate in `read.mjs` L388 is:
+
+```
+e_ratio = matched tags / entry tags   must be STRICTLY greater than 0.5
+```
+
+More than half of an entry's tags must match, or the entry is vetoed outright:
+
+| Entry tags | Query with 2 tags | Result |
+|---|---|---|
+| 5 | 2/5 = 0.40 | vetoed |
+| 3 | 2/3 = 0.67 | **passes** |
+| 2 | 2/2 = 1.00 | passes, but a single tag gives 1/2 = 0.50 and is vetoed |
+
+So 3 is the largest tag count that still lets an entry be found with two words.
+**More tags make an entry harder to retrieve** — counter-intuitive, but measured.
+Seeds also never share a tag, otherwise one query matches two entries and they compete for Top-K.
+
+### Handing an identity to a subagent (easy to get wrong)
+
+After the parent binds an identity (say "小明"), making a subagent act as the same identity
+**requires telling it explicitly to call `dtm_bind` first**:
+
+> First call `dtm_bind` with `智能体=小明`, then ...
+
+**It is not inherited.** Measured results:
+
+| Subagent form | Inherits identity? |
+|---|---|
+| `spawn` (default, fresh session) | ❌ `UNBOUND_IDENTITY` |
+| `fork` (seeded with parent history) | ❌ still nothing (fork seeds conversation history, not plugin identity) |
+| Subagent calls `dtm_bind` with the same name | ✅ sees every memory the parent wrote under that identity |
+| Subagent calls `dtm_bind` with a different name | ✅ binds fine, but **cannot** see 小明's memories (isolation working as designed) |
+
+The identity lives in an in-process WeakMap and is never written as an event, while a subagent is a
+**fresh agent object with its own session** (`dsh-subagent-spawn-in-process` source: *its own session,
+own system prompt, zero parent context*, with `inheritsParentContext = false`). So the subagent must
+bind again itself. The good news: a subagent **inherits the parent's preset by default**
+(`dsh-subagent` README L65: *Without a selection, a local child joins the parent's current preset
+revision*), so it does have the `dtm_*` tools — one `dtm_bind` is all it needs.
+
+---
+
 ## Data directory: 5 levels of priority
 
 | Priority | Source | `dataDirSource` | Notes |
