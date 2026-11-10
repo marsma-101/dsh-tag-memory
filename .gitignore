@@ -7,6 +7,13 @@ dist/
 store/
 records/
 
+# ⚠️ 例外：包内自带的**初始记忆库**必须进 git。
+# 它是插件发布内容的一部分（装完即见的 6 条说明），不是用户数据。
+# 上面那条 `store/` 会连 `data/store/` 一起忽略——不显式放行，
+# 别人克隆下来就没有这个文件，打出的包也不带初始记忆。
+!data/store/
+!data/store/memory.csv
+
 # 本地环境/凭据
 .env
 *.local

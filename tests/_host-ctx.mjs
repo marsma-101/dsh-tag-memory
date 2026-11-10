@@ -112,7 +112,11 @@ export async function makeHostCtx(opts = {}) {
   const fakeAgent = { session: fakeSession }
 
   const { apply } = await import('../index.js')
-  const dispose = apply(ctx, { dataDir })
+  // seed: false —— 关掉「首次初始化铺包内初始记忆」。
+  // 测试要的是**干净的空库**来断言「零新增」「只有 2 条」这类计数；
+  // 若铺了 6 条初始记忆，计数全都要 +6，测试就不再是在验证代码逻辑，
+  // 而是在验证包内那个 CSV 文件有几行。初始记忆的行为由专门的测试覆盖。
+  const dispose = apply(ctx, { dataDir, seed: false })
 
   const host = services.dtmHost
   if (!host) throw new Error('apply 之后未提供 dtmHost 服务')

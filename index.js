@@ -234,6 +234,7 @@ export function apply(ctx, config = {}) {
   ctx.provide(SERVICE_NAME, service);
   registerIdentityProjection(ctx);
   registerTimer(ctx, service, config);
+  registerStartup(ctx, service);
 
   // Remote 通道（UI 调宿主）。失败 **不能影响工具链路** —— 吞掉并记日志，
   // 由 client 侧显示「未接线」而不是整插件挂掉。
@@ -377,10 +378,59 @@ function createHostService(ctx, config) {
    * ⚠️ 必须在 `withFileLock` **之前**调用：锁是 `open(lockPath,'wx')`，
    * 而 lockPath 在 `store/` 下——目录不存在会直接 ENOENT（全新安装时必然发生）。
    * `appendRecordCsv` 自己会 mkdir，但那是在锁内、已经太晚。
+   *
+   * 顺带把**初始记忆**铺上：包内自带 `data/store/memory.csv`，首次初始化时
+   * 复制到数据目录。这样「装完就有 6 条说明」，不依赖任何安装脚本——
+   * 从官方插件界面装（走 pnpm add，不跑 scripts/install.mjs）也有。
+   * 只在库文件**不存在**时复制；已有库绝不覆盖。
    */
   async function ensureDirs(layout) {
     await fsp.mkdir(layout.storeDir, { recursive: true });
     await fsp.mkdir(layout.recordsDir, { recursive: true });
+    await seedInitialLibrary(layout);
+  }
+
+  /**
+   * 启动时的一次性初始化：解析数据目录 → 建骨架 → 铺初始库。
+   *
+   * 由 `registerStartup` 在插件加载后异步调用（不 await）。之所以要在启动时
+   * 做、而不是等第一次读写：用户装完插件第一件事是**打开界面看列表**，
+   * 而列表走的是只读路径（不经过 `ensureDirs`），等他真的写第一条记忆时
+   * 才铺初始库就太晚了——界面一直是空的，看起来像坏了。
+   */
+  async function ensureInitialized() {
+    const { layout } = await resolveLayout();
+    await ensureDirs(layout);
+    return { ok: true };
+  }
+
+  /**
+   * 首次初始化：把包内自带的初始库复制到数据目录。
+   *
+   * 三条硬约束：
+   *   ① 只在目标库**不存在**时写 —— 已有记忆绝不覆盖（这是用户的资产）。
+   *   ② 复制失败**不阻断启动** —— 初始记忆是便利，不是功能前提；
+   *      失败就打一条日志，库保持为空，用户照样能用。
+   *   ③ 用 `COPYFILE_EXCL` 原子创建 —— 两个进程同时首次启动时，
+   *      只有一个能建成，另一个拿到 EEXIST 后静默跳过，不会互相覆盖。
+   */
+  async function seedInitialLibrary(layout) {
+    // config.seed === false 时跳过（测试用）。默认播种：装完即见初始记忆。
+    if (config?.seed === false) return;
+    const bundled = path.join(PACKAGE_DIR, 'data', 'store', 'memory.csv');
+    try {
+      // 1 = fs.constants.COPYFILE_EXCL（目标已存在则失败）。
+      // 写数字而不 import node:fs 的 constants：本文件只依赖 fsp，
+      // 多引一个具名导出没有收益，而这个常量是 POSIX/Win32 都稳定的 1。
+      await fsp.copyFile(bundled, layout.libraryCsv, 1);
+      ctx.logger?.info?.('[dsh-tag-memory] 已铺初始记忆库（包内自带）。');
+    } catch (err) {
+      // EEXIST = 库已存在（正常，不覆盖）；ENOENT = 包里没带初始库（旧版本包）。
+      // 其余错误（权限/磁盘）也只记日志——记忆库建不起来不该让插件整体挂掉。
+      if (err?.code !== 'EEXIST' && err?.code !== 'ENOENT') {
+        ctx.logger?.warn?.('[dsh-tag-memory] 铺初始记忆库失败（不影响使用）：', err?.message ?? err);
+      }
+    }
   }
 
   /** 设置页选的库位置：<包根>/config/data-dir.json。读不到就当没选。 */
@@ -1898,6 +1948,7 @@ function createHostService(ctx, config) {
     _dispose: dispose,
     _resolveLayout: resolveLayout,
     _loadConfigs: loadConfigs,
+    _ensureInitialized: ensureInitialized,
   };
 
   // ⚠️ Remote 端点登记要求 service 是「class 实例」形态：
@@ -2026,6 +2077,28 @@ function registerTimer(ctx, service, config) {
   } catch (err) {
     ctx.logger?.warn?.('[dsh-tag-memory] 定时任务启动失败：%s', err?.message ?? err);
   }
+}
+
+/**
+ * 启动时铺初始记忆库。
+ *
+ * 为什么单独一步、而不是等第一次读写：从官方插件界面装（pnpm add）不执行
+ * `scripts/install.mjs`，所以那条路上的播种从来不会发生——用户装完打开界面
+ * 看到的是空库，误以为坏了。这里在**插件加载时**就把包内自带的
+ * `data/store/memory.csv` 复制到数据目录，装完即见。
+ *
+ * 三条纪律：
+ *   · **异步、不 await** —— 初始化失败绝不能拖住插件装配或阻塞启动。
+ *   · **只补不改** —— 库已存在就跳过（`COPYFILE_EXCL` 保证原子性），
+ *     用户已有的记忆一个字都不动。
+ *   · **失败不报错给用户** —— 初始记忆是便利，不是功能前提；只记一条日志。
+ */
+function registerStartup(ctx, service) {
+  Promise.resolve()
+    .then(() => service._ensureInitialized())
+    .catch((err) => {
+      ctx.logger?.warn?.('[dsh-tag-memory] 启动初始化失败（不影响使用）：', err?.message ?? err);
+    });
 }
 
 /* ------------------------------------------------------------------ *
