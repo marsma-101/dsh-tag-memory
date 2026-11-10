@@ -83,7 +83,12 @@ import {
   appendJsonl,
   readJsonl,
   localIsoString,
+  formatLocalDate,
 } from './lib/engine/core.mjs';
+
+// 已有库的只读体检（见 内部文档/已有库检测与处置规则.md）。
+// 单独一个模块，是为了从类型上保证它改不了文件——它不 import 任何写接口。
+import { diagnoseLibrary, diagnoseMultiple, findLibraries } from './lib/engine/diagnose.mjs';
 
 import { buildNewRecord, buildWriteLog } from './lib/engine/write.mjs';
 import { recall as engineRecall, buildReadLog } from './lib/engine/read.mjs';
@@ -270,6 +275,14 @@ export function apply(ctx, config = {}) {
 function createHostService(ctx, config) {
   /** 缓存：schema / scoring / equivalence（dict.mjs 自带 mtime 热更新）。 */
   let cfgCache = null;
+  /**
+   * 最近一次库体检的结论（启动时算一次，之后随读写返回）。
+   *
+   * 为什么缓存：体检要读整个库文件，不能每次 recall 都读一遍。
+   * 但也不能永久缓存——用户在设置页换了数据目录之后要重算，
+   * 所以 `_ensureInitialized` 与 `migrateDataDir` 都会刷新它。
+   */
+  let libraryIssueCache = null;
   /** 定时任务句柄。 */
   let timer = null;
   /** 整理提醒句柄。与 `timer` 分开持有：两者周期独立，各自可能单独关闭。 */
@@ -391,33 +404,115 @@ function createHostService(ctx, config) {
   }
 
   /**
-   * 启动时的一次性初始化：解析数据目录 → 建骨架 → 铺初始库。
+   * 启动时的一次性初始化：解析数据目录 → 体检已有库 → 建骨架 → 铺初始库。
    *
    * 由 `registerStartup` 在插件加载后异步调用（不 await）。之所以要在启动时
    * 做、而不是等第一次读写：用户装完插件第一件事是**打开界面看列表**，
    * 而列表走的是只读路径（不经过 `ensureDirs`），等他真的写第一条记忆时
    * 才铺初始库就太晚了——界面一直是空的，看起来像坏了。
+   *
+   * ⚠️ 顺序不能反：**必须先体检、后播种**。
+   * 先播种的话，`COPYFILE_EXCL` 遇到旧库会 EEXIST 静默跳过，
+   * 于是那份 0.3.7 的旧文件永远躺在那儿，一条也读不出来——
+   * 用户看到的是「我的记忆全没了」。体检就是为了识别这种局面。
    */
   async function ensureInitialized() {
     const { layout } = await resolveLayout();
-    await ensureDirs(layout);
-    return { ok: true };
+    const { schema } = await loadConfigs();
+
+    // ① 体检（只读，绝不改文件）
+    let issue = null;
+    try {
+      issue = await diagnoseLibrary(layout.libraryCsv, schema);
+    } catch (err) {
+      ctx.logger?.warn?.('[dsh-tag-memory] 库体检失败（不影响使用）：', err?.message ?? err);
+    }
+    libraryIssueCache = issue;
+
+    // ② 建骨架 + 按体检结论决定要不要铺初始库。
+    // 注意：`seedInitialLibrary` 自动处理失败时会把 libraryIssueCache 换成
+    // AUTOFIX_FAILED，那个结论比体检结果更新，所以 ③ 不能无条件覆盖它。
+    await fsp.mkdir(layout.storeDir, { recursive: true });
+    await fsp.mkdir(layout.recordsDir, { recursive: true });
+    await seedInitialLibrary(layout, issue);
+
+    // ③ 自动处理成功（库已被换成新格式）时，旧的体检结论已过期，清掉。
+    //    失败的情况上面已经换成 AUTOFIX_FAILED，保持不动。
+    if (libraryIssueCache === issue && issue?.autoFixable === true) {
+      libraryIssueCache = null;
+    }
+
+    return { ok: true, issue: libraryIssueCache };
   }
 
   /**
    * 首次初始化：把包内自带的初始库复制到数据目录。
    *
-   * 三条硬约束：
-   *   ① 只在目标库**不存在**时写 —— 已有记忆绝不覆盖（这是用户的资产）。
-   *   ② 复制失败**不阻断启动** —— 初始记忆是便利，不是功能前提；
-   *      失败就打一条日志，库保持为空，用户照样能用。
-   *   ③ 用 `COPYFILE_EXCL` 原子创建 —— 两个进程同时首次启动时，
-   *      只有一个能建成，另一个拿到 EEXIST 后静默跳过，不会互相覆盖。
+   * 分诊规则（见 内部文档/已有库检测与处置规则.md §3）：
+   *   库不存在                    → 铺初始库
+   *   库存在、正常                 → 什么都不做（绝不覆盖）
+   *   旧格式但**0 行**（无数据可丢） → 备份旧文件 → 铺初始库（自动，可逆）
+   *   旧格式**有数据**             → **什么都不做**，只把 issue 报出去问用户
+   *   其他问题（缺列/坏行/读不了）  → 什么都不做，只报
+   *
+   * 为什么只有「0 行旧格式」能自动处理：那份文件里没有任何记忆，
+   * 换掉它不丢东西；而一旦有数据，旧格式的列就推不出新格式的形态，
+   * 自动转换等于编造用户记忆。
    */
-  async function seedInitialLibrary(layout) {
+  async function seedInitialLibrary(layout, issue) {
     // config.seed === false 时跳过（测试用）。默认播种：装完即见初始记忆。
     if (config?.seed === false) return;
+
+    // 库已存在且**没有**需要自动处理的结论 → 一律不动。
+    if (issue?.exists && issue?.autoFixable !== true) return;
+
     const bundled = path.join(PACKAGE_DIR, 'data', 'store', 'memory.csv');
+
+    // 旧格式空壳：先备份再铺，备份路径要留痕（用户可能想找回原文件）。
+    if (issue?.autoFixable === true) {
+      try {
+        const stamp = formatLocalDate(new Date()).replaceAll('-', '');
+        const backupDir = path.join(layout.dataDir, 'backup');
+        await fsp.mkdir(backupDir, { recursive: true });
+        const backupPath = path.join(backupDir, `memory.legacy-${stamp}.csv`);
+        await fsp.copyFile(layout.libraryCsv, backupPath);
+        await fsp.rm(layout.libraryCsv, { force: true });
+        ctx.logger?.info?.(
+          `[dsh-tag-memory] 旧格式空库已备份到 ${backupPath}（原文件 0 条数据，未丢内容），将铺初始记忆库。`,
+        );
+      } catch (err) {
+        // 备份失败 → **绝不能**继续删/覆盖。原文件留着，等用户处理。
+        //
+        // ⚠️ 这里必须把失败**升级成可见的问题**，不能只写日志。
+        // 实测踩过：备份代码里有个未定义的引用（ReferenceError），
+        // 被这个 catch 吞掉后表现为「插件什么都没做」——
+        // 用户看到旧库还在、一条读不出来，却完全不知道自动处理失败过。
+        // 静默失败比报错更难查。
+        libraryIssueCache = {
+          ok: false,
+          exists: true,
+          severity: 'blocking',
+          code: 'AUTOFIX_FAILED',
+          message:
+            `发现旧格式空库，尝试备份后换成新格式时失败：${err?.message ?? err}。` +
+            '原文件保持不动，你的数据没有受影响。',
+          question:
+            '自动整理旧格式空库时出错了（原文件没被动过）。要我告诉你文件路径，你手动处理吗？',
+          options: [
+            { id: 'keep-as-is', label: '先不动，我自己看文件', risk: 'safe' },
+            { id: 'retry', label: '再试一次自动处理', risk: 'safe' },
+          ],
+          found: { path: layout.libraryCsv, rows: 0 },
+          autoFixable: false,
+        };
+        ctx.logger?.warn?.(
+          '[dsh-tag-memory] 旧格式空库备份失败，已放弃自动处理（原文件保持不动）：',
+          err?.message ?? err,
+        );
+        return;
+      }
+    }
+
     try {
       // 1 = fs.constants.COPYFILE_EXCL（目标已存在则失败）。
       // 写数字而不 import node:fs 的 constants：本文件只依赖 fsp，
@@ -431,6 +526,36 @@ function createHostService(ctx, config) {
         ctx.logger?.warn?.('[dsh-tag-memory] 铺初始记忆库失败（不影响使用）：', err?.message ?? err);
       }
     }
+  }
+
+  /**
+   * 把体检结论裁成「给智能体/UI 看」的形态。
+   *
+   * 为什么不全量返回：体检结果里有 `found.columns`（整个表头）、`notes` 等
+   * 排查用字段，塞进每次 recall 的返回值会让 token 暴涨，而智能体只需要
+   * 「出了什么事、能怎么办、要不要问人」这三样。
+   *
+   * 返回 null 表示库没问题——**没问题就不占一个字段**，
+   * 免得智能体每次都看到一堆 null 去猜含义。
+   */
+  function publicIssue(issue) {
+    if (!issue) return null;
+    if (issue.severity === 'ok') return null;
+    return {
+      code: issue.code ?? null,
+      severity: issue.severity,
+      message: issue.message ?? null,
+      question: issue.question ?? null,
+      options: arr(issue.options),
+      found: {
+        path: issue.found?.path ?? null,
+        rows: Number(issue.found?.rows ?? 0),
+        ...(arr(issue.found?.missing).length > 0 ? { missing: arr(issue.found.missing) } : {}),
+        ...(Number(issue.found?.badRows ?? 0) > 0 ? { badRows: Number(issue.found.badRows) } : {}),
+      },
+      /** true = 插件能自己安全处理（没有数据可丢），false/缺省 = 必须问用户。 */
+      autoFixable: issue.autoFixable === true,
+    };
   }
 
   /** 设置页选的库位置：<包根>/config/data-dir.json。读不到就当没选。 */
@@ -813,6 +938,11 @@ function createHostService(ctx, config) {
       browseMode: result.browseMode === true,
       errors: arr(result.errors),
       message: strOrNull(result.message),
+      // 库本身有问题时（旧格式/缺列/坏行/多份库），把结论一并带出。
+      // 智能体看到它就该**停下来问用户**，而不是自己猜着迁移。
+      // 注意：这不改变 empty 的语义——「库坏了」和「你确实没有这条记忆」是两件事，
+      // 混成一句会让用户以为自己的记忆丢了。
+      libraryIssue: publicIssue(libraryIssueCache),
     };
   }
 
@@ -841,6 +971,15 @@ function createHostService(ctx, config) {
         offset: 0,
         limit: 0,
         libraryIncompatible: true,
+        libraryIssue: publicIssue(libraryIssueCache) ?? {
+          code: 'LIBRARY_FORMAT_MISMATCH',
+          severity: 'blocking',
+          message: '记忆库格式不兼容，一条都读不出来。这不代表你没有记忆。',
+          question: '记忆库格式不兼容（表头对不上），要我告诉你文件路径吗？',
+          options: [{ id: 'keep-as-is', label: '先不动，我自己看文件', risk: 'safe' }],
+          found: { path: layout.libraryCsv, rows: 0 },
+          autoFixable: false,
+        },
       };
     }
 
@@ -888,6 +1027,9 @@ function createHostService(ctx, config) {
       offset,
       limit,
       errors: arr(errors),
+      // 库有问题时（旧格式/缺列/坏行/多份库）一并带出，让界面能提示。
+      // 正常时是 null，不占字段。
+      libraryIssue: publicIssue(libraryIssueCache),
     };
   }
 
@@ -910,6 +1052,15 @@ function createHostService(ctx, config) {
         dataDir: layout.dataDir,
         dataDirSource: source,
         libraryIncompatible: true,
+        libraryIssue: publicIssue(libraryIssueCache) ?? {
+          code: 'LIBRARY_FORMAT_MISMATCH',
+          severity: 'blocking',
+          message: '记忆库格式不兼容，一条都读不出来。这不代表你没有记忆。',
+          question: '记忆库格式不兼容（表头对不上），要我告诉你文件路径吗？',
+          options: [{ id: 'keep-as-is', label: '先不动，我自己看文件', risk: 'safe' }],
+          found: { path: layout.libraryCsv, rows: 0 },
+          autoFixable: false,
+        },
       };
     }
 
@@ -934,6 +1085,7 @@ function createHostService(ctx, config) {
       dataDir: layout.dataDir,
       dataDirSource: source,
       libraryIncompatible: false,
+      libraryIssue: publicIssue(libraryIssueCache),
     };
   }
 

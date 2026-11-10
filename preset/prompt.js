@@ -137,6 +137,11 @@ export function renderInjection({ writeRoutes, dimensions } = {}) {
     '- 查空会告诉你「真查空」还是「假查空」。**假查空时按无返回正常继续，不要「换个说法再试」**——' +
       '反复重试只会堆词、照样查空。要再找就：留空只按形态浏览、换形态、或调整标签。',
   );
+  // 库本身坏了（旧格式/缺列/坏行/多份库）时，返回值带 `libraryIssue`。
+  // 这条必须写进注入：模型只有知道「这时候该问人」，才不会自己去猜着迁移——
+  // 而旧格式的列根本推不出新格式的形态，猜就是编造用户记忆。
+  // 用词压到最短：注入预算只剩几十字节，多说一句就撑破 6000。
+  lines.push('- 带`libraryIssue`→问人，转述`question`/`options`，别自行迁移合并');
 
   // 去掉尾部空行，保持稳定输出（利于 KV cache 前缀复用）
   while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();

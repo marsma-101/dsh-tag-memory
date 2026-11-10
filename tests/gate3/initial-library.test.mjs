@@ -165,3 +165,135 @@ test('I3 已有库绝不被覆盖（用户的记忆不能被初始记忆冲掉�
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+/** 造一个最小 ctx（够 apply 跑完同步段）。 */
+function makeCtx() {
+  const services = new Map();
+  return {
+    services,
+    ctx: {
+      logger: { info() {}, warn() {}, error() {}, debug() {} },
+      on: () => () => {},
+      effect: (fn) => {
+        try {
+          return fn();
+        } catch {
+          return () => {};
+        }
+      },
+      get: (n) => services.get(n),
+      provide: (n, v) => {
+        services.set(n, v);
+        return () => services.delete(n);
+      },
+      inject: () => {},
+      typert: { register: () => () => {} },
+      systemPrompt: { section: () => () => {}, context: () => () => {} },
+    },
+  };
+}
+
+/** 等某个条件成立（启动初始化是异步的，不 await）。 */
+async function waitFor(fn, ms = 3000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (fn()) return true;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return false;
+}
+
+const OLD_HEADER =
+  'id,内容,时间,环境,原因,备注,稳定性,成熟度,距离,角色,项目,状态,关键词,工具,版本,依据,类型';
+
+test('I4 旧格式空壳（0 行）→ 自动备份旧文件 + 铺初始记忆库', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-seed-legacy-'));
+  try {
+    const storeDir = path.join(dataDir, 'store');
+    fs.mkdirSync(storeDir, { recursive: true });
+    const lib = path.join(storeDir, 'memory.csv');
+    // 0.3.7 的 17 列表头，零数据行 —— 没有记忆可丢，可以自动处理。
+    fs.writeFileSync(lib, `${OLD_HEADER}\r\n`, 'utf8');
+
+    const { apply } = await import(`file://${path.join(PACKAGE_DIR, 'index.js').replaceAll('\\', '/')}`);
+    const { ctx } = makeCtx();
+    const dispose = apply(ctx, { dataDir });
+
+    // 等库被换成新格式
+    const replaced = await waitFor(() => {
+      try {
+        const head = fs.readFileSync(lib, 'utf8').split(/\r?\n/)[0];
+        return head === schema.columns.join(',');
+      } catch {
+        return false;
+      }
+    });
+    assert.ok(replaced, '旧格式空壳应被换成新格式初始库');
+
+    // 旧文件必须留了备份，且备份里还是旧表头（证明没被改写）
+    const backupDir = path.join(dataDir, 'backup');
+    const backups = fs.existsSync(backupDir) ? fs.readdirSync(backupDir) : [];
+    assert.ok(
+      backups.some((f) => f.startsWith('memory.legacy-')),
+      `必须留备份，实际备份目录：${backups.join(', ') || '(空)'}`,
+    );
+    const backupFile = backups.find((f) => f.startsWith('memory.legacy-'));
+    const backupHead = fs.readFileSync(path.join(backupDir, backupFile), 'utf8').split(/\r?\n/)[0];
+    assert.equal(backupHead, OLD_HEADER, '备份必须是原文件原样，不许改写');
+
+    try {
+      dispose?.();
+    } catch {
+      /* 卸载期忽略 */
+    }
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('I5 旧格式**有数据** → 一个字节都不许动，只报问题', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-seed-legacy-data-'));
+  try {
+    const storeDir = path.join(dataDir, 'store');
+    fs.mkdirSync(storeDir, { recursive: true });
+    const lib = path.join(storeDir, 'memory.csv');
+
+    // 旧格式 + 2 条数据：这是用户的记忆，绝不能自动迁移或覆盖。
+    const row = Array.from({ length: 17 }, (_, i) => `v${i}`).join(',');
+    const original = `${OLD_HEADER}\r\n${row}\r\n${row}\r\n`;
+    fs.writeFileSync(lib, original, 'utf8');
+
+    const { apply } = await import(`file://${path.join(PACKAGE_DIR, 'index.js').replaceAll('\\', '/')}`);
+    const { ctx, services } = makeCtx();
+    const dispose = apply(ctx, { dataDir });
+
+    // 给初始化足够时间跑完（如果它会动文件，这里就会发生）。
+    await new Promise((r) => setTimeout(r, 500));
+
+    const after = fs.readFileSync(lib, 'utf8');
+    assert.equal(after, original, '旧格式有数据时，库必须逐字节不变——不许自动迁移');
+
+    // 不该产生备份（因为根本没动它）
+    const backupDir = path.join(dataDir, 'backup');
+    const backups = fs.existsSync(backupDir) ? fs.readdirSync(backupDir) : [];
+    assert.equal(backups.filter((f) => f.startsWith('memory.legacy-')).length, 0, '没动文件就不该有备份');
+
+    // 但必须把问题报出来，让智能体/用户能看到
+    const host = services.get('dtmHost');
+    assert.ok(host, 'apply 之后应有 dtmHost 服务');
+    const ov = await host.getOverview();
+    assert.ok(ov.libraryIssue, '有数据的旧格式必须报 libraryIssue，不能静默');
+    assert.equal(ov.libraryIssue.code, 'LEGACY_FORMAT_WITH_DATA');
+    assert.equal(ov.libraryIssue.autoFixable, false, '有数据时不许标成可自动处理');
+    assert.ok(ov.libraryIssue.question, '必须带一个能读给用户听的问题');
+    assert.ok(ov.libraryIssue.options.length >= 2, '必须给出可执行选项');
+
+    try {
+      dispose?.();
+    } catch {
+      /* 卸载期忽略 */
+    }
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
