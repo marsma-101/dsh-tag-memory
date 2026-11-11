@@ -74,6 +74,8 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
 import fsp from 'node:fs/promises';
+// 同步读（升级检查要读自己的 package.json 版本号；异步在这里没有收益）
+import { readFileSync } from 'node:fs';
 
 import {
   resolveDataDir,
@@ -105,6 +107,7 @@ import {
 import { planTidy } from './lib/engine/tidy.mjs';
 import { isBackupDue, isTidyDue } from './lib/engine/schedule.mjs';
 import { canMigrate, verifyMigration } from './lib/engine/migrate.mjs';
+import { checkForUpdate } from './lib/engine/update-check.mjs';
 import {
   loadSchema,
   loadScoring,
@@ -114,7 +117,6 @@ import {
 
 /** 宿主服务名（preset/tools.js 里的 HOST_SERVICE 必须与之一致）。 */
 export const SERVICE_NAME = 'dtmHost';
-
 /** Remote 线协议命名空间（client-dev 按这个挂）。 */
 export const REMOTE_NAMESPACE = 'tagMemory';
 
@@ -146,6 +148,8 @@ export const REMOTE_SIGNATURES = Object.freeze({
   mergeLibrary: ['request'],
   runTidy: ['request'],
   exportLibrary: ['request'],
+  // 版本更新检查（方案 C）：无参。UI 手动按钮调它；启动时也走同一实现。
+  checkUpdate: [],
 });
 
 /**
@@ -167,6 +171,9 @@ const READONLY_FIELDS = ['编号', '主要内容', '时距'];
 
 /** 包根目录（index.js 就在包根）。 */
 const PACKAGE_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+/** npm 包名（升级检查查 registry 用；与 package.json 的 name 必须一致）。 */
+const PACKAGE_NAME = 'dsh-tag-memory';
 
 /** records 台账三种 kind → 文件名。 */
 const RECORD_FILES = { write: 'write.jsonl', read: 'read.jsonl', tidy: 'tidy.jsonl' };
@@ -305,6 +312,88 @@ function createHostService(ctx, config) {
    *   · `{seeded:false, reason:'failed', message}` → 权限/磁盘等原因失败
    */
   let seedState = null;
+
+  /**
+   * 版本更新检查结果缓存（2026-11-11，方案 C：启动静默查一次 + 手动按钮）。
+   *
+   * 为什么需要：主子实测「本地停在 1.2.8，npm 都发到 1.4.1 了还毫不知情」——
+   * DSH 插件管理器的更新按钮依赖官方 `updateRefusal()` 的一堆内部条件，
+   * 我们改不动也预测不了，所以插件自带检查、自带展示。
+   *
+   * 结构：`{ checkedAt, current, latest, source, hasUpdate, error, attempts }`
+   *   · null            → 还没查过
+   *   · hasUpdate:false 且 error:null → 已是最新
+   *   · hasUpdate:false 且 error 非空 → **检查失败**（要和「已是最新」区分开！）
+   *
+   * ⚠️ 三不原则：不阻塞启动、不抛错、不自动升级（只提示）。
+   */
+  let updateState = null;
+  /** 当前插件版本（启动时读一次，读不到就空串）。 */
+  let currentVersionCache = '';
+
+  /**
+   * 读本插件自己的版本号。
+   *
+   * 为什么不 import package.json：Node 的 JSON import 要带 `with { type: 'json' }`，
+   * 而部分运行时对断言语法支持不一；插件目录里 package.json 一定在，同步读最简单。
+   */
+  function currentVersion() {
+    if (currentVersionCache !== '') return currentVersionCache;
+    try {
+      const raw = readFileSync(path.join(PACKAGE_DIR, 'package.json'), 'utf8');
+      const v = JSON.parse(raw)?.version;
+      currentVersionCache = typeof v === 'string' ? v.trim() : '';
+    } catch {
+      currentVersionCache = '';
+    }
+    return currentVersionCache;
+  }
+
+  /**
+   * 查一次更新（结果写进 updateState 并返回）。
+   *
+   * 手动按钮与启动后台任务共用**同一个实现**（一个能力两个调用方），
+   * 不在两处各写一份逻辑。
+   *
+   * @param {{ force?: boolean }} [opts] force=true 时忽略「刚查过」的节流
+   */
+  async function checkUpdateNow({ force = false } = {}) {
+    // 节流：10 分钟内重复点按钮不再发网络请求（按钮点着玩不该刷爆 registry）
+    if (!force && updateState && updateState.checkedAt) {
+      const age = Date.now() - Date.parse(updateState.checkedAt);
+      if (Number.isFinite(age) && age >= 0 && age < 10 * 60 * 1000) return updateState;
+    }
+    const current = currentVersion();
+    try {
+      updateState = await checkForUpdate({ currentVersion: current, name: PACKAGE_NAME });
+    } catch (err) {
+      // checkForUpdate 自己不会抛，这里再兜一层：任何意外都变成「检查失败」而不是插件故障
+      updateState = {
+        checkedAt: new Date().toISOString(),
+        current,
+        latest: null,
+        source: null,
+        hasUpdate: false,
+        error: String(err?.message ?? err),
+        attempts: [],
+      };
+    }
+    if (updateState.hasUpdate) {
+      ctx.logger?.info?.(`[dsh-tag-memory] 有新版本可用：${updateState.current} → ${updateState.latest}`);
+    }
+    return updateState;
+  }
+
+  /**
+   * Remote 端点 `tagMemory/checkUpdate` 的实现。
+   *
+   * **必须零参**：gateway 按 `Function.length` 校验实参个数，客户端调无参方法时
+   * 不传任何实参；这个方法若声明了参数（哪怕带默认值），length 仍为 0，
+   * 但一旦有人给它加了个必填参数就会静默变成「传 0 个报错」。
+   * 用零参箭头函数把「强制刷新」语义固定下来，别把 checkUpdateNow 直接挂上去。
+   */
+  const checkUpdate = () => checkUpdateNow({ force: true });
+
 
   /**
    * 解析数据目录 —— 5 级优先级
@@ -1134,6 +1223,9 @@ function createHostService(ctx, config) {
           ? '库是空的（不是坏了）。写第一条记忆会自动创建文件；'
             + '若这个版本没自带初始记忆，属正常，不影响使用。'
           : null,
+      // 版本更新（方案 C）：当前版本恒有；update 是最近一次检查结果（可能为 null = 还没查）
+      version: currentVersion(),
+      update: updateState,
     };
   }
 
@@ -2056,6 +2148,9 @@ function createHostService(ctx, config) {
           ? '库是空的（不是坏了）。写第一条记忆会自动创建文件；'
             + '若这个版本没自带初始记忆，属正常，不影响使用。'
           : null,
+      // 版本更新（方案 C）：设置页显示「当前版本 + 有无新版」就靠这两个字段。
+      version: currentVersion(),
+      update: updateState,
     };
   }
 
@@ -2167,7 +2262,12 @@ function createHostService(ctx, config) {
     _resolveLayout: resolveLayout,
     _loadConfigs: loadConfigs,
     _ensureInitialized: ensureInitialized,
-  };
+  // 版本更新（方案 C）：启动后台检查 + UI 手动按钮共用这一个实现。
+  // checkUpdate 必须是**零参**（gateway 按 Function.length 校验，传实参就报
+  // expected 0 arguments），所以这里挂一个零参包装，而不是带 {force} 的原函数。
+  _checkUpdateNow: checkUpdateNow,
+    checkUpdate,
+    };
 
   // ⚠️ Remote 端点登记要求 service 是「class 实例」形态：
   // dsh-typert-protocol 的 remoteMethods() 只从 Object.getPrototypeOf(service) 读
@@ -2316,6 +2416,20 @@ function registerStartup(ctx, service) {
     .then(() => service._ensureInitialized())
     .catch((err) => {
       ctx.logger?.warn?.('[dsh-tag-memory] 启动初始化失败（不影响使用）：', err?.message ?? err);
+    });
+
+  // 方案 C 的「启动静默查一次」：不 await、失败只留日志。
+  // 延迟 3 秒：启动瞬间宿主还在装配，抢网络没意义；也避开初始化铺种子的 IO 高峰。
+  // `.unref()`：这个定时器不该拖着进程不退出（若此时 DSH 被关掉）。
+  // 绝不阻塞：检查版本是**便利功能**，它失败绝不能让插件看起来坏了。
+  const delayed = new Promise((resolve) => {
+    const t = setTimeout(resolve, 3000);
+    if (typeof t.unref === 'function') t.unref();
+  });
+  delayed
+    .then(() => service._checkUpdateNow?.())
+    .catch((err) => {
+      ctx.logger?.warn?.('[dsh-tag-memory] 启动检查更新失败（不影响使用）：', err?.message ?? err);
     });
 }
 

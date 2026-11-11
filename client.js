@@ -413,6 +413,13 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
             parameters: [],
             result: { mode: 'src-json' },
           },
+          'tagMemory/checkUpdate': {
+            service: REMOTE_NS,
+            description: '检查 npm 上是否有更新版本（镜像优先，官方源兜底）。无参。',
+            invocation: { kind: 'direct' },
+            parameters: [],
+            result: { mode: 'src-json' },
+          },
         },
       }
     }
@@ -595,6 +602,9 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
         // 导出（沙箱内可选目标目录）
         exportLibrary: function (payload) { return call('exportLibrary', payload || {}) },
         listExportTargets: function () { return call('listExportTargets') },
+
+        // 版本更新检查（方案 C 的手动按钮；无参方法不能传实参）
+        checkUpdate: function () { return call('checkUpdate') },
       }
     }
 
@@ -631,7 +641,7 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
         const lazy = { ready: function () { return hasApi(nsRef) } }
       const methods = [
         'getOverview', 'listEntries', 'getFacets', 'getSettings',
-        'retagEntry', 'migrateDataDir', 'backupNow', 'listBackups', 'restore', 'mergeLibrary', 'runTidy', 'exportLibrary', 'listExportTargets',
+        'retagEntry', 'migrateDataDir', 'backupNow', 'listBackups', 'restore', 'mergeLibrary', 'runTidy', 'exportLibrary', 'listExportTargets', 'checkUpdate',
       ]
       methods.forEach(function (name) {
         lazy[name] = function () {
@@ -1877,6 +1887,10 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       const [dialogBusy, setDialogBusy] = React.useState(false)
       const [dialogError, setDialogError] = React.useState(null)
 
+      // 版本更新（方案 C）：启动时宿主已静默查过一次，结果随 overview 下发；
+      // 这里只管「手动再查一次」和本地展示。
+      const [checkingUpdate, setCheckingUpdate] = React.useState(false)
+
       // 字典预览卡片要显示**宿主真实的取值域**（不是前端写死的常量），
       // 所以这里一并取 facets —— 它带 allowedShapes/allowedStabilities/
       // allowedStatuses，正是 schema.json 里那份字典。
@@ -1982,6 +1996,25 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
           })
           .then(function () { setBusy(false) })
       }, [api, exportTargets, exportTargetId, t])
+
+      /**
+       * 手动检查更新（方案 C 的按钮）。
+       *
+       * 宿主侧有 10 分钟节流：连续点不会反复打 registry。
+       * 检查完**重新 load 一次**设置，让页面拿到宿主那边最新的 update 状态——
+       * 而不是在客户端自己拼一份，否则会和宿主各存一份、迟早漂移。
+       */
+      const onCheckUpdate = React.useCallback(function () {
+        if (!api || checkingUpdate) return
+        setCheckingUpdate(true)
+        Promise.resolve()
+          .then(function () { return api.checkUpdate() })
+          .then(function () { load() })
+          .catch(function (err) {
+            setError(err && err.message ? err.message : String(err))
+          })
+          .then(function () { setCheckingUpdate(false) })
+      }, [api, checkingUpdate, load])
 
       // `api` 是惰性代理（永远非 null），用 `api.ready()` 判断命名空间是否真挂上
       const wired = !!(api && typeof api.ready === 'function' && api.ready())
@@ -2098,6 +2131,63 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
           : null,
 
         notice ? h('p', { className: 'dtm-caption', role: 'status' }, notice) : null,
+
+        // ---- ⓪ 版本与更新（方案 C）----
+        // 为什么放最上面：装完插件最先想知道的就是「我这是不是最新版」。
+        // 数据来源：overview.version（恒有）+ overview.update（最近一次检查结果，可能 null）。
+        h(
+          'div',
+          { className: 'dtm-section', 'data-dtm-card': 'version' },
+          h(
+            'div',
+            { className: 'dtm-section-head' },
+            h('p', { className: 'dtm-title' }, t('cardVersionTitle')),
+            h('p', { className: 'dtm-desc' }, t('cardVersionDesc')),
+          ),
+          h(
+            'div',
+            { className: 'dtm-kv' },
+            h('span', { className: 'dtm-kv-key' }, t('versionCurrent')),
+            h('code', { className: 'dtm-mono dtm-kv-val' }, String(s.version || t('unknown'))),
+          ),
+          // 检查结果的三种态必须能分清：有新版本 / 已是最新 / 检查失败
+          update && update.hasUpdate
+            ? h(
+                'div',
+                { className: 'dtm-kv' },
+                h('span', { className: 'dtm-kv-key dtm-kv-danger' }, t('versionAvailable')),
+                h('code', { className: 'dtm-mono dtm-kv-val' }, String(update.latest || '')),
+              )
+            : null,
+          update && update.hasUpdate
+            ? h(DtmWarn, null,
+                t('versionUpgradeHint').replace('{cmd}', 'npm i -g ' + 'dsh-tag-memory@' + String(update.latest || '')))
+            : null,
+          update && !update.hasUpdate && update.error
+            ? h('p', { className: 'dtm-caption' }, t('versionCheckFailed') + '：' + String(update.error))
+            : null,
+          update && !update.hasUpdate && !update.error
+            ? h('p', { className: 'dtm-caption' }, t('versionUpToDate'))
+            : null,
+          h(
+            'div',
+            { className: 'dtm-row', style: { marginTop: 8 } },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dtm-btn',
+                disabled: !!busy || checkingUpdate,
+                onClick: onCheckUpdate,
+              },
+              checkingUpdate ? t('working') : t('versionCheckNow'),
+            ),
+            update && update.checkedAt
+              ? h('span', { className: 'dtm-caption' },
+                  t('versionCheckedAt') + '：' + String(update.checkedAt).replace('T', ' ').slice(0, 19))
+              : null,
+          ),
+        ),
 
         // ---- ① 库位置 ----
         h(
@@ -2904,9 +2994,19 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       retry: '重试',
       working: '处理中…',
 
+      // 版本更新（方案 C）
+      cardVersionTitle: '版本与更新',
+      cardVersionDesc: '当前安装的插件版本，以及 npm 上是否有更新。启动时会自动查一次。',
+      versionCurrent: '当前版本',
+      versionAvailable: '有新版本',
+      versionUpToDate: '已是最新版本。',
+      versionCheckFailed: '检查更新失败',
+      versionCheckNow: '检查更新',
+      versionCheckedAt: '上次检查',
+      versionUpgradeHint: '升级方式：在 profile 目录执行 {cmd}，然后重启 DSH。',
+
       // 库位置
-      cardLocationTitle: '记忆库位置',
-      cardLocationDesc: '记忆库本体、记录台账与备份都放在这个目录下。',
+      cardLocationTitle: '记忆库位置',      cardLocationDesc: '记忆库本体、记录台账与备份都放在这个目录下。',
       dirPath: '当前目录',
       dirSource: '生效来源',
       dirSourceConfig: '部署配置（cordis.patch.yml 的 config.dataDir）',
@@ -3056,8 +3156,18 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       retry: 'Retry',
       working: 'Working…',
 
-      cardLocationTitle: 'Library location',
-      cardLocationDesc: 'The library itself, its record ledgers, and backups all live in this directory.',
+      // Version & update (plan C)
+      cardVersionTitle: 'Version & updates',
+      cardVersionDesc: 'The installed plugin version, and whether npm has a newer one. Checked once at startup.',
+      versionCurrent: 'Current version',
+      versionAvailable: 'New version available',
+      versionUpToDate: 'You are on the latest version.',
+      versionCheckFailed: 'Update check failed',
+      versionCheckNow: 'Check for updates',
+      versionCheckedAt: 'Last checked',
+      versionUpgradeHint: 'To upgrade, run {cmd} in the profile directory, then restart DSH.',
+
+      cardLocationTitle: 'Library location',      cardLocationDesc: 'The library itself, its record ledgers, and backups all live in this directory.',
       dirPath: 'Current directory',
       dirSource: 'Effective source',
       dirSourceConfig: 'Deployment config (cordis.patch.yml config.dataDir)',
