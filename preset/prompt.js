@@ -76,12 +76,22 @@ export const IDENTITY_CONTEXT_ORDER = 130;
 export function renderInjection({ writeRoutes, dimensions } = {}) {
   const lines = [];
 
+  /*
+   * ═══ 分层原则（2026-11-11 修订，主子定方向）═══════════════════════
+   * 每轮注入只留「**这一轮就要判的**」：写不写、写哪类、什么时候读、调哪个工具。
+   * 判据之外的细则（标签怎么打、字段怎么填、被拒怎么补、读写细则）**一律下沉**：
+   *   · 工具**返回值** —— 被拒/查空时才给，真按需、零常态成本；
+   *   · `标签字典.md` —— 模型主动读才看。
+   * ⚠️ 工具 description 不算「按需」：它也每轮在上下文里（实测 7.8 KB）。
+   * 若要再瘦身，先瘦 description，别把细则从 section 搬到 description 自我安慰。
+   */
+
   lines.push('## 长期记忆（dsh-tag-memory）');
   lines.push('');
   lines.push('库是一张表，行只追加。读写**只用这 10 个工具**。');
   lines.push('');
 
-  /* ── 工具入口（一个不能缺）────────────────────────────────── */
+  /* ── 工具入口（一个不能缺，这是「调哪个」）──────────────────── */
   lines.push('### 入口');
   lines.push('');
   lines.push('| 工具 | 什么时候调 |');
@@ -89,59 +99,43 @@ export function renderInjection({ writeRoutes, dimensions } = {}) {
   for (const { name, when } of TOOL_WHENS) lines.push(`| \`${name}\` | ${when} |`);
   lines.push('');
 
-  /* ── 写入判据（源自 v0.3.7 的 writeRoutes）────────────────────
-   * 这段回答「这句话该不该记」，与入口表里「什么时候调工具」是两回事。
-   * 判据本体在 schema.json 的 `writeRoutes`，这里只排版（换措辞改 schema）。 */
+  /* ── 写入判据（核心：什么内容该进库。每轮必须有）──────────────
+   * 只渲染 rules（判类），principles（方法论）下沉到文档与拒绝提示。
+   * 判据本体在 schema.json 的 `writeRoutes`，这里只排版。 */
   lines.push(...renderWriteRoutes(writeRoutes));
   lines.push('');
 
-  /* ── 字段标准（缺了会被拒，按这里填）─────────────────────────
-   * 程序只校验、**不补默认值**。这一节把每个字段的标准写明，
-   * 让模型在被拒时知道回哪儿查、该补什么。
-   * 判据本体在 schema.json 的 `dimensions`（照 v0.3.7 结构），这里只排版。 */
-  lines.push(...renderDimensions(dimensions));
+  /* ── 什么时候读（核心：触发条件，每轮必须有）────────────────── */
+  lines.push('### 什么时候读');
+  lines.push('');
+  lines.push('- 提到「之前/上次/定过」、要做可能做过的事、说你漏了什么 → `dtm_recall`。');
+  lines.push('- 想浏览某形态全部条目 → `自由标签` 留空。');
+  lines.push(
+    '- 查空分「真查空 / 假查空」。**假查空按无返回继续，不要换个说法重试**；' +
+      '要再找就留空按形态浏览、换形态、或调标签。',
+  );
+  lines.push('- 带`libraryIssue`→问人，转述`question`/`options`，别自行迁移合并');
   lines.push('');
 
-  lines.push('| 字段 | 标准 |');
-  lines.push('|---|---|');
-  lines.push('| `主要内容` | 一条一件事，不设字数上限 |');
-  lines.push('| `自由标签` | 1~20 个离散词，从「作用/注意事项/内容关键词」拆；用正文会出现的实词，短词优于长句。**含 `|` 会被拒** |');
+  /* ── 字段（只留「填之前必须知道的最小集」）────────────────────
+   * 完整含义、how、取值域解释已下沉：参数 enum 在工具定义里、被拒提示里有、
+   * 标签字典.md 有全文。这里只回答「我该填什么、什么不用填」。 */
+  lines.push('### 字段标准');
   lines.push('');
-  lines.push('同一个名字每次必须写成同一个字符串，否则自己写的东西读不回来。');
+  lines.push(...renderDimensionsBrief(dimensions));
+  lines.push('- `主要内容` 一条一件事，不设字数上限。');
+  lines.push('- `自由标签` 1~20 个离散实词，**不含 `|`**；怎么打见被拒提示 / `标签字典.md`。');
   lines.push('');
 
-  /* ── 被拒了怎么改（错误 → 纠正的闭环）──────────────────────
-   * 程序只做校验、不做补值。这一节要模型知道的是「被拒不是失败，
-   * 是让你补参数」——不写清这点，模型容易把拒写当成「库用不了」而放弃，
-   * 或者改成瞎猜的值。 */
+  /* ── 被拒了怎么办（只留一句，细则由返回值点名）──────────────── */
   lines.push('### 被拒了怎么办');
   lines.push('');
   lines.push(
-    '- `blocked`（`PROJECT_EMPTY`/`AGENT_EMPTY`/`SHAPE_EMPTY`/`TAGS_EMPTY` 等）与 `errors` ' +
-      '会点名哪个字段不对、合法值是什么。**补上那个字段再调一次**，别换说法绕。',
-  );
-  lines.push(
-    '- `项目`/`智能体` 报错说明**环境**没准备好（工作目录不明 / 身份没绑），不是让你填值：'
-      + '该问用户问用户，该 `dtm_bind` 就绑，别猜一个字符串塞进来。',
-  );
-  lines.push(
-    '- 每次被拒都落台账（`dtm_records` 可查）。同一字段被拒多次，说明理解有偏差，对照上表重判。',
+    '- 返回值会点名是哪个字段、合法值是什么、该怎么补——**按它补完再调一次**，别换说法绕。' +
+      '`项目`/`智能体` 报错是**环境**没准备好（没绑身份/工作目录不明），去问用户或 `dtm_bind`，别猜值。',
   );
   lines.push('');
-
-  /* ── 读 ──────────────────────────────────────────────────── */
-  lines.push('### 读（`dtm_recall`：`形态`/`项目`/`智能体` 必填，`自由标签` 可选）');
-  lines.push('');
-  lines.push('- 想浏览某形态全部条目 → `自由标签` 留空。');
-  lines.push(
-    '- 查空会告诉你「真查空」还是「假查空」。**假查空时按无返回正常继续，不要「换个说法再试」**——' +
-      '反复重试只会堆词、照样查空。要再找就：留空只按形态浏览、换形态、或调整标签。',
-  );
-  // 库本身坏了（旧格式/缺列/坏行/多份库）时，返回值带 `libraryIssue`。
-  // 这条必须写进注入：模型只有知道「这时候该问人」，才不会自己去猜着迁移——
-  // 而旧格式的列根本推不出新格式的形态，猜就是编造用户记忆。
-  // 用词压到最短：注入预算只剩几十字节，多说一句就撑破 6000。
-  lines.push('- 带`libraryIssue`→问人，转述`question`/`options`，别自行迁移合并');
+  lines.push('标签怎么打、字段怎么填、读写细则 → 需要时读插件内 `标签字典.md`。');
 
   // 去掉尾部空行，保持稳定输出（利于 KV cache 前缀复用）
   while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
@@ -170,6 +164,11 @@ export function renderIdentityContext(identity) {
     lines.push('');
     lines.push('归属由程序填，`dtm_write`/`dtm_recall` 都不用传 `项目`/`智能体`——');
     lines.push('你只管决定**内容、形态、自由标签**。');
+    // §4.7 配套：答复前自问（旧版 _work_preset.js L265 曾有一句，重构时丢了）。
+    // 放 context 末尾而非 section：section 实测 5998/6000 字节只剩 2 字节，
+    // 且内容一变会毁掉整段 KV cache 前缀；context 是 user 角色快照，加一句不毁缓存。
+    lines.push('');
+    lines.push('> **答复前自问**：这轮中了哪条必写？中了就先 `dtm_write` / `dtm_recall` 再答。');
     return lines.join('\n');
   }
 
@@ -210,14 +209,40 @@ function renderWriteRoutes(writeRoutes) {
   lines.push('');
   for (const r of rules) lines.push(`- ${r}`);
 
-  const principles = Array.isArray(writeRoutes?.principles)
-    ? writeRoutes.principles.filter((p) => String(p ?? '').trim() !== '')
-    : [];
-  if (principles.length > 0) {
-    lines.push('');
-    lines.push('**写入原则**：');
-    for (const p of principles) lines.push(`- ${p}`);
+  /*
+   * `principles`（写入原则 5 条）**不再每轮注入**（2026-11-11）。
+   * 理由：那 5 条是「怎么写得更好」的方法论，不是「这一轮该不该写」的判据；
+   * 实测占 600 余字节，且模型是被拒绝/整理时才真正需要它。
+   * 下沉位置：① `标签字典.md`「写入原则」全文；② `dtm_write` 被拒时的返回值
+   * （见 format.js 的 formatWriteResult / 拒绝提示）。
+   * schema.json 里保留 `principles`，供文档与拒绝提示读取，不删数据。
+   */
+
+  return lines;
+}
+
+/**
+ * 字段标准的**极简版**（每轮注入用）。
+ *
+ * 与 `renderDimensions`（完整版：question + values + how）的分工：
+ *   · 完整版留给**文档**与被拒提示；
+ *   · 注入只回答「这一维我填不填、是什么」——`项目`/`智能体` 根本不填（程序填），
+ *     `稳定性` 恒为观察（模型没参数），这两维在注入里只需一句「不用填」。
+ *
+ * 为什么这么砍：完整版实测 2128 字节（占 section 35%），其中大半是取值域解释
+ * 和 `how`——而取值域已在工具参数 enum 里、被拒提示里也会点名，属于重复。
+ */
+function renderDimensionsBrief(dimensions) {
+  if (!dimensions || typeof dimensions !== 'object') return [];
+
+  const lines = [];
+  const shape = dimensions['形态'];
+  if (shape?.values) {
+    lines.push(`- \`形态\`（必填，6 选 1）：${Object.keys(shape.values).join(' / ')}`);
+    if (shape.how) lines.push(`  怎么判：${shape.how}`);
   }
+  lines.push('- `项目` / `智能体`：**不用你填**，程序按工作目录名 + 绑定身份自动填。');
+  lines.push('- `稳定性`：**不用你填**，首次落库恒为 `观察`，之后由程序按使用情况演进。');
 
   return lines;
 }

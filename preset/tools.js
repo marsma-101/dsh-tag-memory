@@ -25,6 +25,10 @@
  *   的措辞（主子明确要求），任何一层都不许改写它。
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { defineTool } from './define-tool.js';
 import { buildToolDefs, TOOL_NAMES } from './tool-defs.js';
 import {
@@ -40,6 +44,14 @@ import {
 
 /** 宿主服务名。host-dev 定稿后改这一行即可。 */
 export const HOST_SERVICE = 'dtmHost';
+
+/** 模板目录（被拒细则的单一真源 `schema.json` 在这下面） */
+const TEMPLATE_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'engine', 'templates',
+);
+
+/** 写入原则缓存（按 mtime 热更新，与 preset/index.js 的 schemaFor 同款） */
+let principlesCache = { mtimeMs: -1, value: [] };
 
 /** 统一的工具输出契约：10 个工具共用，避免各写一套 schema 漂移 */
 const RESULT_OUTPUT = {
@@ -125,6 +137,46 @@ function failFromErrors(errors, code) {
 }
 
 /**
+ * 写入被拒时附加的「按需细则」（2026-11-11 分层修订）。
+ *
+ * 这些内容原先每轮都在 section 里（写入原则 5 条 + 标签怎么打），
+ * 但它们是「怎么写才好」的方法论，只在**真被拒**时才有用；
+ * 挪到返回值 = 真按需、零常态成本，而且就在模型正需要的那一刻出现。
+ *
+ * 数据源仍是 `templates/schema.json` 的 `writeRoutes.principles`（单一真源）。
+ * **直接同步读模板文件**，不依赖宿主新增方法 —— 曾试过调 `host.writePrinciplesSync()`，
+ * 宿主没实现就静默返回空，等于「该给的没给」；这种隐藏依赖必须避免。
+ */
+function writePrinciplesSync() {
+  try {
+    const file = path.join(TEMPLATE_DIR, 'schema.json');
+    const stat = fs.statSync(file);
+    if (stat.mtimeMs === principlesCache.mtimeMs) return principlesCache.value;
+    const schema = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const list = Array.isArray(schema?.writeRoutes?.principles)
+      ? schema.writeRoutes.principles.filter((p) => String(p ?? '').trim() !== '')
+      : [];
+    principlesCache = { mtimeMs: stat.mtimeMs, value: list };
+    return list;
+  } catch {
+    return [];
+  }
+}
+
+function writeHintsForRejection() {
+  const principles = writePrinciplesSync();
+  if (!Array.isArray(principles) || principles.length === 0) return [];
+  return ['', '**写入原则**（怎么写得更好）：', ...principles.map((p) => `- ${p}`)];
+}
+
+/** 标签怎么打（被拒时的最短要点）。详细规则见 `标签字典.md` 与被拒说明。 */
+const TAG_HINT_ON_REJECT = [
+  '',
+  '**自由标签怎么打**：从「作用 / 注意事项 / 内容关键词」三方向拆短实词，一个标签一个概念；',
+  '不打纯数字、来源标记、转述句、同义变体；不含 `|`；1~20 个，超过 6~8 个就该收。',
+];
+
+/**
  * 统一调用宿主方法的小包装：
  *   · 方法不存在 → NOT_WIRED（点名缺哪个方法，方便 host-dev 对账）
  *   · 返回 {ok:false} → 转失败结果
@@ -192,7 +244,11 @@ function executeWrite(ctx) {
         // 不传 `稳定性`：首次落库恒为「观察」，由使用过程经状态机事后演进。
       },
     ]);
-    if (!r.ok) return r;
+    if (!r.ok) {
+      // 被拒时才给「按需细则」（写入原则 + 标签怎么打）——零常态成本。
+      const extra = [...writeHintsForRejection(), ...TAG_HINT_ON_REJECT];
+      return { ...r, text: `${r.text}\n${extra.join('\n')}` };
+    }
     if (r.result?.blocked === 'UNBOUND_IDENTITY') return unboundWrite();
     return { ok: true, ...formatWriteResult(r.result) };
   };

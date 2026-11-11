@@ -12,7 +12,22 @@
  *   - 参数名两套：**域字段用中文**（与 CSV 表头、tidy.jsonl、engine 出参零映射，契约 Q4）；
  *     **操作参数用英文小写**（`basis`/`kind`/`limit`/`path`，对齐 tidy.jsonl 审计列与官方风格）。
  *   - 这里只有"定义"，没有任何业务逻辑；execute 的接线在 `tools.js`。
+ *
+ * ── §4.2 自由标签说明表（2026-11-11）─────────────────────────────
+ *   说明表的机器可读源是 `lib/engine/templates/free-tag-rules.json`。
+ *   **走工具 description 通道，不进 section**：renderInjection 的 section 实测
+ *   5998/6000 字节（L4 裁定 ≤6000），只剩 2 字节，塞不进任何一段说明；
+ *   而 section 一变会毁掉整段 KV cache 前缀。工具 description 在模型填 `自由标签`
+ *   时必被看到，且不受该预算约束。加这段不新增第 11 个工具。
+ *   读表失败时用内置兜底，**绝不抛错**（本模块被测试直接 import，且 buildToolDefs
+ *   契约要求「无 schema 时也能工作」）。
  */
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const TEMPLATE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'engine', 'templates');
 
 /** 官方 6 形态的判据（prose，无法进 schema.json，故由 preset 持有） */
 export const SHAPE_HINTS = {
@@ -23,6 +38,77 @@ export const SHAPE_HINTS = {
   事实: '客观陈述',
   模板: '可复用格式/清单',
 };
+
+/* ------------------------------------------------------------------ *
+ * §4.2 自由标签说明表：同步读 + mtime 缓存（与 preset/index.js schemaFor 同款）
+ * ------------------------------------------------------------------ */
+
+let tagRulesCache = { mtimeMs: -1, value: null };
+
+/** 读不到返回 null，由 renderTagRules 用内置兜底，绝不抛错。 */
+export function freeTagRulesFor() {
+  try {
+    const file = path.join(TEMPLATE_DIR, 'free-tag-rules.json');
+    const stat = fs.statSync(file);
+    if (stat.mtimeMs === tagRulesCache.mtimeMs) return tagRulesCache.value;
+    const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+    tagRulesCache = { mtimeMs: stat.mtimeMs, value };
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+/** 仅测试用：清缓存，便于验证「改表即生效」。 */
+export function clearTagRulesCache() {
+  tagRulesCache = { mtimeMs: -1, value: null };
+}
+
+/** 兜底文案：与 free-tag-rules.json 的要点一致，表读不到时也能给出规范。 */
+const FALLBACK_WRITE =
+  '从「作用/注意事项/内容关键词」三方向拆短实词，一个标签一个概念；' +
+  '不打纯数字、来源标记、转述句、同义变体；不含 |；1~20 个，超过 6~8 个就该收（越多越召不回）。';
+const FALLBACK_READ = '一次给 1~3 个短实词，优先内容关键词/作用；查空别反复换说法。';
+
+/**
+ * 把说明表压成极短一段（写侧 / 读侧各一），供参数 description 前置。
+ *
+ * ⚠️ 压缩纪律（2026-11-11）：**只合并重复表述，不删防误用信息**。
+ * 取值区间、`|` 拒写、「别打什么」这些一旦删掉，模型会写出废标签 →
+ * 被拒 → 重试，浪费的 token 远多于省下的。所以这里宁可句子紧，不省要点。
+ */
+export function renderTagRules(side, rules = freeTagRulesFor()) {
+  const r = rules?.[side];
+  if (!r || typeof r !== 'object') {
+    return side === 'write' ? FALLBACK_WRITE : FALLBACK_READ;
+  }
+  const parts = [];
+  // 写侧：directions 形如「作用：它帮解决什么」——取**概念名**（冒号前），
+  // 概念名才是模型组织标签时要对的词；冒号后的解释留在文档里。
+  if (Array.isArray(r.directions) && r.directions.length > 0) {
+    const dirs = r.directions
+      .map((x) => String(x).split('：')[0].trim())
+      .filter(Boolean)
+      .join('/');
+    parts.push(`从「${dirs}」三方向拆短实词，一个标签一个概念`);
+  } else if (Array.isArray(r.do) && r.do.length > 0) {
+    parts.push(r.do.join('；'));
+  }
+  if (Array.isArray(r.dont) && r.dont.length > 0) {
+    // ⚠️ 不要做「去掉统一前缀」的正则清洗：`dont` 条目动词各不相同（不打…／不写 |／
+    // 不堆成一句话），统一替换会把「不写 |」改成「写 |」——语义直接反转。
+    // 宁可多几个字，也不能压出错的规则（省下的字节远小于一次误用的代价）。
+    const items = r.dont.map((x) => String(x).trim()).filter(Boolean);
+    parts.push(items.join('；'));
+  }
+  if (r.limit) parts.push(String(r.limit));
+  if (r.classTag) parts.push(r.classTag);
+  // 读侧：howMany / withShape / onEmpty 三段本就互不重复，照压
+  if (r.howMany) parts.push(r.howMany);
+  if (r.withShape) parts.push(r.withShape);
+  if (r.onEmpty) parts.push(r.onEmpty);
+  return parts.join('；');
+}
 
 /**
  * 10 个工具（顺序即注入顺序，也是 qa K2 的逐个点名顺序）。
@@ -49,7 +135,7 @@ const DEFS = [
         required: true,
         description:
           '本次会话的身份名，**必须是用户明确告诉你的名字**。' +
-          '问不到就继续问，不要自己起名。必须与之前用过的名字完全一致——改了就对不上旧记忆。',
+          '问不到就继续问，不要自己起名；必须与之前用过的名字完全一致（改了就对不上旧记忆）。',
       },
       // 注意：**没有 `项目` 参数**（2026-11-08 硬性裁定）。
       // 项目由程序按会话工作目录自动填，模型无权决定。
@@ -76,8 +162,8 @@ const DEFS = [
         required: true,
         enum: d.shapes,
         description:
-          `这条是哪种东西，6 选 1：${d.shapes.map((s) => `${s}=${SHAPE_HINTS[s] ?? ''}`).join('；')}。` +
-          '形态判错最难被召回，写时慎重。',
+          '6 选 1。' +
+          '形态判错最难被召回：按「将来怎么找它」判，写时慎重。',
       },
       // 注意：**没有 `项目` / `智能体` 参数**（2026-11-08 硬性裁定）。
       // 归属由程序填：项目=会话工作目录名，智能体=绑定身份。这是环境事实，不是模型的判断。
@@ -86,9 +172,10 @@ const DEFS = [
         items: { type: 'string' },
         required: true,
         description:
-          '召回主信号，1~20 个离散词。从三个方向拆：作用（它帮解决什么）、'
-          + '注意事项（容易踩的坑/约束）、内容关键词（正文里会出现的实词）。'
-          + '短词优于长句，一个标签一个概念。不能含 |（竖线，库文件里用于分隔多个标签）。',
+          // §4.2 说明表压缩版：保留全部**防误用**信息（三方向、不该打什么、
+          // 数量区间、`|` 拒写），只去掉与后半句重复的措辞。
+          // 完整说明在 标签字典.md 与 free-tag-rules.json；被拒时返回值还会再给一遍。
+          `${renderTagRules('write')} 召回主信号；程序做交集匹配，同义词由等价表归一。`,
       },
       // 注意：**没有 `稳定性` 参数**（2026-11-08 硬性裁定）。
       // 首次落库恒为「观察」——此刻是模型单方面写下的，没经过系统性验证，
@@ -119,8 +206,9 @@ const DEFS = [
         type: 'array',
         items: { type: 'string' },
         description:
-          '≤20 个离散标签，直接给数组，不要给自然语言。程序做交集匹配，同义词由程序归一。'
-          + '留空=浏览该形态下全部生效条目。',
+          // 读取侧：保留「给几个词 / 怎么配合形态 / 查空怎么办 / 留空=浏览」四条防误用信息，
+          // 去掉与它们重复的「≤20 个离散标签」「同义词由程序归一」等复述。
+          `${renderTagRules('read')} 直接给数组，不要给自然语言。留空=浏览该形态全部。`,
       },
     }),
   },
@@ -141,13 +229,13 @@ const DEFS = [
       主要内容: {
         type: 'string',
         required: true,
-        description: '新的那件事本身（通常是在旧条基础上修正后的完整表述）。',
+        description: '新的那件事本身（在旧条基础上修正后的完整表述）。',
       },
       形态: {
         type: 'string',
         required: true,
         enum: d.shapes,
-        description: `新条的形态，6 选 1：${d.shapes.join(' / ')}。`,
+        description: `新条的形态，6 选 1。`,
       },
       项目: { type: 'string', description: '新条属于哪个项目。省略=旧条的项目。' },
       智能体: { type: 'string', description: '新条属于哪个身份。省略=旧条的智能体。' },
@@ -186,7 +274,8 @@ const DEFS = [
     when: '改某条的 形态/项目/智能体/自由标签/稳定性（须带依据）',
     description:
       '改某条记忆的标签字段。属整理动作：**必须给依据**，没有依据不许改。' +
-      '编号、主要内容、时距不可改——那是唯一标识、一手材料和程序计数器。',
+      '编号、主要内容、时距不可改——那是唯一标识、一手材料和程序计数器。' +
+      '**只传要改的字段；省略的字段 = 不改**（不是清空）。',
     params: (d) => ({
       编号: { type: 'string', required: true, description: '要改的条目编号。' },
       basis: {
@@ -196,15 +285,15 @@ const DEFS = [
           '依据：哪条读写记录支持这次改动（如 read.jsonl#2026-11-03T22:11）。' +
           '没有依据就不许改标签——这是硬要求，缺了会被拒。',
       },
-      形态: { type: 'string', enum: d.shapes, description: '新形态。**省略=不改**（不需要传原值）。' },
-      项目: { type: 'string', description: '新项目。**省略=不改**（不需要传原值）。' },
-      智能体: { type: 'string', description: '新智能体。**省略=不改**（不需要传原值）。' },
+      形态: { type: 'string', enum: d.shapes, description: '新形态。' },
+      项目: { type: 'string', description: '新项目。' },
+      智能体: { type: 'string', description: '新智能体。' },
       自由标签: {
         type: 'array',
         items: { type: 'string' },
-        description: '新的完整标签数组（不是增量，会整体替换）。**省略=不改**（不需要传原值）；传空数组 = 想清空，会被拒绝。',
+        description: '新的完整标签数组（整体替换，不是增量）；传空数组=想清空，会被拒绝。',
       },
-      稳定性: { type: 'string', enum: d.stabilities, description: '新稳定性。**省略=不改**（不需要传原值）。' },
+      稳定性: { type: 'string', enum: d.stabilities, description: '新稳定性。' },
     }),
   },
 
@@ -213,20 +302,21 @@ const DEFS = [
     name: 'dtm_review',
     when: '复查一批条目 / 整理时通览候选（只读为主）',
     description:
-      '只读地通览一批条目，整理时用来找候选。不改任何条目、不计时距、不写读取台账。',
+      '只读地通览一批条目，整理时用来找候选。不改任何条目、不计时距、不写读取台账。' +
+      '所有筛选条件省略=不限。',
     params: (d) => ({
-      形态: { type: 'string', enum: d.shapes, description: '只看这个形态。省略=不限。' },
-      项目: { type: 'string', description: '只看这个项目。省略=不限。' },
-      智能体: { type: 'string', description: '只看这个身份。省略=不限。' },
+      形态: { type: 'string', enum: d.shapes, description: '只看这个形态。' },
+      项目: { type: 'string', description: '只看这个项目。' },
+      智能体: { type: 'string', description: '只看这个身份。' },
       状态: {
         type: 'string',
         enum: d.statuses,
-        description: `只看这个状态。省略=不限（含 被取代/已归档，整理时能看清全貌）。`,
+        description: '只看这个状态（含 被取代/已归档，整理时可看清全貌）。',
       },
       自由标签: {
         type: 'array',
         items: { type: 'string' },
-        description: '只列出含这些标签中任意一个的条目。省略=不按标签过滤。',
+        description: '只列出含这些标签中任意一个的条目。',
       },
       limit: { type: 'integer', description: '最多返回多少条，默认 20。' },
       offset: { type: 'integer', description: '跳过前多少条，默认 0。' },
@@ -258,8 +348,7 @@ const DEFS = [
     name: 'dtm_export',
     when: '导出记忆（库本体就是 CSV）',
     description:
-      '把记忆库导出成 CSV 文件。库本体就是 CSV，导出的就是原文件，可直接给人看或交接。' +
-      '与 UI 里的导出是同一个能力。',
+      '把记忆库导出成 CSV。库本体就是 CSV，导出的就是原文件，可直接看或交接。与 UI 导出是同一能力。',
     params: () => ({
       path: {
         type: 'string',

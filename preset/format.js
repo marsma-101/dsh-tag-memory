@@ -277,12 +277,27 @@ export function formatMergeResult(result, dryRun) {
         ? `合并前已自动备份：${result.backupPath}`
         : '（合并前已自动备份，见 backup/ 目录。）',
     );
-    if (Number(result?.conflicts) > 0) {
-      lines.push(
-        `冲突 ${result.conflicts} 条：同号保留较新的那条。` +
-          '聚合不掉的重复留给整理按相似度归并。',
-      );
-    }
+  }
+  // conflicts 在预演与正式里都要可见（《记忆合并规则》§1 末行）。
+  if (Number(result?.conflicts) > 0) {
+    lines.push(
+      `冲突 ${result.conflicts} 条：同号保留较新的那条。` +
+        '聚合不掉的重复留给整理按相似度归并。',
+    );
+  }
+
+  // §4.3 字段口径体检：纯只读报告，不自动改任何字段。工具与 UI 共用同一份数据。
+  const a = result?.fieldAudit;
+  if (a && typeof a === 'object') {
+    lines.push('');
+    lines.push('字段口径体检（只报告，不自动改）：');
+    lines.push(
+      `- 扫描 ${a.scanned ?? 0} 条：项目名 ${a.distinctProjects ?? 0} 种 / 身份名 ${a.distinctAgents ?? 0} 种；` +
+        `空标签 ${a.blanks?.['自由标签'] ?? 0} 条；` +
+        `噪声标签 纯数字 ${a.noiseTags?.numeric ?? 0} / 来源标记 ${a.noiseTags?.sourceMark ?? 0} 个。`,
+    );
+    lines.push(`- 疑似重复 ${a.suspiciousDuplicateGroups ?? 0} 组（编号不同但内容逐字相同）。`);
+    for (const s of Array.isArray(a.suggestions) ? a.suggestions : []) lines.push(`- ${s}`);
   }
 
   return { text: lines.join('\n') };

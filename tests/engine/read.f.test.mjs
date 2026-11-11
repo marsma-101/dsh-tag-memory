@@ -44,6 +44,19 @@ function run(records, query, extra = {}) {
   })
 }
 
+/**
+ * 2026-11-11 标定：出厂 entryRatio 从 0.5 降到 0.3（scoring.json）。
+ * 但 F2/F3/F6 守的是《简化评估结论》§3.9 逐位冻结的裁决：
+ *   「条目侧 e_ratio > 阈值，等号不过；query 侧 q_ratio >= 阈值，等号过；否决先于及格线」。
+ * 这些用例的前提是 0.5，**不能因为出厂值变了就删或放宽**——
+ * 用局部 config 把阈值固定回 0.5，让它们继续守判定符/等号/顺序；
+ * 新出厂值 0.3 的行为另见 read.h.test.mjs 的回归组。
+ */
+const LEGACY_0_5 = { ...CONFIG, veto: { ...CONFIG.veto, entryRatio: 0.5 } }
+function runLegacy(records, query) {
+  return run(records, query, { config: LEGACY_0_5 })
+}
+
 const idsOf = (res) => res.hits.map((h) => h['编号'])
 
 /* ------------------------------------------------------------------ *
@@ -64,7 +77,7 @@ test('F1 硬筛：状态=被取代 / 已归档 → 一律不返回', () => {
 /* ------------------------------------------------------------------ *
  * F2 【规格原文反例】条目 6 标签、query 2 个全中 → e_ratio=0.333 → 不返回
  * ------------------------------------------------------------------ */
-test('F2 【规格原文反例】条目 6 标签 / query 2 个全中 → e_ratio=0.333 → 不返回', () => {
+test('F2 【规格原文反例】条目 6 标签 / query 2 个全中 → e_ratio=0.333 → 不返回（固定 0.5 阈值守裁决）', () => {
   const records = [
     rec({
       编号: 'M-20261105-001',
@@ -72,14 +85,15 @@ test('F2 【规格原文反例】条目 6 标签 / query 2 个全中 → e_ratio
       自由标签: ['发版检查', '需先build', '部署', 'csv', 'token', '迁移'], // 6 个
     }),
   ]
-  const res = run(records, {
+  const query = {
     项目: 'P',
     智能体: 'A',
     形态: '技能',
     自由标签: ['发版检查', '部署'], // 2 个，全中
-  })
+  }
+  const res = runLegacy(records, query)
 
-  // 规格原文：「条目 6 个标签、query 2 个全中但只占 33% → 不返回」
+  // 规格原文：「条目 6 个标签、query 2 个全中但只占 33% → 不返回」（阈值 0.5 时）
   assert.deepEqual(idsOf(res), [], `e_ratio=2/6≈0.333 ≤ 0.5，必须不返回，实际返回了 ${idsOf(res).join(',')}`)
 
   // near 里应有该条，且 reason 是 ENTRY_RATIO（证明确实是被命中否决拦的，不是分数不够）
@@ -87,12 +101,16 @@ test('F2 【规格原文反例】条目 6 标签 / query 2 个全中 → e_ratio
   assert.equal(res.near[0]['编号'], 'M-20261105-001')
   assert.equal(res.near[0].reason, 'ENTRY_RATIO', `near.reason 应为 ENTRY_RATIO，实际 ${res.near[0].reason}`)
   assert.ok(Math.abs(res.near[0].e_ratio - 0.3333) < 0.001, `e_ratio 应为 0.333，实际 ${res.near[0].e_ratio}`)
+
+  // 新出厂 0.3 下这条反而应召回（0.333 > 0.3）——正是 §4.1 要修的假查空。
+  const res03 = run(records, query)
+  assert.deepEqual(idsOf(res03), ['M-20261105-001'], '出厂 0.3 下 e_ratio=0.333 应通过（同口径该召回的能召回）')
 })
 
 /* ------------------------------------------------------------------ *
  * F3 【等号边界·条目侧】e_ratio 恰 0.5 → 不返回（严格大于）
  * ------------------------------------------------------------------ */
-test('F3 【等号边界】e_ratio 恰为 0.5 → 不返回（判据是 > 0.5，等号不算过）', () => {
+test('F3 【等号边界·固定 0.5 阈值】e_ratio 恰为 0.5 → 不返回（判据是 > 阈值，等号不算过）', () => {
   const records = [
     rec({
       编号: 'M-20261105-001',
@@ -100,19 +118,28 @@ test('F3 【等号边界】e_ratio 恰为 0.5 → 不返回（判据是 > 0.5，
       自由标签: ['a', 'b', 'c', 'd'], // 4 个
     }),
   ]
-  const res = run(records, {
+  const query = {
     项目: 'P',
     智能体: 'A',
     形态: '技能',
     自由标签: ['a', 'b'], // 命中 2 → e_ratio = 2/4 = 0.5
-  })
+  }
+  const res = runLegacy(records, query)
 
-  assert.deepEqual(idsOf(res), [], `e_ratio=0.5 必须不返回（严格大于），实际返回了 ${idsOf(res).join(',')}`)
+  assert.deepEqual(idsOf(res), [], `e_ratio=0.5 必须不返回（严格大于 0.5），实际返回了 ${idsOf(res).join(',')}`)
 
   const near = res.near.find((n) => n['编号'] === 'M-20261105-001')
   assert.ok(near, '该条应进 near')
   assert.equal(near.reason, 'ENTRY_RATIO')
   assert.equal(near.e_ratio, 0.5, `e_ratio 应恰为 0.5，实际 ${near.e_ratio}`)
+
+  // 判定符本身仍在新出厂值上生效：0.3 下 e_ratio 恰 0.3（等号）也不得过。
+  const r03 = [rec({ 编号: 'M-20261105-002', 形态: '技能', 自由标签: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'] })]
+  const eq03 = run(r03, { 项目: 'P', 智能体: 'A', 形态: '技能', 自由标签: ['a', 'b', 'c'] }) // 3/10 = 0.3
+  assert.deepEqual(idsOf(eq03), [], 'e_ratio 恰等于新阈值 0.3 时也必须被否决（严格 > 的裁决没被改坏）')
+  const eqNear = eq03.near.find((n) => n['编号'] === 'M-20261105-002')
+  assert.ok(eqNear, '等号边界条目应进 near')
+  assert.equal(eqNear.reason, 'ENTRY_RATIO')
 })
 
 /* ------------------------------------------------------------------ *
@@ -124,7 +151,7 @@ test('F4 e_ratio 刚过线（条目 3 标签中 2 → 0.667）→ 进入打分�
   ]
   const res = run(records, { 项目: 'P', 智能体: 'A', 形态: '技能', 自由标签: ['a', 'b'] })
 
-  assert.deepEqual(idsOf(res), ['M-20261105-001'], 'e_ratio=0.667 > 0.5，且形态命中 50 ≥ 40，应返回')
+  assert.deepEqual(idsOf(res), ['M-20261105-001'], 'e_ratio=0.667 > 0.3，且形态命中 50 ≥ 40，应返回')
   assert.ok(Math.abs(res.hits[0].explain.e_ratio - 0.6667) < 0.001)
   assert.equal(res.hits[0].explain.shapeHit, true)
 })
@@ -143,7 +170,7 @@ test('F5a 【等号边界·query侧】q_ratio 恰为 0.15 → 通过（判据是
   const records = [rec({ 编号: 'M-20261105-001', 形态: '技能', 自由标签: entryTags })]
   const res = run(records, { 项目: 'P', 智能体: 'A', 形态: '技能', 自由标签: queryTags })
 
-  // e_ratio = 3/3 = 1 > 0.5 ✅ ；q_ratio = 3/20 = 0.15 >= 0.15 ✅
+  // e_ratio = 3/3 = 1 > 0.3 ✅ ；q_ratio = 3/20 = 0.15 >= 0.15 ✅
   assert.deepEqual(idsOf(res), ['M-20261105-001'], `q_ratio=0.15 应通过（>= 判定），实际未返回`)
   assert.ok(Math.abs(res.hits[0].explain.q_ratio - 0.15) < 1e-6, `q_ratio 应恰为 0.15，实际 ${res.hits[0].explain.q_ratio}`)
 })
@@ -168,7 +195,7 @@ test('F5b 【等号边界·query侧】q_ratio 低于 0.15（=0.14）→ 被否�
  * F6 【顺序核心】否决先于及格线
  *     构造"分数本可过 40 但 e_ratio 不过" → 必须不返回
  * ------------------------------------------------------------------ */
-test('F6 【顺序】命中否决先于及格线：分数够 50 但 e_ratio 不过 → 仍不返回', () => {
+test('F6 【顺序·固定 0.5 阈值】命中否决先于及格线：分数够 50 但 e_ratio 不过 → 仍不返回', () => {
   const records = [
     rec({
       编号: 'M-20261105-001',
@@ -177,8 +204,8 @@ test('F6 【顺序】命中否决先于及格线：分数够 50 但 e_ratio 不�
       时距: 32, // + 10 分 → 总分 50（若标签也被扣，仍 >= 40）
     }),
   ]
-  // query 只命中 2 个 → e_ratio = 2/6 ≈ 0.333 ≤ 0.5 → 否决
-  const res = run(records, { 项目: 'P', 智能体: 'A', 形态: '技能', 自由标签: ['a', 'b'] })
+  // query 只命中 2 个 → e_ratio = 2/6 ≈ 0.333 ≤ 0.5（固定阈值）→ 否决
+  const res = runLegacy(records, { 项目: 'P', 智能体: 'A', 形态: '技能', 自由标签: ['a', 'b'] })
 
   assert.deepEqual(
     idsOf(res),

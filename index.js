@@ -47,7 +47,10 @@
  *     items, rows, total }        // rows 是 items 的别名（preset 用 rows）
  * readRecords({ kind, limit, onlyFailed }) → { items, errors }
  * exportLibrary({ path }) → { ok, path, count, bytes }
- * mergeLibrary({ path, dryRun }) → { ok, changed, added, conflicts, backupPath }
+ * mergeLibrary({ path, dryRun }) → { ok, changed, added, conflicts, backupPath, total, fieldAudit? }
+ *   fieldAudit = 字段口径体检（§4.3，纯只读；见 内部文档/记忆合并规则.md）：
+ *     外来库的项目/身份名种类、空标签、噪声标签、稳定性分布、时距、疑似重复、建议。
+ *     只在 dryRun 与正式返回里附带，**不自动改任何字段、不拦合并**。
  *
  * ── UI 侧（client-dev）───────────────────────────────────────────
  *
@@ -88,7 +91,7 @@ import {
 
 // 已有库的只读体检（见 内部文档/已有库检测与处置规则.md）。
 // 单独一个模块，是为了从类型上保证它改不了文件——它不 import 任何写接口。
-import { diagnoseLibrary, diagnoseMultiple, findLibraries } from './lib/engine/diagnose.mjs';
+import { diagnoseLibrary, diagnoseMultiple, findLibraries, inspectMergeFields } from './lib/engine/diagnose.mjs';
 
 import { buildNewRecord, buildWriteLog } from './lib/engine/write.mjs';
 import { recall as engineRecall, buildReadLog } from './lib/engine/read.mjs';
@@ -289,6 +292,19 @@ function createHostService(ctx, config) {
   let tidyTimer = null;
   /** 上次备份时间（settings 里展示）。 */
   let lastBackupAt = null;
+
+  /**
+   * 初始记忆库的播种结果（2026-11-11 加，治「装完空库却一声不响」）。
+   *
+   * 三态：
+   *   · `{seeded:true}`                → 已铺上（首次安装的常态）
+   *   · `{seeded:false, reason:'exists'}` → 库本来就有，不覆盖（正常）
+   *   · `{seeded:false, reason:'no-bundled-seed', message}` → **包里没带种子**
+   *     （旧版本包，例如 v1.2.8）。这条必须能从 overview 看到——
+   *     否则用户只看到「怎么什么都没有」，分不清「本来没有」和「铺失败」。
+   *   · `{seeded:false, reason:'failed', message}` → 权限/磁盘等原因失败
+   */
+  let seedState = null;
 
   /**
    * 解析数据目录 —— 5 级优先级
@@ -519,12 +535,35 @@ function createHostService(ctx, config) {
       // 多引一个具名导出没有收益，而这个常量是 POSIX/Win32 都稳定的 1。
       await fsp.copyFile(bundled, layout.libraryCsv, 1);
       ctx.logger?.info?.('[dsh-tag-memory] 已铺初始记忆库（包内自带）。');
+      seedState = { seeded: true, reason: null };
     } catch (err) {
-      // EEXIST = 库已存在（正常，不覆盖）；ENOENT = 包里没带初始库（旧版本包）。
-      // 其余错误（权限/磁盘）也只记日志——记忆库建不起来不该让插件整体挂掉。
-      if (err?.code !== 'EEXIST' && err?.code !== 'ENOENT') {
-        ctx.logger?.warn?.('[dsh-tag-memory] 铺初始记忆库失败（不影响使用）：', err?.message ?? err);
+      // EEXIST = 库已存在（正常，不覆盖）
+      if (err?.code === 'EEXIST') {
+        seedState = { seeded: false, reason: 'exists' };
+        return;
       }
+      // ⚠️ ENOENT 曾在这里**静默吞掉**，注释写「包里没带初始库（旧版本包）」。
+      // 实测后果（2026-11-11 主子在容器里装的 1.2.8）：包里确实没有 data/，
+      // 于是装完是空库，而插件一声不响——用户只看到「怎么什么都没有」，
+      // 完全无法区分「本来就没有种子」和「种子铺失败了」。
+      // 现在改成**可诊断状态**：记下来并从 overview 暴露出去（UI/模型能看到）。
+      if (err?.code === 'ENOENT') {
+        seedState = {
+          seeded: false,
+          reason: 'no-bundled-seed',
+          message:
+            '这个插件包里没有自带初始记忆库（data/store/memory.csv）。' +
+            '常见于较旧的安装包（初始记忆是 v1.2.9 起才随包发布的）。' +
+            '这不影响功能：库是空的，你写第一条记忆就会自动创建。',
+        };
+        ctx.logger?.warn?.(
+          '[dsh-tag-memory] 包内没有初始记忆库（旧版本包？），跳过播种。库为空属正常，写入即创建。',
+        );
+        return;
+      }
+      // 其余错误（权限/磁盘）也只记日志——记忆库建不起来不该让插件整体挂掉。
+      seedState = { seeded: false, reason: 'failed', message: String(err?.message ?? err) };
+      ctx.logger?.warn?.('[dsh-tag-memory] 铺初始记忆库失败（不影响使用）：', err?.message ?? err);
     }
   }
 
@@ -1086,6 +1125,15 @@ function createHostService(ctx, config) {
       dataDirSource: source,
       libraryIncompatible: false,
       libraryIssue: publicIssue(libraryIssueCache),
+      // 初始记忆库的播种结论（2026-11-11）：让「装完空库」有据可查。
+      // seed.reason === 'no-bundled-seed' 说明装的是不带种子的旧版本包，
+      // 这不是故障，但必须能看见 —— 否则用户只看到空界面，无从判断是不是坏了。
+      seed: seedState,
+      emptyHint:
+        records.length === 0
+          ? '库是空的（不是坏了）。写第一条记忆会自动创建文件；'
+            + '若这个版本没自带初始记忆，属正常，不影响使用。'
+          : null,
     };
   }
 
@@ -1863,8 +1911,16 @@ function createHostService(ctx, config) {
 
     const merged = Array.from(byId.values());
 
+    // §4.3：字段口径体检（纯只读，不改任何字段、不拦合并）。
+    // 外来库的 项目/智能体/稳定性/时距/空标签 全部原样落地，这里只把「带进来什么」
+    // 说清楚，交给用户/整理环节决定（见 内部文档/记忆合并规则.md）。
+    const fieldAudit = inspectMergeFields(incoming.records, schema);
+
     if (dryRun === true) {
-      return { ok: true, changed, added, conflicts, backupPath: null, dryRun: true, total: merged.length };
+      return {
+        ok: true, changed, added, conflicts, backupPath: null, dryRun: true, total: merged.length,
+        fieldAudit,
+      };
     }
 
     await ensureDirs(layout);
@@ -1891,6 +1947,7 @@ function createHostService(ctx, config) {
       conflicts,
       backupPath: backup.ok ? backup.path : null,
       total: merged.length,
+      fieldAudit,
     };
   }
 
@@ -1990,6 +2047,15 @@ function createHostService(ctx, config) {
       dictText,
       libraryCount: records.length,
       schemaVersion: Number(schema?.version ?? 1),
+      // 初始记忆库的播种结论（2026-11-11）：让「装完空库」这件事有据可查，
+      // 而不是让用户对着空界面猜。null = 还没走过初始化。
+      seed: seedState,
+      // 空库时给一句人话：这不是坏了，写第一条就会建库。
+      emptyHint:
+        records.length === 0
+          ? '库是空的（不是坏了）。写第一条记忆会自动创建文件；'
+            + '若这个版本没自带初始记忆，属正常，不影响使用。'
+          : null,
     };
   }
 

@@ -27,6 +27,7 @@
  */
 
 import { registerTools, HOST_SERVICE } from './tools.js';
+import { installWriteReminder, isReminderEnabled } from './reminder.js';
 import {
   renderInjection,
   renderIdentityContext,
@@ -122,6 +123,22 @@ export function apply(ctx, config = {}) {
       interpolate: false,
     }),
   );
+
+  /* ---- 3. 轮级「漏记提醒」（§4.7，恢复 0.3.x 被重构删掉的兜底）----
+   *
+   * ⚠️ 只挂两个事件钩子，**不新增** section / context / 工具：
+   *   tools.k.test.mjs 与 prompt.l.test.mjs 都断言「恰好 1 个 section、
+   *   1 个 context、10 个工具」，多一个就挂。提醒走 pre-step 的
+   *   decision.messages（消息历史），不进 system prompt —— 这是 KV cache 硬约束。
+   *
+   * 可关闭：`config.reminderEnabled === false` 时整段不注册。
+   * 宿主未实现 ctx.on（例如旧版宿主 / 假 ctx 没补 on）时，reminder.js 内部
+   * 会静默跳过注册，**apply 不抛错**（tools.k.test.mjs 断言宿主服务未挂载时
+   * apply 不得抛错）。
+   */
+  if (isReminderEnabled(config)) {
+    ctx.effect(() => installWriteReminder(ctx));
+  }
 }
 
 /**

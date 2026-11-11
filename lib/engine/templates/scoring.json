@@ -13,9 +13,10 @@
   "_passLine": "及格线，总分 >= passLine 才返回。出厂 40。",
   "passLine": 40,
 
-  "_veto": "命中否决阈值。entryRatio 是严格大于判定（e_ratio > entryRatio 才通过）；queryFloor 是大于等于判定（q_ratio >= queryFloor 才通过）。",
+  "_veto": "命中否决阈值。entryRatio 是严格大于判定（e_ratio > entryRatio 才通过）；queryFloor 是大于等于判定（q_ratio >= queryFloor 才通过）。判定符 >/>= 是逐位冻结的裁决（《简化评估结论》§3.9），只标定数值、不改符号。",
+  "_entryRatio_calibration": "2026-11-11 标定（《改进与迭代方向》§3/§4.1）：出厂 0.5 与实库平均 4~5 个标签不匹配，标签打得越规范、分母越大越召不回。同口径探针 k=1 假查空率 98.5%、k=2 87.9%、k=3 19.7%，失败 100% 为 ENTRY_RATIO。降到 0.3 后 k=2→7.6%、k=3→0%，跨项目/跨身份隔离结果不变。按文档要求先用 0.3 做温和标定，不一步到 0.1。用户侧调节走 Config.scoring overrides（dict.mjs loadScoring 深合并），不要改本文件迁就单台机器。",
   "veto": {
-    "entryRatio": 0.5,
+    "entryRatio": 0.3,
     "queryFloor": 0.15
   },
 

@@ -2577,6 +2577,9 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       const [localBusy, setLocalBusy] = React.useState(false)
       const [localError, setLocalError] = React.useState(null)
       const [backups, setBackups] = React.useState(null)
+      // §4.3：合并字段口径体检（纯只读报告）。合并成功后留在弹窗里给用户看，
+      // 不立刻关窗；用户点「完成」再 onDone。其余 mode 行为不变。
+      const [mergeAudit, setMergeAudit] = React.useState(null)
 
       const isBusy = !!busy || localBusy
       const shown = error || localError
@@ -2604,10 +2607,18 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
         }
         setLocalBusy(true)
         setLocalError(null)
+        setMergeAudit(null)
         // createApi 已把两层失败都转成 reject；成功分支即业务成功。
         Promise.resolve()
           .then(function () { return api[method](payload) })
-          .then(function () { onDone(mode) })
+          .then(function (result) {
+            // §4.3：合并带字段口径体检 → 先展示，不自动关窗。
+            if (method === 'mergeLibrary' && result && result.fieldAudit) {
+              setMergeAudit(result.fieldAudit)
+              return
+            }
+            onDone(mode)
+          })
           .catch(function (err) {
             setLocalError(err && err.message ? err.message : String(err))
           })
@@ -2722,6 +2733,35 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
             ),
         mode === 'merge'
           ? h(DtmWarn, null, t('mergeWarn'))
+          : null,
+        // §4.3 字段口径体检：只读展示，不自动改任何字段。
+        mergeAudit
+          ? h(
+              'div',
+              { className: 'dtm-field', style: { marginTop: 12 } },
+              h('span', { className: 'dtm-field-label' }, t('mergeAuditTitle')),
+              h('div', { className: 'dtm-caption' }, [
+                h('div', null, t('mergeAuditSummary')
+                  .replace('{scanned}', String(mergeAudit.scanned || 0))
+                  .replace('{projects}', String(mergeAudit.distinctProjects || 0))
+                  .replace('{agents}', String(mergeAudit.distinctAgents || 0))
+                  .replace('{emptyTags}', String((mergeAudit.blanks && mergeAudit.blanks['自由标签']) || 0))
+                  .replace('{dup}', String(mergeAudit.suspiciousDuplicateGroups || 0))),
+                (mergeAudit.suggestions || []).map(function (s, i) {
+                  return h('div', { key: 's' + i, className: 'dtm-caption' }, '· ' + s)
+                }),
+              ]),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dtm-btn dtm-btn-primary',
+                  style: { marginTop: 8 },
+                  onClick: function () { onDone(mode) },
+                },
+                t('mergeAuditDone'),
+              ),
+            )
           : null,
         shown
           ? h('p', { className: 'dtm-error-body', role: 'alert' }, shown)
@@ -2909,6 +2949,10 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       mergePathLabel: '要合并的记忆库路径',
       mergeRun: '开始合并',
       mergeWarn: '合并会把对方的条目并入当前库，残留重复留给整理环节按相似度归并。建议先备份。',
+      // §4.3 字段口径体检（纯只读报告，不自动改字段）
+      mergeAuditTitle: '字段口径体检（只报告，不自动改）',
+      mergeAuditSummary: '扫描 {scanned} 条：项目名 {projects} 种 / 身份名 {agents} 种；空标签 {emptyTags} 条；疑似重复 {dup} 组。',
+      mergeAuditDone: '完成',
       dialogPathPlaceholder: '绝对路径，例如 D:\\backup\\memory-20261105.csv',
 
       // 自动整理
@@ -3054,6 +3098,10 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       mergePathLabel: 'Library path to merge',
       mergeRun: 'Start merge',
       mergeWarn: 'Merging pulls the other library\'s entries into this one; any leftovers are left for the tidy pass to merge by similarity. Backing up first is recommended.',
+      // §4.3 field audit (read-only report; never rewrites fields)
+      mergeAuditTitle: 'Field audit (report only, no automatic changes)',
+      mergeAuditSummary: 'Scanned {scanned}: {projects} projects / {agents} agents; {emptyTags} empty-tag rows; {dup} suspected duplicate groups.',
+      mergeAuditDone: 'Done',
       dialogPathPlaceholder: 'Absolute path, e.g. D:\\backup\\memory-20261105.csv',
 
       cardTidyTitle: 'Auto-tidy',

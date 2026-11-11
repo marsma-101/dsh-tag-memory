@@ -68,7 +68,7 @@ test('I2 scoring.json 含权重/及格线/否决阈值/两个 10（tickMaxScore 
   assert.equal(cfg.weights.tickMaxScore, 10, '打分权重上限必须是 weights.tickMaxScore')
 
   assert.equal(cfg.passLine, 40)
-  assert.equal(cfg.veto.entryRatio, 0.5)
+  assert.equal(cfg.veto.entryRatio, 0.3, '2026-11-11 标定：出厂 0.5 → 0.3（《改进与迭代方向》§4.1），判定符仍为 >')
   assert.equal(cfg.veto.queryFloor, 0.15, 'Q4 裁定：queryFloor 出厂 0.15')
 
   assert.equal(cfg.tickCap, 10, '时距字段值上限必须是顶层 tickCap')

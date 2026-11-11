@@ -27,6 +27,9 @@ export function createFakeCtx({ services = {}, workingDir = '/work/dsh-tag-memor
   const sections = []
   const contexts = []
   const disposers = []
+  // §4.7：收集事件订阅（agent/pre-step / tools/result），供「轮级触发存在」断言。
+  // 真实 ctx.on 返回 disposer；这里同样返回函数，且不主动派发事件。
+  const listeners = []
 
   // 真实 Host 的 workingDirectory 服务：get(session) → 绝对路径（同步）
   const workingDirectory = {
@@ -46,6 +49,23 @@ export function createFakeCtx({ services = {}, workingDir = '/work/dsh-tag-memor
     __sections: sections,
     __contexts: contexts,
     __disposers: disposers,
+    __listeners: listeners,
+
+    /**
+     * 事件订阅（真实 Cordis ctx.on 的形状）：收集 {event, fn}，返回 disposer。
+     * 不派发、不模拟 waterfall/emit 语义——那属于框架盲区（见 LIMITS.md），
+     * 事件回调的行为由 preset/reminder.js 的纯函数/直接调用单测覆盖。
+     */
+    on(event, fn) {
+      const entry = { event, fn }
+      listeners.push(entry)
+      const dispose = () => {
+        const i = listeners.indexOf(entry)
+        if (i >= 0) listeners.splice(i, 1)
+      }
+      disposers.push(dispose)
+      return dispose
+    },
 
     tools: {
       register(def) {
