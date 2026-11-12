@@ -48,7 +48,7 @@
     "dsh": ">=0.2.0"
   },
   "scripts": {
-    "test": "node --test --test-isolation=none",
+    "test": "node --test",
     "verify": "node scripts/verify-install.mjs",
     "install:plugin": "node scripts/install.mjs apply"
   },

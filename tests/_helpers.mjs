@@ -13,7 +13,9 @@ export const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]
  *
  * 分两类：
  *   ① 语义排除 —— 这些目录本来就不是插件运行时的一部分：
- *      `.git`（版本库）/ `node_modules`（依赖）/ `内部文档`（内部资料）/ `tests`（测试自身）
+ *      `.git`（版本库）/ `.github`（CI 配置，2026-11-12 加：release.yml 是
+ *      GitHub Actions 的发布流水线，不是插件运行时文件，不该进 npm 包，
+ *      也不该被 P8 报成「漏发布」）/ `node_modules`（依赖）/ `内部文档`（内部资料）/ `tests`（测试自身）
  *   ② 环境排除 —— 本地工具可能在仓库里留下的工作目录（2026-11-06 加）：
  *      `._cdp` 是 Chrome/Edge 被指到本仓库当用户数据目录时创建的（里面有扩展的
  *      js/png/db）。它被 `.gitignore` 忽略，但**测试扫描器原本没跳过它**，
@@ -27,7 +29,7 @@ export const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]
  * 匹配方式：精确名（`EXCLUDE_DIRS`）+ 前缀模式（`EXCLUDE_DIR_PREFIXES`），
  * 后者专门处理 `._*` 这类"名字不固定但形态固定"的本地产物。
  */
-const EXCLUDE_DIRS = new Set(['.git', 'node_modules', '内部文档', 'tests'])
+const EXCLUDE_DIRS = new Set(['.git', '.github', 'node_modules', '内部文档', 'tests'])
 
 /**
  * 需要按前缀排除的目录名。
