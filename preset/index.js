@@ -76,6 +76,70 @@ export const inject = ['tools', 'systemPrompt'];
  */
 
 /**
+ * 取当前库 CSV 的绝对路径（同步，供工具注册时算词表）。
+ *
+ * 为什么需要它：`registerTools` 是同步的，而宿主的 `resolveLayout()` 是异步的
+ * （要读 settings、探环境变量），没法在注册时 await。所以宿主额外暴露一个
+ * **同步**的 `libraryCsvPath()`（它内部只做路径拼接，不做 IO 校验）。
+ *
+ * 三种拿不到的情形都安静返回 ''，让词表降级为「不渲染」：
+ *   · 宿主没实现这个方法（老版本宿主 / 单测假 ctx）
+ *   · 方法抛错（数据目录还没解析出来）
+ *   · 返回值不是字符串
+ *
+ * ⚠️ 绝不能让这里抛错：词表是锦上添花，不能因为它让 10 个工具都注册不上。
+ */
+function libraryCsvFor(ctx) {
+  try {
+    const host = typeof ctx?.get === 'function' ? ctx.get(HOST_SERVICE) : null;
+    const fn = host?.libraryCsvPath;
+    if (typeof fn !== 'function') return '';
+    const p = fn.call(host);
+    return typeof p === 'string' ? p : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 取工具注册时能拿到的「视角」`{project, agent}`，供标签网络过滤用。
+ *
+ * ⚠️ 与 `identityFor(ctx, context)` 的区别（别混用）：
+ *   · `identityFor` 需要 assembly 的 `context.agent`，每轮都重新算 → 给注入用
+ *   · 本函数在**工具注册那一刻**同步取值，只算一次 → 给工具描述用
+ * 工具描述是静态的（注册后不再变），所以这里拿到的视角会**沿用整个进程生命周期**。
+ * 这在设计上是可接受的：注册时就是当前会话的工作目录与身份；
+ * 换项目/换身份需要重载插件，那本来也会重建工具描述。
+ *
+ * 拿不到就返回空视角 `{}`——网络会退化为「只有通用条目」，
+ * 不会报错、不会污染（只是少了本项目/本身份的专属词）。
+ *
+ * @param {object} ctx Cordis 上下文
+ * @returns {{project?:string, agent?:string}}
+ */
+function viewFor(ctx) {
+  try {
+    const host = ctx?.get?.(HOST_SERVICE);
+    if (!host) return {};
+    const view = {};
+    // 智能体：优先 identityOfSync(agent)，但注册时没有 agent 对象，
+    // 所以走宿主可能提供的「当前身份」同步方法；没有就留空。
+    if (typeof host.currentAgentNameSync === 'function') {
+      const who = host.currentAgentNameSync();
+      if (typeof who === 'string' && who !== '') view.agent = who;
+    }
+    // 项目：工作目录名。同样看宿主有没有同步方法。
+    if (typeof host.currentProjectNameSync === 'function') {
+      const p = host.currentProjectNameSync();
+      if (typeof p === 'string' && p !== '') view.project = p;
+    }
+    return view;
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Cordis 插件入口。
  *
  * @param {object} ctx    Cordis 上下文
@@ -83,7 +147,11 @@ export const inject = ['tools', 'systemPrompt'];
  */
 export function apply(ctx, config = {}) {
   /* ---- 1. 注册 10 个工具 ---- */
-  const { dispose } = registerTools(ctx, domainFor());
+  // 标签网络（2026-11-11）：把「记忆→标签」的共现网渲染进 dtm_write / dtm_recall 的描述。
+  // 库路径与当前视角都由宿主提供（engine/preset 都不猜数据目录，同 Lead 裁决 3）。
+  // 宿主没这个能力 / 库还不存在 → 静默跳过，工具照常可用。
+  const libraryCsv = libraryCsvFor(ctx);
+  const { dispose } = registerTools(ctx, domainFor(), { libraryCsv, view: viewFor(ctx) });
   // 注册是 effect：插件卸载时自动撤销。这里再挂一层保险，
   // 保证 ctx 被回收时不会留下悬空注册（官方 práctica：registration 由 owning context 拥有）。
   if (typeof ctx.effect === 'function') {

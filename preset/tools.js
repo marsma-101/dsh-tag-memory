@@ -468,10 +468,21 @@ function unboundWrite() {
  * @param {object} ctx    Cordis 上下文（需 `ctx.tools`）
  * @param {object} [domain] 取值域（形态 / 稳定性 / 状态），由 `domainFor()` 从 schema.json 读出。
  *                          不传时 `buildToolDefs` 用它自带的兜底（仅用于无 schema 的降级场景）。
+ * @param {object} [options]
+ * @param {string} [options.libraryCsv] 库 CSV 绝对路径。给了就把**标签共现网络**
+ *        渲染进 `dtm_write` / `dtm_recall` 的参数描述（2026-11-11）。
+ *        不给则跳过，工具照常可用。
+ * @param {{project?:string, agent?:string}} [options.view]
+ *        当前视角。网络只含「本项目或通用」×「本智能体或通用」的条目。
+ *        ⚠️ 网络只在注册时算一次（工具描述是静态的），视角变化需重载刷新——
+ *        这是有意的：每轮重算 description 会让工具清单不稳定，反而破坏缓存。
  * @returns {{defs: Array, dispose: Function[]}}
  */
-export function registerTools(ctx, domain) {
-  const defs = buildToolDefs(domain);
+export function registerTools(ctx, domain, options = {}) {
+  const defs = buildToolDefs(domain, {
+    libraryCsv: options.libraryCsv,
+    view: options.view,
+  });
 
   const executors = {
     dtm_bind: executeBind(ctx),

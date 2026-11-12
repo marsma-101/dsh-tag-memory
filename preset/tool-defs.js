@@ -64,11 +64,143 @@ export function clearTagRulesCache() {
   tagRulesCache = { mtimeMs: -1, value: null };
 }
 
+/* ------------------------------------------------------------------ *
+ * 标签共现网络（用户裁定 2026-11-11：这才是 wiki 的正确形态）
+ *
+ * 形态：每行一条记忆的全部标签（`a|b|c`），同行标签天然相连，
+ *       跨记忆的同名标签再形成新连接——这份文本本身就是那张网。
+ *
+ * 三个来源决定（都是用户明确的）：
+ *   1. **不带编号**——编号只是存储用的，模型要的是内容和关系，不需要回指。
+ *   2. **按视角隔离**——只含 `(项目∈{当前,通用}) AND (智能体∈{当前,通用})`。
+ *      实测 92% 的标签只属于单一项目，不隔离会把大量无关词灌进来。
+ *   3. **全量给**——不加频次截断。用户测算：约 1400 tokens，
+ *      而「读错了重读」或「想不起来再问一遍」的代价远高于此。
+ *
+ * 注入时机（用户明确）：**不每轮注入**。模型调 dtm_write / dtm_recall 时
+ * 随工具一起给。体积 1400 tokens 在工具描述里完全可接受。
+ * ------------------------------------------------------------------ */
+
+let networkCache = { key: '', text: '' };
+
+/**
+ * 从库文件生成标签网络文本。库不存在 / 解析失败 / 空库 → 返回 ''。
+ *
+ * @param {string} [libraryCsv]    库 CSV 绝对路径（调用方传入，本模块不猜数据目录）
+ * @param {object} [view]          `{ project, agent }` 当前视角
+ * @param {object} [rules]         free-tag-rules.json（用其 vocab 段）
+ * @returns {string}
+ */
+export function renderNetworkFromLibrary(libraryCsv, view = {}, rules = freeTagRulesFor()) {
+  if (!libraryCsv) return '';
+  try {
+    const stat = fs.statSync(libraryCsv);
+    const project = String(view?.project ?? '');
+    const agent = String(view?.agent ?? '');
+    const key = `${libraryCsv}|${stat.mtimeMs}|${stat.size}|${project}|${agent}`;
+    if (networkCache.key === key) return networkCache.text;
+
+    const rows = parseCsvLite(fs.readFileSync(libraryCsv, 'utf8'));
+    if (rows.length < 2) {
+      networkCache = { key, text: '' };
+      return '';
+    }
+    const iStatus = rows[0].indexOf('状态');
+    const iTags = rows[0].indexOf('自由标签');
+    const iProj = rows[0].indexOf('项目');
+    const iAgent = rows[0].indexOf('智能体');
+    if (iStatus < 0 || iTags < 0) {
+      networkCache = { key, text: '' };
+      return '';
+    }
+
+    const UNIVERSAL = '通用';
+    const active = String(rules?.vocab?.statusActive ?? '生效');
+    const lines = [];
+    for (const r of rows.slice(1)) {
+      if (String(r[iStatus] ?? '').trim() !== active) continue;
+      const p = String(r[iProj] ?? '').trim() || UNIVERSAL;
+      const a = String(r[iAgent] ?? '').trim() || UNIVERSAL;
+      // 视角隔离：只留「本项目或通用」且「本智能体或通用」
+      if (p !== project && p !== UNIVERSAL) continue;
+      if (a !== agent && a !== UNIVERSAL) continue;
+      const tags = String(r[iTags] ?? '')
+        .split('|')
+        .map((x) => x.trim())
+        .filter(Boolean);
+      // 没有标签的条目连不成线，对网络无贡献
+      if (tags.length === 0) continue;
+      lines.push(tags.join('|'));
+    }
+
+    const text = lines.join('\n');
+    networkCache = { key, text };
+    return text;
+  } catch {
+    return '';
+  }
+}
+
+/** 仅测试用：清网络缓存 */
+export function clearNetworkCache() {
+  networkCache = { key: '', text: '' };
+}
+
 /** 兜底文案：与 free-tag-rules.json 的要点一致，表读不到时也能给出规范。 */
 const FALLBACK_WRITE =
+  '第一个词优先放类别值（规矩/决策/踩坑/原话 等），再接内容概括词；' +
   '从「作用/注意事项/内容关键词」三方向拆短实词，一个标签一个概念；' +
-  '不打纯数字、来源标记、转述句、同义变体；不含 |；1~20 个，超过 6~8 个就该收（越多越召不回）。';
+  '**不打纯数字**（3190/0）、来源标记（原话/推断以外的元信息）、转述句；' +
+  '优先复用 wiki 已有的词，确实没有再造新词；不含 |（会被拒写）；1~20 个，超过 6~8 个就该收。';
 const FALLBACK_READ = '一次给 1~3 个短实词，优先内容关键词/作用；查空别反复换说法。';
+
+
+/**
+ * 极简 CSV 解析（只用于读词表，不承担完整校验）。
+ *
+ * 为什么不复用 core.mjs：那边是 **async ESM**，而 buildToolDefs 是同步函数。
+ * 为一个统计字段引入异步会把整个工具注册链路改成 async，代价远大于收益。
+ * 这里只需正确处理引号与换行，够用。
+ */
+function parseCsvLite(text) {
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let quoted = false;
+  const src = String(text ?? '');
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (quoted) {
+      if (c === '"') {
+        if (src[i + 1] === '"') {
+          cell += '"';
+          i++;
+        } else {
+          quoted = false;
+        }
+      } else {
+        cell += c;
+      }
+    } else if (c === '"') {
+      quoted = true;
+    } else if (c === ',') {
+      row.push(cell);
+      cell = '';
+    } else if (c === '\n') {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = '';
+    } else if (c !== '\r') {
+      cell += c;
+    }
+  }
+  if (cell !== '' || row.length > 0) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows;
+}
 
 /**
  * 把说明表压成极短一段（写侧 / 读侧各一），供参数 description 前置。
@@ -151,7 +283,8 @@ const DEFS = [
     description:
       '追加一条记忆到库。只在值得长期留下时调。' +
       '只追加、不改旧条；不查重，所以不要先调 dtm_recall 确认再写，直接写。',
-    params: (d) => ({
+    // ctx 提供 networkText（现有标签网络），让模型写新条时能照着已有词填。
+    params: (d, ctx) => ({
       主要内容: {
         type: 'string',
         required: true,
@@ -175,7 +308,11 @@ const DEFS = [
           // §4.2 说明表压缩版：保留全部**防误用**信息（三方向、不该打什么、
           // 数量区间、`|` 拒写），只去掉与后半句重复的措辞。
           // 完整说明在 标签字典.md 与 free-tag-rules.json；被拒时返回值还会再给一遍。
-          `${renderTagRules('write')} 召回主信号；程序做交集匹配，同义词由等价表归一。`,
+          //
+          // 2026-11-11：末尾追加**标签共现网络**（用户裁定：写和读都直接给 wiki）。
+          // 模型看一眼现有的网就知道新记忆该填什么词——不用背词表，也不用解释每个词。
+          `${renderTagRules('write')} 召回主信号；程序做交集匹配，同义词由等价表归一。`
+          + (ctx?.networkText ? `\n\n现有标签网络（每行一条记忆的标签，同行即相关；首词通常是类别）：\n${ctx.networkText}` : ''),
       },
       // 注意：**没有 `稳定性` 参数**（2026-11-08 硬性裁定）。
       // 首次落库恒为「观察」——此刻是模型单方面写下的，没经过系统性验证，
@@ -191,7 +328,7 @@ const DEFS = [
     description:
       '按标签召回记忆，返回候选 + 每条为什么被命中。' +
       '想浏览某形态的全部条目时，自由标签留空即可。',
-    params: (d) => ({
+    params: (d, ctx) => ({
       // 注意：**没有 `项目` / `智能体` 参数**（2026-11-08 硬性裁定）。
       // 查哪个项目、以谁的身份查，由程序填（工作目录名 + 绑定身份）。
       // 让模型填 `项目` 的后果实测过：它会填成主题词，和库里存的归属对不上，
@@ -208,7 +345,14 @@ const DEFS = [
         description:
           // 读取侧：保留「给几个词 / 怎么配合形态 / 查空怎么办 / 留空=浏览」四条防误用信息，
           // 去掉与它们重复的「≤20 个离散标签」「同义词由程序归一」等复述。
-          `${renderTagRules('read')} 直接给数组，不要给自然语言。留空=浏览该形态全部。`,
+          //
+          // 2026-11-11：末尾追加**标签共现网络**。这是本次事故的正解——
+          // 真实事故：查「改源码」撞空，而库里那条打的是「源码|生产端」。
+          // 不是不想查，是不知道该用什么词。网络让模型一眼看到：
+          // 「规矩|源码|生产端|同步|边界|改动落点」是一组，于是知道该用「源码」。
+          // 库读不到时 networkText 为空串，描述自动退回原样，不影响工具可用。
+          `${renderTagRules('read')} 直接给数组，不要给自然语言。留空=浏览该形态全部。`
+          + (ctx?.networkText ? `\n\n现有标签网络（每行一条记忆的标签，同行即相关；按它挑词）：\n${ctx.networkText}` : ''),
       },
     }),
   },
@@ -394,19 +538,30 @@ export const TOOL_WHENS = DEFS.map((d) => ({ name: d.name, when: d.when }));
  *
  * @param {{shapes:string[], stabilities:string[], statuses:string[]}} domain
  *        来自 engine 的 `templates/schema.json`（由 preset 的 `domainFor()` 同步读出）
+ * @param {object} [options]
+ * @param {string} [options.libraryCsv] 库 CSV 绝对路径。给了就生成**标签共现网络**
+ *        并渲染进 `dtm_write` / `dtm_recall` 的 `自由标签` 描述（2026-11-11）。
+ *        不给 / 读失败 → 不渲染网络，其余一切照旧。engine 不猜数据目录，
+ *        路径必须由 host 传（同 Lead 裁决 3）。
+ * @param {{project?:string, agent?:string}} [options.view]
+ *        当前视角。网络只含 `(项目∈{当前,通用}) AND (智能体∈{当前,通用})` 的条目
+ *        （用户 2026-11-11 明确）。缺省视为空串，此时只有「通用」条目进网络。
  * @returns {Array<{name,when,description,parameters}>}
  */
-export function buildToolDefs(domain) {
+export function buildToolDefs(domain, { libraryCsv, view } = {}) {
   const d = {
     shapes: Array.isArray(domain?.shapes) && domain.shapes.length > 0 ? domain.shapes : Object.keys(SHAPE_HINTS),
     stabilities: Array.isArray(domain?.stabilities) ? domain.stabilities : ['观察', '稳定', '易变'],
     statuses: Array.isArray(domain?.statuses) ? domain.statuses : ['生效', '被取代', '已归档'],
   };
 
+  // 网络是可选增强：算不出来就空串，绝不因为读库失败让工具注册失败。
+  const networkText = renderNetworkFromLibrary(libraryCsv, view);
+
   return DEFS.map((def) => ({
     name: def.name,
     when: def.when,
     description: def.description,
-    parameters: def.params(d),
+    parameters: def.params(d, { networkText }),
   }));
 }

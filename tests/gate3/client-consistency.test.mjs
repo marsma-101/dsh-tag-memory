@@ -212,3 +212,215 @@ test('C5 EntryEditor 里 编号/主要内容/时距 只经 ReadOnlyBlock 呈现�
     '只读不应依赖 disabled/readonly 属性（属性可被绕过或误改），应靠不存在可写控件',
   )
 })
+
+/* ------------------------------------------------------------------ *
+ * C6 页面组件里不得出现「未声明的自由变量」
+ *
+ * 事故背景（v1.4.2）：设置页「版本与更新」卡片直接写了 `update && update.hasUpdate`，
+ * 但该作用域里只有 `const s = settings || {}`，`update` 从未声明。
+ * 结果一进设置页就抛 `ReferenceError: update is not defined`，被错误边界接住，
+ * 整块显示成「这个页面渲染出错」。`node --check`、`new Function` 全都查不出来
+ * ——它们是**语法**检查，未声明标识符是**运行时**错误。
+ *
+ * 这里用纯文本静态分析（不执行、不模拟 React/DOM）做一层兜底：
+ * 把函数体里的标识符引用与「声明集合」比一遍，多出来的就是可疑的自由变量。
+ *
+ * 已知局限（如实说明，不假装完备）：
+ *   · 只能看函数体内声明的变量，模块级/外层作用域的靠 KNOWN_OUTER 白名单补齐
+ *   · 正则做不到了解作用域嵌套，嵌套函数声明的名字会被放宽（宁可漏报，不可误报）
+ * ------------------------------------------------------------------ */
+
+/** 模块外层就能拿到的名字：外层的 const/function，React/h，以及 JS 全局。 */
+const KNOWN_OUTER = new Set([
+  // 外层作用域（factory 内定义的通用件）
+  'React', 'h', 'NS', 'CSS', 'api',
+  'DtmWarn', 'DtmErrorBoundary', 'DtmTabs', 'DtmModal', 'BackupDialogs', 'TagsEditor',
+  'EntryEditor', 'EntryTable', 'FilterBar', 'OverviewBar', 'Pager', 'ReadOnlyCell',
+  'ReadOnlyBlock', 'SettingsPage', 'EntriesPage', 'PageShell', 'BundleConfigPage',
+  'translateOf', 'focusableIn',
+  // JS 内建
+  'Promise', 'String', 'Number', 'Boolean', 'Array', 'Object', 'Date', 'JSON', 'Math',
+  'Set', 'Map', 'Error', 'RegExp', 'isNaN', 'parseInt', 'parseFloat', 'encodeURIComponent',
+  'decodeURIComponent', 'isFinite',
+  // 宿主 / 浏览器
+  'window', 'document', 'console', 'setTimeout', 'clearTimeout', 'localStorage',
+])
+
+const KEYWORDS = new Set([
+  'if', 'for', 'while', 'switch', 'function', 'return', 'new', 'typeof', 'catch', 'else',
+  'try', 'do', 'break', 'continue', 'case', 'default', 'in', 'of', 'instanceof', 'void',
+  'delete', 'throw', 'yield', 'await', 'async', 'class', 'extends', 'super', 'const', 'let',
+  'var', 'true', 'false', 'null', 'undefined', 'this', 'arguments', 'NaN', 'Infinity',
+])
+
+/** 把注释和字符串内容替换成空格（保持偏移不变，避免误判位置关系）。 */
+function stripCommentsAndStrings(code) {
+  let out = ''
+  for (let i = 0; i < code.length; i++) {
+    const c = code[i]
+    if (c === '/' && code[i + 1] === '/') {
+      while (i < code.length && code[i] !== '\n') { out += ' '; i++ }
+      out += '\n'
+      continue
+    }
+    if (c === '/' && code[i + 1] === '*') {
+      out += '  '
+      i += 2
+      while (i < code.length && !(code[i] === '*' && code[i + 1] === '/')) {
+        out += code[i] === '\n' ? '\n' : ' '
+        i++
+      }
+      out += '  '
+      i++
+      continue
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      const q = c
+      out += ' '
+      i++
+      while (i < code.length) {
+        if (code[i] === '\\') { out += '  '; i += 2; continue }
+        if (code[i] === q) { out += ' '; break }
+        out += code[i] === '\n' ? '\n' : ' '
+        i++
+      }
+      continue
+    }
+    // 正则字面量：`/.../flags`。不单独处理的话，`/[:.]/g` 里的 g、
+    // `/\/$/` 里的 $ 会被当成自由变量误报（C6 首版就踩了）。
+    // 判据：`/` 前面是分隔符（运算符、括号、逗号、等号、return 等），
+    // 说明这是正则起点而不是除号。
+    if (c === '/') {
+      const prev = out.replace(/\s+$/, '').slice(-1)
+      const prevWord = out.replace(/\s+$/, '').match(/[A-Za-z_$][\w$]*$/)
+      const isRegexStart =
+        prev === '' || /[=(,:[!&|?{};+\-*%~^<>]/.test(prev)
+        || (prevWord && /^(return|typeof|case|in|of|delete|void)$/.test(prevWord[0]))
+      if (isRegexStart) {
+        out += ' '
+        i++
+        let closed = false
+        let inClass = false
+        while (i < code.length) {
+          const d = code[i]
+          if (d === '\\') { out += '  '; i += 2; continue }
+          if (d === '\n') break
+          if (d === '[') inClass = true
+          else if (d === ']') inClass = false
+          else if (d === '/' && !inClass) { out += ' '; closed = true; i++; break }
+          out += ' '
+          i++
+        }
+        // flags（g / i / m / u / y / s / d）
+        if (closed) {
+          while (i < code.length && /[dgimsuvy]/.test(code[i])) { out += ' '; i++ }
+        }
+        i--
+        continue
+      }
+    }
+    out += c
+  }
+  return out
+}
+
+/** 取 `function NAME(` 的形参名列表 + 函数体文本。
+ *
+ * 形参必须在扫描里算作「已声明」——否则 `props` / `api` / `t` 全成误报。
+ * 返回 { params: string[], body: string }。
+ */
+function functionParts(code, name) {
+  const i = code.indexOf(`function ${name}(`)
+  if (i < 0) return null
+  const lp = code.indexOf('(', i)
+  let depthP = 0
+  let rp = -1
+  for (let j = lp; j < code.length; j++) {
+    if (code[j] === '(') depthP++
+    else if (code[j] === ')') {
+      depthP--
+      if (depthP === 0) { rp = j; break }
+    }
+  }
+  if (rp < 0) return null
+  const params = code
+    .slice(lp + 1, rp)
+    .split(',')
+    .map((x) => x.trim().replace(/^[\{\[]|[\}\]]$/g, '').split('=')[0].split(':')[0].trim())
+    .filter(Boolean)
+
+  const b = code.indexOf('{', rp)
+  if (b < 0) return null
+  let depth = 0
+  for (let j = b; j < code.length; j++) {
+    if (code[j] === '{') depth++
+    else if (code[j] === '}') {
+      depth--
+      if (depth === 0) return { params, body: code.slice(b + 1, j) }
+    }
+  }
+  return null
+}
+
+/** 收集一段代码里所有「声明」出来的名字。 */
+function declaredNames(code) {
+  const declared = new Set()
+  const add = (raw) => {
+    const n = String(raw || '')
+      .trim()
+      .replace(/^[\{\[]|[\}\]]$/g, '')
+      .split('=')[0]
+      .split(':')
+      .pop()
+      .trim()
+    if (/^[A-Za-z_$][\w$]*$/.test(n)) declared.add(n)
+  }
+  for (const m of code.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g)) add(m[1])
+  for (const m of code.matchAll(/\bfunction\s+([A-Za-z_$][\w$]*)/g)) add(m[1])
+  for (const m of code.matchAll(/\b(?:const|let|var)\s*([\{\[][^\}\]]*[\}\]])\s*=/g)) {
+    m[1].split(',').forEach(add)
+  }
+  for (const m of code.matchAll(/function\s*[\w$]*\s*\(([^)]*)\)/g)) add(m[1].split(',')[0])
+  for (const m of code.matchAll(/function\s*[\w$]*\s*\(([^)]*)\)/g)) m[1].split(',').forEach(add)
+  for (const m of code.matchAll(/\(([^()]*)\)\s*=>/g)) m[1].split(',').forEach(add)
+  for (const m of code.matchAll(/([A-Za-z_$][\w$]*)\s*=>/g)) add(m[1])
+  for (const m of code.matchAll(/\bcatch\s*\(\s*([\w$]+)/g)) add(m[1])
+  return declared
+}
+
+test('C6 页面组件内没有未声明的自由变量（防 ReferenceError 红框）', () => {
+  const raw = CLIENT
+  for (const fnName of ['SettingsPage', 'EntriesPage']) {
+    const parts = functionParts(raw, fnName)
+    assert.ok(parts, `未能定位 ${fnName} 函数体`)
+
+    const code = stripCommentsAndStrings(parts.body)
+    const declared = declaredNames(code)
+    // 形参也算已声明（props / api / t 都是从这里来的）
+    parts.params.forEach((p) => declared.add(p))
+    const free = new Set()
+
+    for (const m of code.matchAll(/[A-Za-z_$][\w$]*/g)) {
+      const name = m[0]
+      const before = code.slice(0, m.index).replace(/\s+$/, '')
+      // 属性访问 a.b / ?.b 跳过
+      if (before.endsWith('.')) continue
+      // 前一个字符是标识符字符 → 这是长名字的一部分，正则不会这样切，保险起见跳过
+      if (/[A-Za-z0-9_$]$/.test(before)) continue
+      // 对象字面量的 key：`foo: value`
+      const after = code.slice(m.index + name.length).replace(/^\s+/, '')
+      if (after.startsWith(':')) continue
+      if (KEYWORDS.has(name)) continue
+      if (declared.has(name) || KNOWN_OUTER.has(name)) continue
+      free.add(name)
+    }
+
+    assert.deepEqual(
+      [...free],
+      [],
+      `${fnName} 里出现未声明的变量：${[...free].join(', ')}\n`
+        + '未声明变量在运行时抛 ReferenceError，语法检查（node --check / new Function）查不出来。\n'
+        + '要么在函数体里声明它，要么从 props / 宿主返回值里显式取一次。',
+    )
+  }
+})

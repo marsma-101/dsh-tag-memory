@@ -2048,6 +2048,19 @@ textarea.dtm-input{height:auto;padding:8px 10px;resize:vertical;line-height:20px
       const s = settings || {}
 
       /**
+       * 版本更新检查结果（方案 C）。
+       *
+       * ⚠️ 必须在这里显式取一次：宿主把它放在 `getSettings()` 返回值的 `update`
+       * 字段上，页面侧的变量名若直接写 `update` 而不声明，就是 `ReferenceError`
+       * （v1.4.2 的真实事故：设置页一进去就整块红框 "update is not defined"，
+       * 因为只有 `s === settings`，没有裸的 `update`）。
+       * 静态测试当时只查了 "源码里有 update: updateState"，查不出这种未声明引用。
+       *
+       * `null` 是合法值 = 宿主还没查过（方案 C 启动后延迟查，可能还没轮到）。
+       */
+      const update = s.update && typeof s.update === 'object' ? s.update : null
+
+      /**
        * 字典卡片的一行：标签 + chips。
        *
        * 值来自宿主 facets（= schema.json）。宿主没给就显示「—」并说明原因，

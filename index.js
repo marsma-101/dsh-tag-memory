@@ -422,6 +422,83 @@ function createHostService(ctx, config) {
   }
 
   /**
+   * 当前**项目名**（=会话工作目录名）的同步取值，供工具注册时过滤标签网络。
+   *
+   * 为什么是同步：`registerTools` 同步执行，没法 await。工作目录名必须与
+   * 落库时 `projectOf` 用的口径**完全一致**（目录名，不是路径），否则网络会漏掉本项目的词。
+   *
+   * 拿不到（没有服务、抛错、空串）→ 返回 ''，网络退化为「只有通用条目」。
+   * 这个退化是安全的：少显示一些词，不会显示错误的词。
+   *
+   * @returns {string}
+   */
+  function currentProjectNameSync() {
+    try {
+      const dir = process.cwd();
+      if (typeof dir !== 'string' || dir === '') return '';
+      // path.basename 对「中文/空格路径」同样可靠；去掉可能的尾部分隔符
+      const base = path.basename(dir.replace(/[\\/]+$/, ''));
+      return base === '' ? '' : base;
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * 当前**智能体名**（绑定身份）的同步取值。
+   *
+   * ⚠️ 拿不到是常态：身份要等 `dtm_bind` 在某个会话里绑过才有，
+   * 而工具注册发生在插件加载时——那时可能还没有任何绑定。
+   * 拿不到返回 ''，网络退化为「只有通用条目」。**不能瞎猜**：
+   * 猜错会让网络显示别人的词，比不显示更糟。
+   *
+   * @returns {string}
+   */
+  function currentAgentNameSync() {
+    try {
+      // 绑定信息按 agent 对象存在内存里；注册时拿不到 agent 对象，
+      // 所以这里只能给出「最近一次绑定的名字」这个粗粒度值。
+      // 没有绑定过就是 ''。
+      const last = typeof lastBoundAgentName === 'string' ? lastBoundAgentName : '';
+      return last;
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * 同步取「当前库 CSV 的绝对路径」——只供 preset 注册 dtm_recall 时算标签词表。
+   *
+   * 为什么不直接复用 `resolveLayout()`：那个是 **async**（要 await 读 settings 文件），
+   * 而 preset 的 registerTools 是同步函数。为一行词表把整条工具注册链改异步，
+   * 代价远大于收益。
+   *
+   * 因此这里只走**同步可得的优先级**：
+   *   ① config.dataDir   ② 环境变量   ③ 默认 dsh-home
+   * 跳过 ③ 设置页（要读文件）。偏差后果：用户若在设置页手动搬过家，词表会按默认位置算，
+   * 算不出来时读文件失败 → 自动降级为「不渲染词表」。
+   * **这个偏差是有意接受的**：词表缺失只是少个路标，不会给出错误信息。
+   *
+   * @returns {string} 库 CSV 的绝对路径；算不出来返回 ''
+   */
+  function libraryCsvPath() {
+    try {
+      const resolved = resolveDataDir({
+        configDir: config?.dataDir,
+        envDir: process.env.DSH_TAG_MEMORY_DATA_DIR,
+        settingsDir: null, // 同步路径拿不到设置页的值，见上方说明
+        dshHomeDir: currentDshHome(),
+        packageDir: PACKAGE_DIR,
+      });
+      const dir = resolved?.dir;
+      if (typeof dir !== 'string' || dir === '') return '';
+      return layoutOf(dir).libraryCsv;
+    } catch {
+      return '';
+    }
+  }
+
+  /**
    * DSH home：`$DSH_HOME` 优先，否则 `~/.dsh`（与 @deepseek-ai/dsh-home-paths 一致）。
    *
    * ⚠️ 刻意**不 import** `@deepseek-ai/dsh-home-paths`：engine 零框架依赖是硬约束，
@@ -489,6 +566,16 @@ function createHostService(ctx, config) {
    * 用 WeakMap：不污染会话日志、agent 回收即失效；投影有值时**投影优先**。
    */
   const identityFallback = new WeakMap();
+
+  /**
+   * 最近一次 `dtm_bind` 绑定的身份名（进程级）。
+   *
+   * 为什么需要它：`buildToolDefs` 在插件注册时构建工具描述，那一刻**没有 agent 对象**，
+   * 拿不到 `identityOfSync(agent)`。而标签网络需要按「当前智能体」过滤。
+   * 这是唯一同步可得的线索——它可能落后（用户还没绑过就是空），
+   * 但空值只会让网络少显示本智能体的词，**不会显示错的词**，这个退化是安全的。
+   */
+  let lastBoundAgentName = '';
 
   /**
    * 确保数据目录骨架存在（store / records / backup）。
@@ -777,6 +864,10 @@ function createHostService(ctx, config) {
     if (agent && typeof agent === 'object') {
       identityFallback.set(agent, { 智能体: who, 项目: programProject });
     }
+    // 记下「最近一次绑定的身份名」——供 tool-defs 的标签网络做视角过滤。
+    // 为什么需要它：工具描述在插件注册时构建，那时拿不到 agent 对象；
+    // 这是唯一同步可得的身份线索。拿到旧值也只是网络少显示一些词，不会显示错的。
+    lastBoundAgentName = who;
     return { ok: true, 智能体: who, 项目: programProject };
   }
 
@@ -2262,6 +2353,23 @@ function createHostService(ctx, config) {
     _resolveLayout: resolveLayout,
     _loadConfigs: loadConfigs,
     _ensureInitialized: ensureInitialized,
+    // 标签词表（2026-11-11）：preset 在注册 dtm_recall 时同步取库路径。
+    //
+    // ⚠️ 必须是**同步**且**零 IO**：preset 的 registerTools 是同步函数，
+    // 没法 await resolveLayout()。所以这里只做路径拼接（layoutOf 是纯函数），
+    // 不校验文件存在性——文件不存在时 wordlist 那边读失败会自动降级为空。
+    //
+    // 优先级链（configDir / env / settings / dshHome）这里的同步版本读不到
+    // settings（那是异步文件读），所以**只保证「多数情况对」**：
+    // config/env 与默认 dsh-home 都能算对，只有「用户在设置页手动搬家过」
+    // 这一种情况会退回默认位置。这个偏差可以接受——词表算不出来只是少了路标，
+    // 不会给出错误信息；而为了它把整个工具注册链改异步，代价太大。
+    libraryCsvPath,
+    // 当前视角（项目/智能体）——供 preset 注册工具时给标签网络做隔离过滤。
+    // 与 libraryCsvPath 同样的理由：preset 的 registerTools 是**同步**的，
+    // 没法 await，所以只给同步可得的粗粒度值；拿不到就返回 ''，网络退化为只含「通用」。
+    currentProjectNameSync,
+    currentAgentNameSync,
   // 版本更新（方案 C）：启动后台检查 + UI 手动按钮共用这一个实现。
   // checkUpdate 必须是**零参**（gateway 按 Function.length 校验，传实参就报
   // expected 0 arguments），所以这里挂一个零参包装，而不是带 {force} 的原函数。
