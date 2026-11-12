@@ -1,0 +1,84 @@
+# 自动发布到 npm（Trusted Publishing / OIDC）
+#
+# ── 为什么用这个而不是 token ──────────────────────────────────────
+# 2026-11-12 起，本仓库改用 npm 的 Trusted Publishing：
+#   · 不需要任何长期 token（没有 NPM_TOKEN secret）
+#   · 不需要 2FA 验证码
+#   · GitHub 用 OIDC 签一个短期令牌，npm 当场换成一个只能用于本次发布的凭证
+#   · 附带生成 provenance（可追溯「这个包确实是这个 commit 构建的」）
+#
+# 背景：npm 正在系统性取消「无人值守发布」的旧方式——
+#   Classic token 2025-12 被永久撤销；带 Bypass 2FA 的 granular token
+#   也将于 2027-01 起不能再直接发布。Trusted Publishing 是官方终局方案。
+#
+# ── 触发方式 ─────────────────────────────────────────────────────
+# 推一个 v* 的 tag 就会发布。例如：
+#   git tag -a v1.4.4 -m "..." && git push origin v1.4.4
+#
+# ⚠️ 版本号必须与 package.json 一致，否则 npm 会拒绝（EEXIST 或版本不符）。
+#    workflow 里有一道显式校验，不一致就早早失败，不会白发。
+#
+# ── 前提（必须在 npm 侧登记过 trusted publisher）──────────────────
+#   npm trust github dsh-tag-memory \
+#     --repo marsma-101/dsh-tag-memory \
+#     --file release.yml \
+#     --allow-publish --yes
+#
+# ⚠️ 文件名 `release.yml` 必须与 npm 上登记的一字不差（大小写敏感）。
+#    改名等于登记失效，发布会返回 404 ENEEDAUTH。
+
+name: Release to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      # OIDC 换 npm 令牌必需，缺了会 ENEEDAUTH
+      id-token: write
+      # checkout 需要
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ⚠️ 必须 Node 24 或 npm >= 11.5.1：OIDC 发布是 npm 11.5.0 才有的能力。
+      #    Node 22 自带 npm 10，会直接失败。
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      # 双保险：即使 setup-node 给的 npm 版本偏旧，也强制刷到支持 OIDC 的版本
+      - name: Ensure npm supports OIDC publishing
+        run: |
+          npm install -g npm@^11.5.1
+          npm --version
+
+      # 版本一致性：tag 必须与 package.json 的 version 对得上。
+      # 不做这一步的话，npm 会等到上传阶段才报错，而且错误信息很难懂。
+      - name: Verify tag matches package.json version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          PKG=$(node -p "require('./package.json').version")
+          echo "tag=$TAG package.json=$PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag v$TAG 与 package.json 的 $PKG 不一致，拒绝发布"
+            exit 1
+          fi
+
+      # 跑测试：发布前最后一道闸
+      - name: Run tests
+        run: npm test
+
+      # ⚠️ 这里**故意不设** NODE_AUTH_TOKEN / NPM_TOKEN。
+      #    npm 会先尝试 OIDC；只要环境里还留着一个 token，
+      #    它就会退回用 token（于是又变成需要 2FA 的老路）。
+      - name: Publish
+        run: npm publish --provenance --access public
