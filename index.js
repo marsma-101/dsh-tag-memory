@@ -96,7 +96,7 @@ import {
 import { diagnoseLibrary, diagnoseMultiple, findLibraries, inspectMergeFields } from './lib/engine/diagnose.mjs';
 
 import { buildNewRecord, buildWriteLog } from './lib/engine/write.mjs';
-import { recall as engineRecall, buildReadLog } from './lib/engine/read.mjs';
+import { recall as engineRecall, buildReadLog, ownershipVisible } from './lib/engine/read.mjs';
 import { applyTick } from './lib/engine/tick.mjs';
 import {
   backupLibrary,
@@ -658,16 +658,43 @@ function createHostService(ctx, config) {
     // 库已存在且**没有**需要自动处理的结论 → 一律不动。
     if (issue?.exists && issue?.autoFixable !== true) return;
 
+    // P2（2026-11-12）：ensureDirs 每次读写都调本函数。库已存在时直接返回，
+    // 不必每次都 copyFile→EEXIST→把 seedState 翻成 {seeded:false,reason:'exists'}
+    // （无谓 IO + overview 的 seed 态抖动）。真正的首次播种由 ensureInitialized 负责。
+    if (!issue) {
+      try {
+        await fsp.access(layout.libraryCsv);
+        return; // 库已在，跳过
+      } catch {
+        /* 不存在，继续往下铺 */
+      }
+    }
+
     const bundled = path.join(PACKAGE_DIR, 'data', 'store', 'memory.csv');
 
     // 旧格式空壳：先备份再铺，备份路径要留痕（用户可能想找回原文件）。
     if (issue?.autoFixable === true) {
       try {
-        const stamp = formatLocalDate(new Date()).replaceAll('-', '');
+        // P2（2026-11-12）：旧实现用日期戳（YYYYMMDD），同日重试会覆盖前一份备份。
+        // 改用秒级时间戳 + COPYFILE_EXCL（绝不覆盖既有备份）。
+        const stamp = backupStamp(new Date());
         const backupDir = path.join(layout.dataDir, 'backup');
         await fsp.mkdir(backupDir, { recursive: true });
-        const backupPath = path.join(backupDir, `memory.legacy-${stamp}.csv`);
-        await fsp.copyFile(layout.libraryCsv, backupPath);
+        let backupPath = path.join(backupDir, `memory.legacy-${stamp}.csv`);
+        let n = 0;
+        for (;;) {
+          try {
+            await fsp.copyFile(layout.libraryCsv, backupPath, 1); // 1 = COPYFILE_EXCL
+            break;
+          } catch (e) {
+            if (e?.code === 'EEXIST') {
+              n += 1;
+              backupPath = path.join(backupDir, `memory.legacy-${stamp}-${n}.csv`);
+              continue;
+            }
+            throw e;
+          }
+        }
         await fsp.rm(layout.libraryCsv, { force: true });
         ctx.logger?.info?.(
           `[dsh-tag-memory] 旧格式空库已备份到 ${backupPath}（原文件 0 条数据，未丢内容），将铺初始记忆库。`,
@@ -774,25 +801,43 @@ function createHostService(ctx, config) {
   }
 
   /** 设置页选的库位置：<包根>/config/data-dir.json。读不到就当没选。 */
+  /**
+   * 搬家指针的稳定存放位置（2026-11-12 P1-7）。
+   *
+   * 旧实现写在**包内** config/data-dir.json，pnpm 升级/重装会替换整个包目录 →
+   * 指针丢失 → 数据目录回退兜底，用户看到「我的记忆库不见了」（数据其实还在原处）。
+   * 现在写到 DSH_HOME 下（包外、跨升级稳定）：`$DSH_HOME/tag-memory-settings.json`。
+   * DSH_HOME 拿不到时退回包内（与旧行为一致，至少不崩）。
+   */
+  function settingsPointerFile() {
+    const home = currentDshHome();
+    if (home) return path.join(home, 'tag-memory-settings.json');
+    return path.join(PACKAGE_DIR, 'config', 'data-dir.json');
+  }
+
   async function readSettingsDir() {
-    const file = path.join(PACKAGE_DIR, 'config', 'data-dir.json');
-    try {
-      const raw = await fsp.readFile(file, 'utf8');
-      const obj = JSON.parse(raw);
-      return typeof obj?.dataDir === 'string' ? obj.dataDir : null;
-    } catch {
-      return null;
+    // 先读稳定位置；读不到再兼容旧的包内指针（升级前搬过家的用户）。
+    const candidates = [settingsPointerFile(), path.join(PACKAGE_DIR, 'config', 'data-dir.json')];
+    for (const file of candidates) {
+      try {
+        const raw = await fsp.readFile(file, 'utf8');
+        const obj = JSON.parse(raw);
+        if (typeof obj?.dataDir === 'string' && obj.dataDir !== '') return obj.dataDir;
+      } catch {
+        /* 试下一个 */
+      }
     }
+    return null;
   }
 
-  /** 写设置页的库位置。 */
+  /** 写设置页的库位置（写到包外稳定位置，升级不丢）。 */
   async function writeSettingsDir(target) {
-    const dir = path.join(PACKAGE_DIR, 'config');
-    await fsp.mkdir(dir, { recursive: true });
-    await fsp.writeFile(path.join(dir, 'data-dir.json'), `${JSON.stringify({ dataDir: target }, null, 2)}\n`, 'utf8');
+    const file = settingsPointerFile();
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(file, `${JSON.stringify({ dataDir: target }, null, 2)}\n`, 'utf8');
   }
 
-  /** 取三份配置（有缓存，templates 改了会自动重读）。 */
+  /** 取三份配置（进程内缓存，dispose 时清空；templates 改动需重载插件才生效，不会自动重读）。 */
   async function loadConfigs() {
     if (cfgCache) return cfgCache;
     const baseDir = path.join(PACKAGE_DIR, 'lib', 'engine', 'templates');
@@ -859,7 +904,10 @@ function createHostService(ctx, config) {
     }
     // 项目由程序取工作目录名（2026-11-08 硬性裁定），模型传的 `项目` 一律忽略。
     // 保留形参只是为了兼容旧调用方，值不采纳。
-    const programProject = projectOfSync(agent) || str(项目);
+    // P2（2026-11-12）：旧实现 `|| str(项目)` 在取不到工作目录时仍采纳模型项目，
+    // 与 writeEntry「模型值一律丢弃」口径不符。现在只用程序值；取不到就留空，
+    // 写入时会被 PROJECT_EMPTY 拒（让模型去补环境，而不是猜一个字符串）。
+    const programProject = projectOfSync(agent);
     // 进程内兜底：key 是 agent 对象本身；没有 agent 时不缓存（无从归属）。
     if (agent && typeof agent === 'object') {
       identityFallback.set(agent, { 智能体: who, 项目: programProject });
@@ -1026,12 +1074,19 @@ function createHostService(ctx, config) {
 
     let built;
     const lockResult = await withFileLock(layout.lockFile, async () => {
-      const { records } = await readLibraryCsv(layout.libraryCsv, schema);
+      const { records, errors } = await readLibraryCsv(layout.libraryCsv, schema);
+      // P1-3（2026-11-12）：表头坏了＝一行都没读进来，绝不是「空库」。
+      // 此时若照常 append，新编号基于空记录集计算，会与坏行里的真实编号撞车，
+      // 坏库越写越大。必须拒写并把格式问题报出来（error-handling：不得把读不到伪装成没有）。
+      const fatal = headerFatal(errors);
+      if (fatal.length > 0) {
+        return { ok: false, errors: fatal.map((e) => ({ ...e, code: 'LIBRARY_FORMAT_MISMATCH' })) };
+      }
       const existingIds = records.map((r) => r['编号']);
       built = buildNewRecord({ input: effectiveInput, existingIds, schema, now: new Date() });
       if (!built.ok) return { ok: false, errors: built.errors };
       await appendRecordCsv(layout.libraryCsv, built.record, schema);
-      return { ok: true };
+      return { ok: true, rowErrors: arr(errors).filter((e) => e.code !== 'HEADER_MISSING') };
     });
 
     // 台账：成功与失败都记（失败是整理阶段定位“字典问题 vs 程序误伤”的素材）
@@ -1112,8 +1167,18 @@ function createHostService(ctx, config) {
     await ensureDirs(layout);
 
     let result;
+    let rowErrors = [];
     await withFileLock(layout.lockFile, async () => {
-      const { records } = await readLibraryCsv(layout.libraryCsv, schema);
+      const { records, errors } = await readLibraryCsv(layout.libraryCsv, schema);
+
+      // P1-3（2026-11-12）：表头坏了＝一行都没读进来，不是「查空」。
+      // 报格式问题，别让模型误以为库里没有而换词重试。
+      const fatal = headerFatal(errors);
+      if (fatal.length > 0) {
+        result = { ok: false, blocked: 'LIBRARY_FORMAT_MISMATCH', errors: fatal, hits: [], near: [] };
+        return;
+      }
+      rowErrors = arr(errors);
 
       // ⚠️ 归属同样由**程序**填（2026-11-08 硬性裁定，与 writeEntry 同一口径）。
       // 查什么项目、以谁的身份查，是环境事实，不是模型的判断——模型只决定
@@ -1134,8 +1199,11 @@ function createHostService(ctx, config) {
       });
 
       // 命中条目时距 +1，其余一律不动（《流程_读取》§六）
+      // P1-4（2026-11-12）：有坏行时**跳过时距落盘**。writeLibraryCsv 是整库重写，
+      // 会把列数不符/引号撕裂的坏行「尽力解析」成缺字段行再写回——原始字节永久丢失，
+      // 用户手工修复的物证被抹掉。频率最高的写路径反而最该保护原始数据。
       const ids = arr(result.hits).map((h) => h['编号']);
-      if (ids.length > 0) {
+      if (ids.length > 0 && rowErrors.length === 0) {
         const tick = applyTick(records, ids, { cap: Number(scoring?.tickCap ?? 10) });
         if (tick.changed.length > 0) await writeLibraryCsv(layout.libraryCsv, tick.records, schema);
       }
@@ -1171,7 +1239,19 @@ function createHostService(ctx, config) {
    * 列出条目（只读）。
    * **不记 read.jsonl、不动时距**——它不是召回，只是看一眼（《功能说明》§十二 dtm_review）。
    */
-  async function listEntries(filter = {}) {
+  async function listEntries(agentOrFilter, filterArg) {
+    // 两种调用形状（与 retagEntry 同一判别法，2026-11-12 P1-18）：
+    //   · 工具侧：listEntries(agent, filter) —— 有会话，按当前归属隔离
+    //   · UI 侧： listEntries(filter)        —— 远程端点单参，用户手动通道，不隔离
+    // 判别：第二参给了 → 双参（工具）；否则第一参无 .session → 单参 filter（UI）。
+    let agent = agentOrFilter;
+    let filter = filterArg;
+    if (filterArg === undefined && agentOrFilter && typeof agentOrFilter === 'object' && !agentOrFilter.session) {
+      agent = null;
+      filter = agentOrFilter;
+    }
+    filter = filter ?? {};
+
     const { layout } = await resolveLayout();
     const { schema } = await loadConfigs();
     const { records, errors } = await readLibraryCsv(layout.libraryCsv, schema);
@@ -1203,12 +1283,21 @@ function createHostService(ctx, config) {
     }
 
     const shape = str(filter['形态']);
-    const project = str(filter['项目']);
-    const agentName = str(filter['智能体']);
     const status = str(filter['状态']);
     const tags = arr(filter['自由标签']).map(str).filter((t) => t !== '');
 
+    // 归属隔离（2026-11-12 P1-18）：工具通道（有 agent）按当前 项目/智能体 强制隔离，
+    // 模型不能借 review 读到别的项目/身份的记忆全文；UI 通道（agent=null）是用户手动，
+    // 保留按 项目/智能体 自由筛选的能力。
+    const identity = agent ? identityOfSync(agent) : null;
+    const scope = identity
+      ? { project: projectOfSync(agent), agent: identity.智能体 }
+      : null;
+    const project = scope ? '' : str(filter['项目']);
+    const agentName = scope ? '' : str(filter['智能体']);
+
     const matched = records.filter((r) => {
+      if (scope && !ownershipVisible(r, scope, schema)) return false;
       if (shape !== '' && str(r['形态']) !== shape) return false;
       if (project !== '' && str(r['项目']) !== project) return false;
       if (agentName !== '' && str(r['智能体']) !== agentName) return false;
@@ -1460,6 +1549,13 @@ function createHostService(ctx, config) {
         return;
       }
 
+      // 归属守卫（2026-11-12 P1-18）：工具通道只能改自己可见的条，
+      // 不能借编号改别的项目/身份的条目。UI 通道（agent=null）是用户手动，放行。
+      if (identity && !ownershipVisible(records[idx], { project: projectOfSync(agent), agent: identity.智能体 }, schema)) {
+        outcome = { ok: false, errors: [{ code: 'OWNERSHIP_DENIED', field: '编号', message: `条目 ${targetId} 不属于当前项目/身份，无权修改。` }] };
+        return;
+      }
+
       const oldRecord = records[idx];
       const nextRecord = { ...oldRecord };
 
@@ -1609,14 +1705,25 @@ function createHostService(ctx, config) {
         return;
       }
 
+      // 归属守卫（2026-11-12 P1-18）：只能顶替自己可见的条。
+      const scope = { project: projectOfSync(agent), agent: identity.智能体 };
+      if (!ownershipVisible(records[idx], scope, schema)) {
+        outcome = { ok: false, errors: [{ code: 'OWNERSHIP_DENIED', field: '旧编号', message: `条目 ${oldId} 不属于当前项目/身份，无权顶替。` }] };
+        return;
+      }
+
       const existingIds = records.map((r) => r['编号']);
 
-      // ⚠️ 不补默认值（2026-11-08 裁决）：新条必须**显式**给 `项目`/`智能体`。
-      // 不沿用旧条的归属——新条可能真的换项目了（旧条在 A 项目、新做法在 B 项目），
-      // 沿用旧条等于程序替模型决定了归属，错了看不出来。
-      // 也不回退到绑定身份：那会让「模型漏填」再次被掩盖。
+      // 归属由程序填（2026-11-12 P1-9，与 write/recall 同一裁定）：
+      // 新条**沿用旧条的归属**——顶替是「同一条记忆的新版本」，不是搬家。
+      // 旧条在「通用」，新条也必须在「通用」，否则可见性会被悄悄改变。
+      // 模型不再传 项目/智能体（工具 schema 已移除这两个参数）。
       const built = buildNewRecord({
-        input,
+        input: {
+          ...input,
+          项目: records[idx]['项目'],
+          智能体: records[idx]['智能体'],
+        },
         existingIds,
         schema,
         now: new Date(),
@@ -1637,7 +1744,7 @@ function createHostService(ctx, config) {
 
     if (!outcome?.ok) return fail(outcome?.errors, outcome?.errors?.[0]?.code);
 
-    await writeTidyLog({ who: identity.智能体, action: 'retag', target: oldId, before: pickEditable(outcome.old), after: pickEditable(outcome.newRecord), basis });
+    await writeTidyLog({ who: identity.智能体, action: 'supersede', target: oldId, before: pickEditable(outcome.old), after: pickEditable(outcome.newRecord), basis });
 
     return {
       ok: true,
@@ -1669,6 +1776,11 @@ function createHostService(ctx, config) {
       const idx = records.findIndex((r) => str(r['编号']) === targetId);
       if (idx < 0) {
         outcome = { ok: false, errors: [{ code: 'ID_NOT_FOUND', field: '编号', message: `库里没有编号 ${targetId} 的条目。` }] };
+        return;
+      }
+      // 归属守卫（2026-11-12 P1-18）：只能归档自己可见的条。
+      if (!ownershipVisible(records[idx], { project: projectOfSync(agent), agent: identity.智能体 }, schema)) {
+        outcome = { ok: false, errors: [{ code: 'OWNERSHIP_DENIED', field: '编号', message: `条目 ${targetId} 不属于当前项目/身份，无权归档。` }] };
         return;
       }
       const before = records[idx];
@@ -1724,10 +1836,37 @@ function createHostService(ctx, config) {
 
   /* ---------------- 台账查询 ---------------- */
 
-  async function readRecords({ kind, limit, onlyFailed } = {}) {
+  async function readRecords(agentOrOpts, optsArg) {
+    // 两种调用形状（2026-11-12 P1-18）：工具侧 readRecords(agent, opts) 按归属隔离；
+    // UI/旧单参 readRecords(opts) 不隔离（用户手动通道）。
+    let agent = agentOrOpts;
+    let opts = optsArg;
+    if (optsArg === undefined && agentOrOpts && typeof agentOrOpts === 'object' && !agentOrOpts.session) {
+      agent = null;
+      opts = agentOrOpts;
+    }
+    const { kind, limit, onlyFailed } = opts ?? {};
     const { layout } = await resolveLayout();
     const kinds = kind ? [str(kind)] : Object.keys(RECORD_FILES);
     const cap = Number.isFinite(limit) ? Math.max(1, Math.trunc(limit)) : 50;
+
+    // 归属隔离：工具通道只看得到的台账（read 用 cond.项目/cond.智能体 + who；write 用 项目/智能体 + who）。
+    const identity = agent ? identityOfSync(agent) : null;
+    const scope = identity ? { project: projectOfSync(agent), agent: identity.智能体 } : null;
+    const visibleLog = (it) => {
+      if (!scope) return true;
+      const universals = ['通用', '引入'];
+      const okField = (v) => {
+        const s = String(v ?? '').trim();
+        return s === '' || s === '通用' || universals.includes(s) || s === scope.project || s === scope.agent;
+      };
+      // read 台账：cond.项目/cond.智能体；write/tidy 台账：顶层 项目/智能体 或 who
+      const p = it.cond ? it.cond['项目'] : it['项目'];
+      const a = it.cond ? it.cond['智能体'] : it['智能体'];
+      const who = String(it.who ?? '').trim();
+      const whoOk = who === '' || who === scope.agent || universals.includes(who);
+      return okField(p) && okField(a) && whoOk;
+    };
 
     const items = [];
     const errors = [];
@@ -1740,6 +1879,7 @@ function createHostService(ctx, config) {
       const parsed = await readJsonl(path.join(layout.recordsDir, name));
       errors.push(...arr(parsed.errors));
       for (const it of parsed.items) {
+        if (!visibleLog(it)) continue;
         items.push({ ...it, kind: k });
       }
     }
@@ -1794,16 +1934,22 @@ function createHostService(ctx, config) {
     const targets = [];
     for (const c of candidates) {
       if (!c.dir) continue;
-      // 实测写权限：能 mkdir 且能写临时文件才算可用
+      // P2（2026-11-12）：只读查询不该写盘探测。旧实现 mkdir + 写 .dsh-write-probe + unlink，
+      // 让一个「列目录」方法产生副作用。改用 access(W_OK) 判可写；目录不存在时
+      // 退而判其父目录可写（export 时会 mkdir recursive）。
+      // W_OK = 2（POSIX/Win32 稳定，同 COPYFILE_EXCL 用字面量 1 的做法，不另引 fs.constants）。
+      const W_OK = 2;
       let writable = false;
       try {
-        await fsp.mkdir(c.dir, { recursive: true });
-        const probe = path.join(c.dir, '.dsh-write-probe');
-        await fsp.writeFile(probe, 'ok', 'utf8');
-        await fsp.unlink(probe);
+        await fsp.access(c.dir, W_OK);
         writable = true;
       } catch {
-        writable = false;
+        try {
+          await fsp.access(path.dirname(c.dir), W_OK);
+          writable = true;
+        } catch {
+          writable = false;
+        }
       }
       targets.push({ id: c.id, label: c.label, dir: c.dir, writable });
     }
@@ -1815,25 +1961,106 @@ function createHostService(ctx, config) {
       defaultId: (targets.find((x) => x.writable) || {}).id || 'backup',
     };
   }
+  /**
+   * 路径围栏（2026-11-12，容器审查 P0-4）。
+   *
+   * 为什么必须有：export/merge 的 path 由模型自由填写，而宿主以 root 运行——
+   * 不围栏就是任意文件写/读（覆盖 ~/.bashrc、读任意文件当库并入）。
+   * UI 侧早有 listExportTargets 白名单，但工具侧从不 enforce，这次补齐。
+   *
+   * 判据（vuln-hunter「带路径参数先按穿越对待」）：
+   *   · resolve 后必须落在 数据目录/备份目录/台账目录 之一（与 UI 同一组候选）
+   *   · 目标已存在 → realpath 后再验一次（防符号链接穿越）
+   *   · 目标不存在 → 验最近的存在祖先（防「真目录/ symlink 指出去」）
+   * 返回 { ok, dest } 或 { ok:false, code, message }。
+   */
+  async function confinePath(target, layout, { mustExist = false } = {}) {
+    const raw = str(target);
+    if (raw === '') return { ok: false, code: 'PATH_REQUIRED', message: '必须给出路径。' };
+    const dest = path.resolve(raw);
+    // roots 与 dest 都要归一到真实路径再比：Windows 的 tmpdir/用户目录可能是 8.3 短名
+    // （ADMINI~1），realpath 返回长名，不归一会把合法路径误判越界（B1 实测）。
+    const realOf = async (p) => {
+      try {
+        return await fsp.realpath(p);
+      } catch {
+        return p; // 尚不存在：用 resolve 后的形式
+      }
+    };
+    const roots = await Promise.all(
+      [layout.dataDir || path.dirname(layout.libraryCsv), layout.backupDir, layout.recordsDir]
+        .filter(Boolean)
+        .map(async (r) => realOf(path.resolve(r))),
+    );
+    const under = (p) => roots.some((r) => p === r || p.startsWith(r + path.sep));
+    if (!under(dest) && !under(await realOf(dest))) {
+      return {
+        ok: false,
+        code: 'PATH_NOT_ALLOWED',
+        message: `路径越界：${dest}。只允许写在数据目录/备份目录/台账目录内（与设置页导出白名单一致）。`,
+      };
+    }
+    // 符号链接穿越：对「已存在的部分」取 realpath 再验。
+    let probe = dest;
+    for (;;) {
+      try {
+        const real = await fsp.realpath(probe);
+        if (!under(real)) {
+          return { ok: false, code: 'PATH_NOT_ALLOWED', message: `路径经符号链接指向白名单外：${real}。` };
+        }
+        break;
+      } catch (err) {
+        if (err && err.code === 'ENOENT') {
+          if (mustExist) return { ok: false, code: 'PATH_NOT_FOUND', message: `文件不存在：${dest}。` };
+          const parent = path.dirname(probe);
+          if (parent === probe) break;
+          probe = parent;
+          continue;
+        }
+        return { ok: false, code: 'PATH_UNREADABLE', message: `无法校验路径：${err?.message ?? err}` };
+      }
+    }
+    return { ok: true, dest };
+  }
+
   async function exportLibrary({ path: target } = {}) {
     const { layout } = await resolveLayout();
     const { schema } = await loadConfigs();
-    const { records } = await readLibraryCsv(layout.libraryCsv, schema);
 
-    const dest = str(target) || path.join(layout.backupDir, `export-${backupStamp()}.csv`);
+    // 默认导出到备份目录；显式给路径则过围栏。
+    let dest;
+    if (str(target)) {
+      const c = await confinePath(target, layout);
+      if (!c.ok) return reject(c.code, c.message, 'path');
+      dest = c.dest;
+    } else {
+      dest = path.join(layout.backupDir, `export-${backupStamp()}.csv`);
+    }
+
+    // 默认拒覆盖既有文件（error-handling：不得无保证地覆盖用户数据）。
+    try {
+      await fsp.access(dest);
+      return reject('EXPORT_TARGET_EXISTS', `目标已存在，拒绝覆盖：${dest}。换个文件名，或先移走旧文件。`, 'path');
+    } catch {
+      /* 不存在才继续 */
+    }
+
+    const { records } = await readLibraryCsv(layout.libraryCsv, schema);
     await fsp.mkdir(path.dirname(dest), { recursive: true });
 
     let bytes = 0;
     try {
       const raw = await fsp.readFile(layout.libraryCsv);
-      await fsp.writeFile(dest, raw);
+      await fsp.writeFile(dest, raw, { flag: 'wx' });
       bytes = raw.length;
     } catch (err) {
       if (err && err.code === 'ENOENT') {
         // 库还不存在：导出一个只有表头的空库，别报错
         const header = `${arr(schema.columns).join(',')}\r\n`;
-        await fsp.writeFile(dest, header, 'utf8');
+        await fsp.writeFile(dest, header, { flag: 'wx' });
         bytes = Buffer.byteLength(header, 'utf8');
+      } else if (err && err.code === 'EEXIST') {
+        return reject('EXPORT_TARGET_EXISTS', `目标已存在，拒绝覆盖：${dest}。`, 'path');
       } else {
         return reject('EXPORT_FAILED', `导出失败：${err?.message ?? err}`);
       }
@@ -1911,6 +2138,7 @@ function createHostService(ctx, config) {
     let records = [];
     let readLogs = [];
     let writeLogs = [];
+    let lastTidyTs = '';
 
     await withFileLock(layout.lockFile, async () => {
       const lib = await readLibraryCsv(layout.libraryCsv, schema);
@@ -1919,8 +2147,17 @@ function createHostService(ctx, config) {
       // 直接当数组用会导致台账永远读成空 —— 整理就永远不会改任何东西。
       const rl = await readJsonl(layout.recordsDir + '/read.jsonl');
       const wl = await readJsonl(layout.recordsDir + '/write.jsonl');
+      const tl = await readJsonl(layout.recordsDir + '/tidy.jsonl');
       readLogs = arr(rl && rl.items);
       writeLogs = arr(wl && wl.items);
+      // P1-1（2026-11-12）：反馈开窗起点 = 上次整理的时间戳（tidy.jsonl 最后一条）。
+      // 没有它，wrong 按全历史累计永远 >0，「易变→观察」自愈永远不可达。
+      // 复用既有台账，不新增持久化文件（最懒可行）。首次整理无台账 → 全量。
+      const tidyItems = arr(tl && tl.items);
+      for (const t of tidyItems) {
+        const ts = String(t?.ts ?? '');
+        if (ts > lastTidyTs) lastTidyTs = ts;
+      }
     });
 
     // ---- 二、纯逻辑算"该改什么" ----
@@ -1936,6 +2173,8 @@ function createHostService(ctx, config) {
         stableMinTick: Number(scoring?.stableMinTick ?? 3),
         promoteMinDistinct: Number(scoring?.promoteMinDistinct ?? 4),
         inductionMinOccasions: Number(scoring?.inductionMinOccasions ?? 3),
+        // 反馈统计窗口：只算上次整理以来的召回（P1-1）。
+        sinceTs: lastTidyTs,
       },
     });
 
@@ -1994,7 +2233,14 @@ function createHostService(ctx, config) {
     };
   }
 
-  /** 从备份恢复。破坏性操作：**先把当前库再备份一次**再覆盖。 */
+  /**
+   * 从备份恢复。破坏性操作：**先把当前库再备份一次**再覆盖。
+   *
+   * ── 2026-11-12 修复（容器审查 P0-3）──────────────────────────
+   * 旧实现三个洞：① 安全备份失败仍继续覆盖（失去回滚点）；
+   * ② 全程无锁，与并发 write/recall 竞态；③ 不写台账，审计链断裂。
+   * 现在与 retag/tidy 同口径：备份失败即中止；整个恢复包进文件锁；补台账。
+   */
   async function restore({ from } = {}) {
     const src = str(from);
     if (src === '') return reject('SOURCE_REQUIRED', '必须给出要恢复的备份文件路径。', 'from');
@@ -2002,22 +2248,36 @@ function createHostService(ctx, config) {
     const { layout } = await resolveLayout();
     const { schema } = await loadConfigs();
 
-    // 恢复本身会覆盖库：先留一个回滚点
-    const safety = await backupLibrary({ libraryCsv: layout.libraryCsv, backupDir: layout.backupDir, schema, suffix: '-before-restore' });
+    await ensureDirs(layout);
+    return await withFileLock(layout.lockFile, async () => {
+      // 恢复本身会覆盖库：先留一个回滚点。**失败即中止，绝不无回滚点覆盖。**
+      const safety = await backupLibrary({ libraryCsv: layout.libraryCsv, backupDir: layout.backupDir, schema, suffix: '-before-restore' });
+      if (!safety.ok) return { ...fail(safety.errors, 'BACKUP_FAILED'), backupErrors: safety.errors };
 
-    const result = await restoreBackup({ backupCsv: src, libraryCsv: layout.libraryCsv, schema });
-    if (!result.ok) return { ...fail(result.errors, 'RESTORE_FAILED'), backupPathBefore: safety.ok ? safety.path : null };
+      const before = await readLibraryCsv(layout.libraryCsv, schema);
+      const result = await restoreBackup({ backupCsv: src, libraryCsv: layout.libraryCsv, schema });
+      if (!result.ok) return { ...fail(result.errors, 'RESTORE_FAILED'), backupPathBefore: safety.path };
 
-    return {
-      ok: true,
-      records: result.records,
-      backupPathBefore: safety.ok ? safety.path : null,
-    };
+      await writeTidyLog({
+        who: '（恢复）',
+        action: 'restore',
+        target: src,
+        before: { count: before.records.length },
+        after: { count: result.records },
+        basis: safety.path,
+      });
+
+      return {
+        ok: true,
+        records: result.records,
+        backupPathBefore: safety.path,
+      };
+    });
   }
 
   /**
    * 合并另一份记忆库。
-   * 冲突原则：编号唯一，同号保留较新（按编号里的日期+序号判定）。
+   * 冲突原则：编号唯一，同号保留较新（时距大 > 稳定性高 > 保留当前库，见 mergeInto）。
    */
   async function mergeLibrary({ path: otherPath, dryRun } = {}) {
     const src = str(otherPath);
@@ -2025,6 +2285,11 @@ function createHostService(ctx, config) {
 
     const { layout } = await resolveLayout();
     const { schema } = await loadConfigs();
+
+    // 路径围栏（P0-4）：merge 会读任意文件当库并入，必须与 export 同一白名单。
+    // 合法工作流：先 dtm_export 到数据目录，再 dtm_merge 该文件。
+    const conf = await confinePath(src, layout, { mustExist: true });
+    if (!conf.ok) return reject(conf.code, conf.message, 'path');
 
     // ⚠️ 必须先确认源文件**真的存在**。
     // readLibraryCsv 对不存在的文件返回空记录（当空库），不抛错 ——
@@ -2057,13 +2322,59 @@ function createHostService(ctx, config) {
       return reject('MERGE_SOURCE_INVALID', '这份文件不是合法的记忆库（表头缺失），已拒绝合并。');
     }
 
-    const { records } = await readLibraryCsv(layout.libraryCsv, schema);
-    const byId = new Map(records.map((r) => [str(r['编号']), r]));
+    // ── 2026-11-12 修复（容器审查 P0-2/P0-3）─────────────────────
+    // 旧实现：锁外读当前库 → 锁外算 merged → 锁内用旧快照整体覆写。
+    // 读库到覆写之间任何 dtm_write/retag/tidy 的改动都被无声抹掉（丢失更新）。
+    // 现在「读当前库 + 合并 + 备份 + 写回」整体在同一把锁内；
+    // 安全备份失败即中止（与 retag/tidy 同口径），绝不无回滚点覆盖。
+    const fieldAudit = inspectMergeFields(incoming.records, schema);
 
+    if (dryRun === true) {
+      // 预演也要读当前库算冲突，但不写任何东西，无需持锁。
+      const { records } = await readLibraryCsv(layout.libraryCsv, schema);
+      const preview = mergeInto(records, incoming.records);
+      return {
+        ok: true, changed: preview.changed, added: preview.added, conflicts: preview.conflicts,
+        backupPath: null, dryRun: true, total: preview.merged.length,
+        fieldAudit,
+      };
+    }
+
+    await ensureDirs(layout);
+    const outcome = await withFileLock(layout.lockFile, async () => {
+      const { records } = await readLibraryCsv(layout.libraryCsv, schema);
+      const { merged, added, changed, conflicts } = mergeInto(records, incoming.records);
+
+      const backup = await backupLibrary({ libraryCsv: layout.libraryCsv, backupDir: layout.backupDir, schema, suffix: '-merge' });
+      if (!backup.ok) return { ...fail(backup.errors, 'BACKUP_FAILED'), backupErrors: backup.errors };
+
+      await writeLibraryCsv(layout.libraryCsv, merged, schema);
+
+      await writeTidyLog({
+        who: '（合并）',
+        action: 'merge',
+        target: src,
+        before: { count: records.length },
+        after: { count: merged.length, added, changed, conflicts },
+        basis: src,
+      });
+
+      return { ok: true, changed, added, conflicts, backupPath: backup.path, total: merged.length, fieldAudit };
+    });
+    if (outcome.ok) lastBackupAt = localIsoString(new Date());
+    return outcome;
+  }
+
+  /**
+   * 合并计算（纯逻辑，无 I/O）：incoming 并进 current，同号保留较新。
+   * 从 mergeLibrary 抽出，让 dryRun 与实跑共用同一套冲突口径。
+   */
+  function mergeInto(currentRecords, incomingRecords) {
+    const byId = new Map(currentRecords.map((r) => [str(r['编号']), r]));
     let added = 0;
     let changed = 0;
     let conflicts = 0;
-    for (const rec of incoming.records) {
+    for (const rec of incomingRecords) {
       const id = str(rec['编号']);
       if (id === '') continue;
       const existing = byId.get(id);
@@ -2091,47 +2402,7 @@ function createHostService(ctx, config) {
         changed += 1;
       }
     }
-
-    const merged = Array.from(byId.values());
-
-    // §4.3：字段口径体检（纯只读，不改任何字段、不拦合并）。
-    // 外来库的 项目/智能体/稳定性/时距/空标签 全部原样落地，这里只把「带进来什么」
-    // 说清楚，交给用户/整理环节决定（见 内部文档/记忆合并规则.md）。
-    const fieldAudit = inspectMergeFields(incoming.records, schema);
-
-    if (dryRun === true) {
-      return {
-        ok: true, changed, added, conflicts, backupPath: null, dryRun: true, total: merged.length,
-        fieldAudit,
-      };
-    }
-
-    await ensureDirs(layout);
-    const backup = await backupLibrary({ libraryCsv: layout.libraryCsv, backupDir: layout.backupDir, schema, suffix: '-merge' });
-
-    await withFileLock(layout.lockFile, async () => {
-      await writeLibraryCsv(layout.libraryCsv, merged, schema);
-    });
-    lastBackupAt = localIsoString(new Date());
-
-    await writeTidyLog({
-      who: '（合并）',
-      action: 'merge',
-      target: src,
-      before: { count: records.length },
-      after: { count: merged.length, added, changed, conflicts },
-      basis: src,
-    });
-
-    return {
-      ok: true,
-      changed,
-      added,
-      conflicts,
-      backupPath: backup.ok ? backup.path : null,
-      total: merged.length,
-      fieldAudit,
-    };
+    return { merged: Array.from(byId.values()), added, changed, conflicts };
   }
 
   /** 编号 M-YYYYMMDD-NNN 的“较新”判定：先比日期，再比序号。 */
@@ -2178,25 +2449,70 @@ function createHostService(ctx, config) {
     }
 
     const from = layout.dataDir;
-    let moved = false;
+    const destLayout = layoutOf(path.resolve(dest));
+
+    // P1-6（2026-11-12）：目标已有库 → 拒绝，绝不静默覆盖（目标侧数据丢失）。
     try {
-      await fsp.mkdir(dest, { recursive: true });
-      // 逐个子项搬（store / records / backup / settings.json），失败就报，不静默
-      const entries = await fsp.readdir(from, { withFileTypes: true }).catch(() => []);
-      for (const ent of entries) {
-        const srcPath = path.join(from, ent.name);
-        const dstPath = path.join(dest, ent.name);
-        await fsp.cp(srcPath, dstPath, { recursive: true, force: true });
+      const dstLib = await fsp.stat(destLayout.libraryCsv);
+      if (dstLib.isFile() && dstLib.size > 0) {
+        return reject(
+          'MIGRATE_TARGET_NOT_EMPTY',
+          `目标目录已有记忆库（${destLayout.libraryCsv}），拒绝覆盖。请先移走或换个空目录。`,
+          'target',
+        );
       }
-      moved = true;
+    } catch {
+      /* 目标库不存在＝可搬 */
+    }
+
+    // 搬家前记源库的字节/记录数，搬完据此校验（verifyMigration 原来引了从不调）。
+    const { schema } = await loadConfigs();
+    const srcLib = await readLibraryCsv(layout.libraryCsv, schema);
+    let srcBytes = 0;
+    try {
+      srcBytes = (await fsp.stat(layout.libraryCsv)).size;
+    } catch {
+      srcBytes = 0;
+    }
+    const before = { bytes: srcBytes, records: srcLib.records.length };
+
+    let moved = false;
+    // 全程持源库锁：复制期间并发 write/recall 会造成新旧两侧不一致。
+    try {
+      await withFileLock(layout.lockFile, async () => {
+        await fsp.mkdir(dest, { recursive: true });
+        const entries = await fsp.readdir(from, { withFileTypes: true }).catch(() => []);
+        for (const ent of entries) {
+          // 排除锁文件与临时文件：搬过去会让新目录首次操作 LOCK_TIMEOUT，
+          // 或把半成品 tmp 当数据。backup/ 要搬（旧实现漏了，契约与实现脱节）。
+          if (ent.name === '.memory.lock' || ent.name.endsWith('.tmp')) continue;
+          const srcPath = path.join(from, ent.name);
+          const dstPath = path.join(dest, ent.name);
+          await fsp.cp(srcPath, dstPath, { recursive: true, force: true });
+        }
+        moved = true;
+      });
     } catch (err) {
       return reject('MIGRATE_FAILED', `搬家失败：${err?.message ?? err}`);
     }
 
-    // 记录选择（④包内 时才允许设置页生效；③设置页 也是可写的）
+    // 搬后校验：字节数 + 记录数。不过就报失败，不切指针（否则指向一个坏库）。
+    const dstLib = await readLibraryCsv(destLayout.libraryCsv, schema);
+    let dstBytes = 0;
+    try {
+      dstBytes = (await fsp.stat(destLayout.libraryCsv)).size;
+    } catch {
+      dstBytes = 0;
+    }
+    const verdict = verifyMigration(before, { bytes: dstBytes, records: dstLib.records.length });
+    if (!verdict.ok) {
+      return { ok: false, code: 'MIGRATE_VERIFY_FAILED', message: verdict.message, from, to: dest };
+    }
+
+    // 校验通过才记录选择（④包内 时才允许设置页生效；③设置页 也是可写的）
     await writeSettingsDir(dest);
 
-    return { ok: true, from, to: dest, moved };
+    return { ok: true, from, to: dest, moved, verified: verdict.message };
   }
 
   /* ---------------- 设置 ---------------- */
@@ -2432,26 +2748,40 @@ const IDENTITY_KEY = 'dsh-tag-memory/identity';
  * `apply` 必须**同步**，且对不关心的事件**返回同一引用**（引用不变 = 零下游开销）。
  */
 function registerIdentityProjection(ctx) {
-  try {
-    const projections = ctx.get?.('sessionProjections');
-    if (!projections || typeof projections.register !== 'function') return;
+  // 2026-11-12 P1-19：与 typert 同口径，用 ctx.inject 延迟到服务就绪再注册。
+  // 旧实现 apply 期同步 ctx.get('sessionProjections')，加载顺序不利时服务还没
+  // ACTIVE → 拿到 undefined → 静默 return，身份投影永不注册，resume/fork 身份
+  // 重建失效、所有写入被拒（UNBOUND_IDENTITY）且无显式错误。inject 由框架保证
+  // 依赖就绪后才跑回调，规避这个时序坑。
+  const register = (pctx) => {
+    try {
+      const projections = pctx.get?.('sessionProjections');
+      if (!projections || typeof projections.register !== 'function') return;
 
-    const schema = { parse: (v) => v }; // 运行时只要求有 parse；状态是纯 JSON
+      const schema = { parse: (v) => v }; // 运行时只要求有 parse；状态是纯 JSON
 
-    projections.register({
-      key: IDENTITY_KEY,
-      stateSchema: schema,
-      stateVersion: 1,
-      init: () => ({ 智能体: '', 项目: '' }),
-      apply: (state, event) => {
-        const parsed = identityFromEvent(event);
-        if (!parsed) return state; // ← 返回同一引用：零下游开销
-        if (parsed.智能体 === state.智能体 && parsed.项目 === state.项目) return state;
-        return { 智能体: parsed.智能体, 项目: parsed.项目 };
-      },
-    });
-  } catch (err) {
-    ctx.logger?.warn?.('[dsh-tag-memory] 身份投影注册失败（身份将始终视为未绑定）：%s', err?.message ?? err);
+      projections.register({
+        key: IDENTITY_KEY,
+        stateSchema: schema,
+        stateVersion: 1,
+        init: () => ({ 智能体: '', 项目: '' }),
+        apply: (state, event) => {
+          const parsed = identityFromEvent(event);
+          if (!parsed) return state; // ← 返回同一引用：零下游开销
+          if (parsed.智能体 === state.智能体 && parsed.项目 === state.项目) return state;
+          return { 智能体: parsed.智能体, 项目: parsed.项目 };
+        },
+      });
+    } catch (err) {
+      ctx.logger?.warn?.('[dsh-tag-memory] 身份投影注册失败（身份将始终视为未绑定）：%s', err?.message ?? err);
+    }
+  };
+
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['sessionProjections'], register);
+  } else {
+    // 极老宿主/测试假 ctx 没有 inject：退回同步取（拿不到就静默跳过，不崩）。
+    register(ctx);
   }
 }
 

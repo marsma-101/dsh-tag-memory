@@ -289,8 +289,7 @@ function executeSupersede(ctx) {
         旧编号: args['旧编号'],
         主要内容: args['主要内容'],
         形态: args['形态'],
-        项目: args['项目'],
-        智能体: args['智能体'],
+        // 不传 项目/智能体：归属由程序沿用旧条（2026-11-12 P1-9，与 write/recall 同裁定）。
         自由标签: args['自由标签'],
         basis: args.basis,
       },
@@ -348,8 +347,10 @@ function executeRetag(ctx) {
 
     // 只把模型**实际给出**的字段放进 patch。
     // undefined / 未出现 一律跳过 —— 漏传不等于"要清空"。
+    // 2026-11-12 P1-9：归属（项目/智能体）不再由模型改——与 write/recall 同裁定，
+    // 归属是环境事实。要搬家走 UI 手动通道或 merge，不走 retag。
     const patch = {};
-    for (const field of ['形态', '项目', '智能体', '自由标签', '稳定性', '状态']) {
+    for (const field of ['形态', '自由标签', '稳定性', '状态']) {
       const v = args[field];
       if (v !== undefined && v !== null) {
         // 空数组/空串是**真给了空值**，要放进去让宿主报错（那是模型想清空，属于错误操作）
@@ -364,7 +365,7 @@ function executeRetag(ctx) {
         code: 'PATCH_EMPTY',
         text:
           '没有给出任何要改的字段。`dtm_retag` 至少要改一项：' +
-          '形态 / 项目 / 智能体 / 自由标签 / 稳定性 / 状态。\n' +
+          '形态 / 自由标签 / 稳定性 / 状态。\n' +
           '不想改的字段**直接省略**即可（省略 ≠ 清空），不用传原值。',
       };
     }
@@ -388,15 +389,15 @@ function executeRetag(ctx) {
  * **不记 read.jsonl、不动时距**：它不是召回，只是看一眼（《功能说明》§十二）。
  */
 function executeReview(ctx) {
-  return async (args) => {
+  return async (args, exec) => {
     const h = requireHost(ctx);
     if (!h.ok) return h.result;
 
     const r = await callHost(h.host, 'listEntries', [
+      agentOf(exec),
       {
         形态: args['形态'],
-        项目: args['项目'],
-        智能体: args['智能体'],
+        // 不传 项目/智能体：工具通道由宿主按当前归属隔离（2026-11-12 P1-18）。
         状态: args['状态'],
         自由标签: args['自由标签'],
         limit: args.limit,
@@ -410,11 +411,12 @@ function executeReview(ctx) {
 
 /** dtm_records —— 查台账。只读。 */
 function executeRecords(ctx) {
-  return async (args) => {
+  return async (args, exec) => {
     const h = requireHost(ctx);
     if (!h.ok) return h.result;
 
     const r = await callHost(h.host, 'readRecords', [
+      agentOf(exec),
       { kind: args.kind, limit: args.limit, onlyFailed: args.onlyFailed },
     ]);
     if (!r.ok) return r;

@@ -15,10 +15,9 @@
  *
  * ── §4.2 自由标签说明表（2026-11-11）─────────────────────────────
  *   说明表的机器可读源是 `lib/engine/templates/free-tag-rules.json`。
- *   **走工具 description 通道，不进 section**：renderInjection 的 section 实测
- *   5998/6000 字节（L4 裁定 ≤6000），只剩 2 字节，塞不进任何一段说明；
- *   而 section 一变会毁掉整段 KV cache 前缀。工具 description 在模型填 `自由标签`
- *   时必被看到，且不受该预算约束。加这段不新增第 11 个工具。
+ *   **走工具 description 通道，不进 section**：section 每轮在 system prompt 里，
+ *   内容一变就毁掉整段 KV cache 前缀（实测约 3786 字节，预算 6000，早期 5998 注释已 stale）。
+ *   工具 description 在模型填 `自由标签` 时必被看到，且不受该预算约束。加这段不新增第 11 个工具。
  *   读表失败时用内置兜底，**绝不抛错**（本模块被测试直接 import，且 buildToolDefs
  *   契约要求「无 schema 时也能工作」）。
  */
@@ -26,6 +25,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { selectVisible, renderTagNetwork } from '../lib/engine/vocab.mjs';
 
 const TEMPLATE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'engine', 'templates');
 
@@ -88,7 +88,7 @@ let networkCache = { key: '', text: '' };
  *
  * @param {string} [libraryCsv]    库 CSV 绝对路径（调用方传入，本模块不猜数据目录）
  * @param {object} [view]          `{ project, agent }` 当前视角
- * @param {object} [rules]         free-tag-rules.json（用其 vocab 段）
+ * @param {object} [rules]         free-tag-rules.json（用其 network 段）
  * @returns {string}
  */
 export function renderNetworkFromLibrary(libraryCsv, view = {}, rules = freeTagRulesFor()) {
@@ -105,35 +105,25 @@ export function renderNetworkFromLibrary(libraryCsv, view = {}, rules = freeTagR
       networkCache = { key, text: '' };
       return '';
     }
-    const iStatus = rows[0].indexOf('状态');
-    const iTags = rows[0].indexOf('自由标签');
-    const iProj = rows[0].indexOf('项目');
-    const iAgent = rows[0].indexOf('智能体');
+    const header = rows[0];
+    const iStatus = header.indexOf('状态');
+    const iTags = header.indexOf('自由标签');
     if (iStatus < 0 || iTags < 0) {
       networkCache = { key, text: '' };
       return '';
     }
 
-    const UNIVERSAL = '通用';
-    const active = String(rules?.vocab?.statusActive ?? '生效');
-    const lines = [];
-    for (const r of rows.slice(1)) {
-      if (String(r[iStatus] ?? '').trim() !== active) continue;
-      const p = String(r[iProj] ?? '').trim() || UNIVERSAL;
-      const a = String(r[iAgent] ?? '').trim() || UNIVERSAL;
-      // 视角隔离：只留「本项目或通用」且「本智能体或通用」
-      if (p !== project && p !== UNIVERSAL) continue;
-      if (a !== agent && a !== UNIVERSAL) continue;
-      const tags = String(r[iTags] ?? '')
-        .split('|')
-        .map((x) => x.trim())
-        .filter(Boolean);
-      // 没有标签的条目连不成线，对网络无贡献
-      if (tags.length === 0) continue;
-      lines.push(tags.join('|'));
-    }
-
-    const text = lines.join('\n');
+    // 行 → 记录对象（中文键），再交给 engine 的纯函数做隔离与渲染。
+    // 2026-11-12 P1-12：原来这里内联重写了一遍过滤/拼接，与 vocab.mjs 的
+    // selectVisible/renderTagNetwork 是两份逻辑（会漂移）。现在单一真源在 engine。
+    const records = rows.slice(1).map((r) => {
+      const obj = {};
+      header.forEach((col, i) => { obj[col] = r[i] ?? ''; });
+      return obj;
+    });
+    const active = String(rules?.network?.statusActive ?? '生效');
+    const visible = selectVisible(records, { project, agent, statusActive: active });
+    const text = renderTagNetwork(visible);
     networkCache = { key, text };
     return text;
   } catch {
@@ -148,9 +138,9 @@ export function clearNetworkCache() {
 
 /** 兜底文案：与 free-tag-rules.json 的要点一致，表读不到时也能给出规范。 */
 const FALLBACK_WRITE =
-  '第一个词优先放类别值（规矩/决策/踩坑/原话 等），再接内容概括词；' +
+  '第一个词优先放类别值（规矩/决策/交代/踩坑/纠正/流程/原话/推断 等），再接内容概括词；' +
   '从「作用/注意事项/内容关键词」三方向拆短实词，一个标签一个概念；' +
-  '**不打纯数字**（3190/0）、来源标记（原话/推断以外的元信息）、转述句；' +
+  '**不打纯数字**（3190/0）、转述句、与内容无关的泛词（原话/推断 作类别首词合法，别当内容词重复打）；' +
   '优先复用 wiki 已有的词，确实没有再造新词；不含 |（会被拒写）；1~20 个，超过 6~8 个就该收。';
 const FALLBACK_READ = '一次给 1~3 个短实词，优先内容关键词/作用；查空别反复换说法。';
 
@@ -381,8 +371,8 @@ const DEFS = [
         enum: d.shapes,
         description: `新条的形态，6 选 1。`,
       },
-      项目: { type: 'string', description: '新条属于哪个项目。省略=旧条的项目。' },
-      智能体: { type: 'string', description: '新条属于哪个身份。省略=旧条的智能体。' },
+      // 注意：**没有 项目/智能体 参数**（2026-11-12 P1-9，与 write/recall 同裁定）。
+      // 新条归属由程序沿用旧条——顶替是同一条记忆的新版本，不是搬家。
       自由标签: {
         type: 'array',
         items: { type: 'string' },
@@ -415,10 +405,11 @@ const DEFS = [
   /* ---------------- 6. dtm_retag ---------------- */
   {
     name: 'dtm_retag',
-    when: '改某条的 形态/项目/智能体/自由标签/稳定性（须带依据）',
+    when: '改某条的 形态/自由标签/稳定性/状态（须带依据）',
     description:
       '改某条记忆的标签字段。属整理动作：**必须给依据**，没有依据不许改。' +
       '编号、主要内容、时距不可改——那是唯一标识、一手材料和程序计数器。' +
+      '项目/智能体也不可由模型改（归属是环境事实，2026-11-12）。' +
       '**只传要改的字段；省略的字段 = 不改**（不是清空）。',
     params: (d) => ({
       编号: { type: 'string', required: true, description: '要改的条目编号。' },
@@ -430,8 +421,6 @@ const DEFS = [
           '没有依据就不许改标签——这是硬要求，缺了会被拒。',
       },
       形态: { type: 'string', enum: d.shapes, description: '新形态。' },
-      项目: { type: 'string', description: '新项目。' },
-      智能体: { type: 'string', description: '新智能体。' },
       自由标签: {
         type: 'array',
         items: { type: 'string' },
@@ -450,8 +439,8 @@ const DEFS = [
       '所有筛选条件省略=不限。',
     params: (d) => ({
       形态: { type: 'string', enum: d.shapes, description: '只看这个形态。' },
-      项目: { type: 'string', description: '只看这个项目。' },
-      智能体: { type: 'string', description: '只看这个身份。' },
+      // 注意：**没有 项目/智能体 参数**（2026-11-12 P1-18）。
+      // 工具通道由宿主按当前归属隔离，模型不能借 review 读别的项目/身份的记忆。
       状态: {
         type: 'string',
         enum: d.statuses,
@@ -496,7 +485,9 @@ const DEFS = [
     params: () => ({
       path: {
         type: 'string',
-        description: '目标文件路径。省略=数据目录 export/ 下的带时间戳文件名。',
+        description:
+          '目标文件路径。省略=备份目录下的带时间戳文件名。' +
+          '只能写在数据目录/备份目录/台账目录内（越界报 PATH_NOT_ALLOWED）；不覆盖既有文件（报 EXPORT_TARGET_EXISTS）。',
       },
     }),
   },
@@ -508,7 +499,13 @@ const DEFS = [
     description:
       '把另一份记忆库合并进当前库：编号唯一，同号保留较新的，行只追加。合并前自动备份。',
     params: () => ({
-      path: { type: 'string', required: true, description: '要合并进来的 CSV 文件路径。' },
+      path: {
+        type: 'string',
+        required: true,
+        description:
+          '要合并进来的 CSV 文件路径。必须在数据目录/备份目录/台账目录内（越界报 PATH_NOT_ALLOWED）。' +
+          '跨库交接先用 dtm_export 导出到数据目录，再 merge 该文件。',
+      },
       dryRun: {
         type: 'boolean',
         description: '只报告将要发生的变更，不落盘。默认 false。',

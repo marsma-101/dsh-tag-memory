@@ -2,9 +2,9 @@
 
 > Tag-based, searchable, cross-session long-term memory for DSH agents.
 
-[![Version](https://img.shields.io/badge/version-1.2.8-blue)]()
-[![DSH](https://img.shields.io/badge/DSH-0.2.1%2B-orange)]()
-[![Tests](https://img.shields.io/badge/tests-323%20passing-brightgreen)]()
+[![Version](https://img.shields.io/badge/version-1.4.4-blue)]()
+[![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1%2B-orange)]()
+[![Tests](https://img.shields.io/badge/tests-464%20passing-brightgreen)]()
 
 English | [中文](README.zh.md)
 
@@ -56,7 +56,7 @@ Passing the line is not enough — two vetoes still apply:
 
 | Veto | Condition | Meaning |
 |---|---|---|
-| Entry side | `e_ratio > 0.5` (strictly greater) | how much of this entry the query hit |
+| Entry side | `e_ratio > 0.3` (strictly greater) | how much of this entry the query hit |
 | Query side | `q_ratio >= 0.15` | whether the query points the right way |
 
 Near-misses land in `near` (max 3), so the model can tell **a real empty result from a false one**.
@@ -96,7 +96,7 @@ dsh plugin --profile web add github:marsma-101/dsh-tag-memory
 **Requires only `node ≥ 24.9` + `npx` — no pnpm, no git, no installed plugins, no model.**
 
 ```bash
-npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.2.8 apply
+npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.4.4 apply
 ```
 
 `npx` only downloads the package; the real work is [`scripts/install.mjs`](scripts/install.mjs)
@@ -199,25 +199,29 @@ Six entries are seeded, all things the injection cannot provide:
 | Anti-pollution | rule | seeds are not user facts; reading them is not knowing the user |
 | Subagent identity | skill | the correct way to hand an identity to a subagent (below) |
 
-### Why exactly three tags per entry
+### Tag count and the recall gate
 
-This is forced by the recall gate, not a style choice. The hard gate in `read.mjs` L388 is:
+Recall has an entry-side hard gate (`read.mjs`; factory threshold **0.3**, calibrated 2026-11-11):
 
 ```
-e_ratio = matched tags / entry tags   must be STRICTLY greater than 0.5
+e_ratio = matched tags / entry tags   must be STRICTLY greater than 0.3
 ```
 
-More than half of an entry's tags must match, or the entry is vetoed outright:
+The matched fraction must exceed 30%, or the entry is vetoed. Querying with 2 tags:
 
 | Entry tags | Query with 2 tags | Result |
 |---|---|---|
-| 5 | 2/5 = 0.40 | vetoed |
-| 3 | 2/3 = 0.67 | **passes** |
-| 2 | 2/2 = 1.00 | passes, but a single tag gives 1/2 = 0.50 and is vetoed |
+| 6 | 2/6 = 0.33 | **passes** (>0.3) |
+| 7 | 2/7 = 0.29 | vetoed |
+| 3 | 2/3 = 0.67 | passes |
+| 2 | 2/2 = 1.00 | passes |
 
-So 3 is the largest tag count that still lets an entry be found with two words.
-**More tags make an entry harder to retrieve** — counter-intuitive, but measured.
+So the largest tag count still findable with two words is **6** (2/6≈0.33 passes, 2/7≈0.29 is vetoed).
+Earlier docs derived "exactly three" from the old 0.5 threshold; **that no longer holds after the 0.3 calibration** and is corrected here.
+
+The invariant remains: **more tags make an entry harder to retrieve** with a single word.
 Seeds also never share a tag, otherwise one query matches two entries and they compete for Top-K.
+The threshold and comparators (entry side `>`, query side `>=`) live in `scoring.json` — do not change them from memory.
 
 ### Handing an identity to a subagent (easy to get wrong)
 
@@ -355,11 +359,11 @@ identifier, the primary material, and a program counter.
 
 ```bash
 # Full test suite (zero external dependencies, no shims)
-node --test --test-isolation=none
+node --test
 ```
 
 ```
-327 tests: 323 passing / 0 failing / 4 visual checks not verified (reported honestly)
+468 tests: 464 passing / 0 failing / 4 visual checks not verified (reported honestly)
 ```
 
 ### Zero framework dependencies

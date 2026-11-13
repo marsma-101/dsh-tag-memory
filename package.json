@@ -1,6 +1,6 @@
 {
   "name": "dsh-tag-memory",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "type": "module",
   "description": "Tag-based long-term memory for DSH agents.",
   "keywords": [
@@ -38,14 +38,17 @@
     "preset/**",
     "lib/**",
     "data/**",
-    "scripts/**",
+    "scripts/install.mjs",
+    "scripts/seed.mjs",
+    "scripts/checks.mjs",
+    "scripts/verify-install.mjs",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
     "标签字典.md"
   ],
   "engines": {
-    "dsh": ">=0.2.0"
+    "dsh": ">=0.2.2-rc.1"
   },
   "scripts": {
     "test": "node --test",

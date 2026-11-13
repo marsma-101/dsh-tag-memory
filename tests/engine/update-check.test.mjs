@@ -49,6 +49,17 @@ test('U2 版本比较：prerelease 规则', () => {
   assert.equal(isNewerVersion('1.4.1-beta', '1.4.1'), false, '预发布低于同号正式版');
 });
 
+test('U2b 预发布按 semver §11 分段比（2026-11-12 P1-8：rc.10 不得被判旧于 rc.2）', () => {
+  // 旧实现整串字典序：'rc.10' < 'rc.2'（因 '1'<'2'）→ 误判。分段数值比才对。
+  assert.equal(isNewerVersion('1.5.0-rc.10', '1.5.0-rc.2'), true, 'rc.10 应新于 rc.2');
+  assert.equal(isNewerVersion('1.5.0-rc.2', '1.5.0-rc.10'), false, 'rc.2 应旧于 rc.10');
+  assert.equal(isNewerVersion('1.5.0-rc.2', '1.5.0-rc.2'), false, '相同预发布不算更新');
+  // 数字段 < 字母段；段数少且前缀相同 → 更小
+  assert.equal(isNewerVersion('1.5.0-alpha', '1.5.0-1'), true, '字母段高于数字段');
+  assert.equal(isNewerVersion('1.5.0-rc.1.1', '1.5.0-rc.1'), true, '多一段更大');
+  assert.equal(isNewerVersion('1.5.0-beta', '1.5.0-alpha'), true, '字母段字典序');
+});
+
 test('U3 版本比较：非法值不崩、判为「不更新」', () => {
   assert.equal(isNewerVersion('abc', '1.0.0'), false);
   assert.equal(isNewerVersion('1.0.0', 'abc'), false);

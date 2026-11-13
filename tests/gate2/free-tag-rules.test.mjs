@@ -36,7 +36,15 @@ test('T1 机器可读源存在且结构完整（写侧/读侧各就位）', () =
   assert.ok(rules.read.howMany.includes('1~3'), '读取侧要写明一次给几个词');
   assert.ok(rules.read.onEmpty.includes('不要'), '读取侧要写明查空别反复换说法');
   assert.ok(rules.write.dont.some((x) => x.includes('纯数字')), '别打纯数字');
-  assert.ok(rules.write.dont.some((x) => x.includes('来源标记')), '别打来源标记');
+  assert.ok(rules.write.dont.some((x) => x.includes('转述句')), '别打转述句');
+  // 2026-11-12 P1-10：原话/推断 是合法类别首词，dont 不得再把它们当「来源标记」禁掉，
+  // 否则与 classTag 自相矛盾（同一条 description 里既禁又荐）。
+  assert.equal(
+    rules.write.dont.some((x) => x.includes('来源标记')),
+    false,
+    'dont 不得禁「来源标记（原话/推断）」——与 classTag 矛盾',
+  );
+  assert.ok(rules.write.classTag.includes('原话') && rules.write.classTag.includes('推断'), 'classTag 要承认原话/推断 作类别首词');
 })
 
 test('T2 人读副本存在且与机器源口径一致', () => {
@@ -44,7 +52,9 @@ test('T2 人读副本存在且与机器源口径一致', () => {
   const dict = fs.readFileSync(path.join(PACKAGE_DIR, '标签字典.md'), 'utf8');
   for (const [file, text] of [['自由标签说明表.md', doc], ['标签字典.md', dict]]) {
     assert.ok(text.includes('纯数字'), `${file} 要写明别打纯数字`)
-    assert.ok(text.includes('来源标记'), `${file} 要写明别打来源标记`)
+    // 2026-11-12 P1-10：不再要求「来源标记」禁词——原话/推断 作类别首词合法，
+    // 与 classTag 一致。改为断言「转述句」禁词 + 类别首词口径。
+    assert.ok(text.includes('转述') || text.includes('原话'), `${file} 要写明转述句/来源词口径`)
     assert.ok(text.includes('6~8'), `${file} 要写明超过 6~8 个该收`)
     assert.ok(text.includes('不要反复换说法') || text.includes('不要「换个说法再试」'), `${file} 要写明查空别反复重试`)
   }
@@ -94,9 +104,17 @@ test('T4 要点确实进了两个工具的 自由标签 参数 description', () 
   const rDesc = recall.parameters['自由标签'].description;
 
   // 写侧：三方向 + 不该打的 + 数量区间 + | 拒写，一个都不能少
-  for (const kw of ['作用', '注意事项', '内容关键词', '纯数字', '来源标记', '6~8', '|']) {
+  // 2026-11-12 P1-10：不再断言「来源标记」——那与 classTag（原话/推断 合法首词）矛盾。
+  for (const kw of ['作用', '注意事项', '内容关键词', '纯数字', '转述句', '6~8', '|']) {
     assert.ok(wDesc.includes(kw), `dtm_write.自由标签 缺「${kw}」：${wDesc}`);
   }
+  // 防矛盾回归：同一条 description 里不得既「禁原话/推断」又「荐原话/推断作首词」
+  assert.equal(
+    /不打[^；]*原话|不打[^；]*推断|来源标记（原话/.test(wDesc),
+    false,
+    `dtm_write.自由标签 不得把原话/推断当禁词（与 classTag 矛盾）：${wDesc}`,
+  );
+  assert.ok(wDesc.includes('原话') && wDesc.includes('推断'), 'classTag 要点要进 description');
   // 读侧：给几个词 + 查空怎么办
   for (const kw of ['1~3', '查空', '留空']) {
     assert.ok(rDesc.includes(kw), `dtm_recall.自由标签 缺「${kw}」：${rDesc}`);

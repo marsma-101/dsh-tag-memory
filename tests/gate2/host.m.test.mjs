@@ -270,3 +270,38 @@ test('M8 含逗号/引号/换行的正文 → 真实落盘后能完整读回', a
     h.cleanup()
   }
 })
+
+/* ------------------------------------------------------------------ *
+ * M9 备份保留上限（2026-11-12 P1-5）：只清插件自己的 memory-*.csv，
+ *    留最近 keep 份；绝不碰用户放进 backup/ 的其他文件。
+ * ------------------------------------------------------------------ */
+test('M9 pruneBackups 留最近 keep 份，且不动非插件文件', async () => {
+  const { mkdtempSync, writeFileSync, readdirSync, utimesSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { pruneBackups } = await import('../../lib/engine/backup.mjs')
+  const dir = mkdtempSync(join(tmpdir(), 'dtm-prune-'))
+  try {
+    // 造 5 份插件备份，mtime 递增（b0 最旧 … b4 最新）
+    for (let i = 0; i < 5; i++) {
+      const f = join(dir, `memory-2026110${i + 1}-000000.csv`)
+      writeFileSync(f, 'x', 'utf8')
+      const t = new Date(Date.now() - (5 - i) * 100000)
+      utimesSync(f, t, t)
+    }
+    // 用户自己的文件：绝不能被清
+    writeFileSync(join(dir, '用户重要资料.csv'), 'keep me', 'utf8')
+    writeFileSync(join(dir, 'notes.txt'), 'keep me too', 'utf8')
+
+    const { removed } = await pruneBackups(dir, 2)
+    assert.equal(removed.length, 3, '5 份留 2 份应清掉 3 份')
+    const left = readdirSync(dir).sort()
+    assert.ok(left.includes('用户重要资料.csv'), '用户文件必须保留')
+    assert.ok(left.includes('notes.txt'), '非 csv 文件必须保留')
+    assert.ok(left.includes('memory-20261105-000000.csv'), '最新的要留')
+    assert.ok(left.includes('memory-20261104-000000.csv'), '次新的要留')
+    assert.equal(left.filter((f) => f.startsWith('memory-')).length, 2, '插件备份只留 2 份')
+  } finally {
+    const { rmSync } = await import('node:fs')
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

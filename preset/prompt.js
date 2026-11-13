@@ -154,7 +154,7 @@ export function renderInjection({ writeRoutes, dimensions } = {}) {
  * 进历史、以 user 角色追加：绑定时只多一条消息，**不毁系统提示词缓存**。
  * 三种态：已绑定 / 未绑定 / 拿不到会话（按未绑定处理，官方注释 "absent on diagnostics"）。
  *
- * @param {{ bound?: boolean, who?: string, project?: string }} [identity]
+ * @param {{ bound?: boolean, who?: string, project?: string, unavailable?: boolean }} [identity]
  * @returns {string}
  */
 export function renderIdentityContext(identity) {
@@ -170,11 +170,22 @@ export function renderIdentityContext(identity) {
     lines.push('归属由程序填，`dtm_write`/`dtm_recall` 都不用传 `项目`/`智能体`——');
     lines.push('你只管决定**内容、形态、自由标签**。');
     // §4.7 配套：答复前自问（旧版 _work_preset.js L265 曾有一句，重构时丢了）。
-    // 放 context 末尾而非 section：section 实测 5998/6000 字节只剩 2 字节，
+    // 放 context 末尾而非 section：section 实测约 3786 字节（预算 6000），
     // 且内容一变会毁掉整段 KV cache 前缀；context 是 user 角色快照，加一句不毁缓存。
     lines.push('');
     lines.push('> **答复前自问**：这轮中了哪条必写？中了就先 `dtm_write` / `dtm_recall` 再答。');
     return lines.join('\n');
+  }
+
+  // 取值失败（瞬时，2026-11-12 P1-15）：不是真未绑定，别强推 bind。
+  // 中性提示即可——宿主恢复后下一轮自然回到已绑定/真未绑定态。
+  if (identity?.unavailable === true) {
+    return [
+      '### 记忆身份：暂时读不到',
+      '',
+      '身份服务这一刻没返回（可能是瞬时抖动），**不代表你没绑定**。',
+      '本轮不必为此去问用户身份或调 `dtm_bind`；若真要写记忆而工具报 `UNBOUND_IDENTITY`，再按未绑定流程处理。',
+    ].join('\n');
   }
 
   // 未绑定（含"拿不到会话"）：必须去问用户，且这是**硬性流程**，不是建议。

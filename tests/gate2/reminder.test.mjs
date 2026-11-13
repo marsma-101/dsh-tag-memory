@@ -195,6 +195,75 @@ test('R11 验收①：用户下达明确规矩但未写 → 提醒出现，且�
   assert.equal(r5.messages.filter((m) => m?.source?.kind === 'tag-memory').length, 1, '新一轮重新可提醒')
 })
 
+/* ------------------------------------------------------------------ *
+ * R11b 【事故回归·2026-11-13】同一内容不得在会话里被反复推送
+ *
+ * 真实事故：会话 d91a310d 同一句提醒在 4 个轮次各推一次（seq 29/417/435/510）。
+ * 根因是去重作用域只有「当前这一步的 messages 数组」，跨轮完全不设防。
+ * 现在由引擎的会话级投递台账兜住：配额用尽即永久静默。
+ * ------------------------------------------------------------------ */
+test('R11b 连续多轮未写 → 提醒最多 maxPerSession 次，之后永久静默', async () => {
+  const ctx = createFakeCtx()
+  const agent = { id: 'a-spam' }
+  installWriteReminder(ctx)
+  const d = driver(ctx)
+
+  let total = 0
+  // 模拟 10 个轮次，每轮都「用户说话但没写记忆」——旧实现会推 10 次
+  for (let turn = 1; turn <= 10; turn++) {
+    await d.preStep({ agent, messages: [userMsg()], turn, step: 1 })
+    const r = await d.preStep({ agent, messages: [], turn, step: 2 })
+    total += r.messages.filter((m) => m?.source?.kind === 'tag-memory').length
+  }
+  assert.ok(total <= 2, `默认配额 2 次，实际推了 ${total} 次——同一内容被反复推送`)
+  assert.ok(total >= 1, '仍要保留兜底提醒，不能一次都不提醒')
+})
+
+test('R11c 同一轮内多步反复检查 → 只推一次（同轮闸）', async () => {
+  const ctx = createFakeCtx()
+  const agent = { id: 'a-same-turn' }
+  installWriteReminder(ctx)
+  const d = driver(ctx)
+  await d.preStep({ agent, messages: [userMsg()], turn: 1, step: 1 })
+  let total = 0
+  for (let step = 2; step <= 8; step++) {
+    const r = await d.preStep({ agent, messages: [], turn: 1, step })
+    total += r.messages.filter((m) => m?.source?.kind === 'tag-memory').length
+  }
+  assert.equal(total, 1, `同轮多步只许一次，实际 ${total} 次`)
+})
+
+test('R11d injectionPolicy 可收紧到「整个会话只提醒一次」', async () => {
+  const ctx = createFakeCtx()
+  const agent = { id: 'a-once' }
+  installWriteReminder(ctx, { policy: { maxPerSession: 1 } })
+  const d = driver(ctx)
+  let total = 0
+  for (let turn = 1; turn <= 6; turn++) {
+    await d.preStep({ agent, messages: [userMsg()], turn, step: 1 })
+    const r = await d.preStep({ agent, messages: [], turn, step: 2 })
+    total += r.messages.filter((m) => m?.source?.kind === 'tag-memory').length
+  }
+  assert.equal(total, 1, `maxPerSession=1 时只许一次，实际 ${total} 次`)
+})
+
+test('R11e 不同 agent（不同会话）各自独立配额，互不影响', async () => {
+  const ctx = createFakeCtx()
+  const d = driver(ctx)
+  installWriteReminder(ctx, { policy: { maxPerSession: 1 } })
+  const count = async (agent) => {
+    let n = 0
+    for (let turn = 1; turn <= 4; turn++) {
+      await d.preStep({ agent, messages: [userMsg()], turn, step: 1 })
+      const r = await d.preStep({ agent, messages: [], turn, step: 2 })
+      n += r.messages.filter((m) => m?.source?.kind === 'tag-memory').length
+    }
+    return n
+  }
+  assert.equal(await count({ id: 'agent-X' }), 1)
+  assert.equal(await count({ id: 'agent-Y' }), 1, '另一会话不该被前一个会话的配额吃掉')
+})
+
 test('R12 验收②：已调 dtm_write → 不提醒（不误报）', async () => {
   const ctx = createFakeCtx()
   const agent = { id: 'a2' }

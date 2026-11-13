@@ -36,6 +36,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { createInjectionLedger, claimInjection, injectionKey } from '../lib/engine/inject-gate.mjs';
 
 /** 本插件的写工具（1.x 命名）。只判名字，不判内容。 */
 export const WRITE_TOOLS = new Set(['dtm_write', 'dtm_supersede']);
@@ -108,13 +109,29 @@ export function insertReminder(decisionMessages, claimedMessages, desired) {
  * @param {object} [options]
  * @param {WeakMap|Map} [options.state]  可注入状态容器（测试用）
  * @param {string} [options.text]        可覆盖提醒文案（测试用）
+ * @param {object} [options.policy]      注入节流策略（maxPerSession/minTurnGap/backoffFactor）
  * @returns {() => void} dispose
  */
 export function installWriteReminder(ctx, options = {}) {
   const state = options.state ?? new WeakMap();
   const text = options.text ?? REMINDER_TEXT;
+  const policy = options.policy;
   const logger = ctx?.logger;
   const disposes = [];
+
+  // 会话级投递台账（2026-11-13 框架级修复）：keyed by agent，随 agent 回收。
+  // 为什么必须独立于 state：state 每轮 step 1 就重置（那是「本轮写没写过」的
+  // 瞬时状态），而「这条内容在本会话送过几次」必须跨轮长存。两者混在一起
+  // 就是旧版反复推送的根因——去重作用域只有当前一步的数组。
+  const ledgers = new WeakMap();
+  const ledgerOf = (agent) => {
+    let l = ledgers.get(agent);
+    if (!l) {
+      l = createInjectionLedger();
+      ledgers.set(agent, l);
+    }
+    return l;
+  };
 
   const on = (event, fn) => {
     if (typeof ctx?.on !== 'function') return;
@@ -170,6 +187,13 @@ export function installWriteReminder(ctx, options = {}) {
       if (Array.isArray(decision.messages) && decision.messages.some((m) => sameMessage(m, desired))) {
         return decision;
       }
+
+      // 会话级节流（2026-11-13）：同一内容在本会话送过几次、上次哪一轮送的，
+      // 由台账记账。超额/同轮/太近一律静默——这道闸对任何注入内容都成立，
+      // 不是给提醒开的特例。上面的 sameMessage 只防「同一步数组内重复」，
+      // 跨轮/跨步的重投靠这里挡住。
+      const claim = claimInjection(ledgerOf(agent), injectionKey(text), { turn, policy });
+      if (!claim.allowed) return decision;
 
       // 取消信号：已被中止就别再插消息，原样放行。
       if (signal && typeof signal.throwIfAborted === 'function') signal.throwIfAborted();

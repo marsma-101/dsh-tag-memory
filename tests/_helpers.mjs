@@ -66,13 +66,19 @@ export function listAllFiles(dir = ROOT, acc = []) {
  *   - package.json 本身由 npm 自动包含，不需要出现在 files 里
  *   - .gitignore / .npmignore 是开发辅助，不是运行时文件
  *   - `.*.mjs` / `*.smoke.mjs` 这类临时冒烟脚本不是运行时文件（另见 P11 残留扫描）
+ *   - scripts/probe-recall.mjs / dump-injection.mjs 是开发期探针（2026-11-12 P1-16）：
+ *     前者硬编码开发机库路径/身份，后者名实不符（自称只读实际写盘），都不随包发布，
+ *     也不是运行时文件，故排除——否则 P8 会要求把它们塞进 files。
  */
+const DEV_ONLY_SCRIPTS = new Set(['scripts/probe-recall.mjs', 'scripts/dump-injection.mjs'])
+
 export function listRuntimeFiles() {
   const AUTO_INCLUDED = new Set(['package.json'])
   return listAllFiles().filter((f) => {
     const base = f.split('/').pop()
     if (AUTO_INCLUDED.has(base)) return false
     if (base.startsWith('.')) return false // dotfiles：.gitignore / .npmignore / .env...
+    if (DEV_ONLY_SCRIPTS.has(f)) return false // 开发探针，不随包发布
     return true
   })
 }

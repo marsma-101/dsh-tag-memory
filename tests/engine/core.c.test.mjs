@@ -154,3 +154,48 @@ test('C7 withFileLock 内取号 → 并发两次写入不撞号、不丢行', as
     assert.equal(new Set(lines).size, 2, '不得有重复编号')
   })
 })
+
+/* ------------------------------------------------------------------ *
+ * C8 残留锁抢占 + 释放验归属（容器审查 P0-1 回归）
+ *
+ * 旧实现的两个洞：
+ *   ① stat 判 stale → unlink → wx：两个 racer 可先后 unlink 掉对方的新锁，双双持锁
+ *   ② finally 无条件 unlink：被抢者退出时删掉抢占者的锁
+ * 本测试构造「残留锁」并并发抢占，断言互斥仍成立、活锁不被吞。
+ * ------------------------------------------------------------------ */
+test('C8 残留锁并发抢占 → 仍互斥；释放只删自己的锁', async () => {
+  await withTempDir(async (dir) => {
+    const lockPath = join(dir, '.lock')
+    const { writeFileSync, readFileSync, existsSync, utimesSync } = await import('node:fs')
+
+    // 造一个「崩溃残留」锁：内容过期、mtime 拨到 1 小时前
+    writeFileSync(lockPath, 'dead-pid 2020-01-01T00:00:00.000Z\n', 'utf8')
+    const old = new Date(Date.now() - 3600_000)
+    utimesSync(lockPath, old, old)
+
+    let inside = 0
+    let maxInside = 0
+    const crit = () =>
+      withFileLock(lockPath, async () => {
+        inside++
+        maxInside = Math.max(maxInside, inside)
+        await new Promise((r) => setTimeout(r, 20))
+        inside--
+      }, { staleMs: 1000, retryMs: 5 })
+
+    // 两个 racer 同时判 stale → 同时抢。修复前可能双双进入。
+    await Promise.all([crit(), crit()])
+    assert.equal(maxInside, 1, `残留抢占后互斥被破坏：临界区同时进了 ${maxInside} 个`)
+    assert.equal(existsSync(lockPath), false, '正常释放后锁文件应不存在')
+
+    // 释放验归属：临界区内锁被换成别人的（模拟被抢），退出时不得删别人的锁
+    writeFileSync(lockPath, 'dead 2020-01-01T00:00:00.000Z\n', 'utf8')
+    utimesSync(lockPath, old, old)
+    await withFileLock(lockPath, async () => {
+      // 持锁期间，锁文件被外部改写为「别人的 token」（模拟极端抢占交错）
+      writeFileSync(lockPath, 'someone-else-token 2099-01-01T00:00:00.000Z\n', 'utf8')
+    }, { staleMs: 1000, retryMs: 5 })
+    assert.equal(existsSync(lockPath), true, '锁内容已非本持有者 token，退出时不得删它')
+    assert.ok(readFileSync(lockPath, 'utf8').startsWith('someone-else-token'), '别人的锁必须原样保留')
+  })
+})

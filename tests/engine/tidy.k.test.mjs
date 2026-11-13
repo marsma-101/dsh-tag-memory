@@ -56,7 +56,9 @@ test('K3 foldFeedback：显式 verdict 优先于默认 ok', () => {
   assert.equal(fb.get('M-1').ok, 0)
 })
 
-test('K4 foldFeedback：near 反复出现未被采纳 → 记 wrong', () => {
+test('K4 foldFeedback：near 无显式信号 → 记 unused 不记 wrong（2026-11-12 P1-1）', () => {
+  // 旧行为把 near 一律当 wrong，导致「标签多→常落 near→被降易变」，
+  // 且 wrong 历史累计永远 >0 让自愈不可达。near 只是擦边，不是被验证为错。
   const log = {
     ts: '2026-11-01T10:00:00+08:00',
     hits: [],
@@ -64,7 +66,31 @@ test('K4 foldFeedback：near 反复出现未被采纳 → 记 wrong', () => {
     feedback: [],
   }
   const fb = foldFeedback([log])
-  assert.equal(fb.get('M-9').wrong, 1)
+  assert.equal(fb.get('M-9').wrong, 0, 'near 无显式信号不得记 wrong')
+  assert.equal(fb.get('M-9').unused, 1, '应记 unused')
+})
+
+test('K4b foldFeedback：near 带显式 verdict=wrong → 仍记 wrong（降级信号不丢）', () => {
+  const log = {
+    ts: '2026-11-01T10:00:00+08:00',
+    hits: [],
+    near: [{ 编号: 'M-9', 分: 35 }],
+    feedback: [{ id: 'M-9', verdict: 'wrong' }],
+  }
+  const fb = foldFeedback([log])
+  assert.equal(fb.get('M-9').wrong, 1, '显式 wrong 反馈必须保留')
+})
+
+test('K4c foldFeedback：sinceTs 开窗只统计窗口内召回（自愈可达）', () => {
+  const old = { ts: '2026-11-01T10:00:00+08:00', hits: [], near: [{ 编号: 'M-9' }], feedback: [{ id: 'M-9', verdict: 'wrong' }] }
+  const recent = { ts: '2026-11-05T10:00:00+08:00', hits: [{ 编号: 'M-9' }], near: [], feedback: [{ id: 'M-9', verdict: 'ok' }] }
+  // 全量：wrong=1（旧）+ ok=1（新）
+  const all = foldFeedback([old, recent])
+  assert.equal(all.get('M-9').wrong, 1)
+  // 开窗到 11-03 之后：旧的 wrong 被排除，只剩 ok → 自愈分支可达
+  const win = foldFeedback([old, recent], { sinceTs: '2026-11-03T00:00:00+08:00' })
+  assert.equal(win.get('M-9').wrong, 0, '窗口外的 wrong 不该计入')
+  assert.equal(win.get('M-9').ok, 1)
 })
 
 test('K5 foldFeedback：命中过的条目不因 near 再记 wrong', () => {

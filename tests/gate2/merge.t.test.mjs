@@ -95,8 +95,9 @@ test('T7 稳定性缺失按最低处理', () => {
 // ── T8: 源码级，防退回死代码 ─────────────────────────────
 
 test('T8 【关键】合并循环不得再用 idNewerThan 比较编号', () => {
-  const i = HOST_SRC.indexOf('for (const rec of incoming.records)')
-  assert.ok(i >= 0, '找不到合并循环')
+  // 2026-11-12：合并循环抽成 mergeInto（P0-2 锁内化），契约不变，定位改到 mergeInto。
+  const i = HOST_SRC.indexOf('for (const rec of incomingRecords)')
+  assert.ok(i >= 0, '找不到合并循环（mergeInto）')
 
   let depth = 0
   let end = -1
@@ -127,8 +128,9 @@ test('T8 【关键】合并循环不得再用 idNewerThan 比较编号', () => {
 })
 
 test('T9 mergeLibrary 返回里的 changed 会真实反映覆盖数', () => {
-  const i = HOST_SRC.indexOf('async function mergeLibrary')
-  assert.ok(i >= 0, '找不到 mergeLibrary')
+  // 2026-11-12：累加逻辑在 mergeInto（P0-2 抽出的纯合并函数），契约不变。
+  const i = HOST_SRC.indexOf('function mergeInto')
+  assert.ok(i >= 0, '找不到 mergeInto')
 
   let depth = 0
   let end = -1

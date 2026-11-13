@@ -205,7 +205,9 @@ export function apply(ctx, config = {}) {
    * apply 不得抛错）。
    */
   if (isReminderEnabled(config)) {
-    ctx.effect(() => installWriteReminder(ctx));
+    // injectionPolicy 透传给引擎的注入闸门：同一内容在一个会话里最多送几次、
+    // 隔几轮再送，由它决定（2026-11-13 框架级修复：防同一内容被反复推送）。
+    ctx.effect(() => installWriteReminder(ctx, { policy: config?.injectionPolicy }));
   }
 }
 
@@ -272,10 +274,16 @@ function schemaFor() {
 /**
  * 读当前会话的身份状态，供注入渲染。
  *
- * 三态：
- *   · 已绑定   → `{bound:true, who, project}`
- *   · 未绑定   → `{bound:false}`
- *   · 拿不到   → `{bound:false}`（assembly 没有 agent，官方注释 "absent on diagnostics"）
+ * 四态（2026-11-12 P1-15：把「取值失败」从「真未绑定」里分出来）：
+ *   · 已绑定     → `{bound:true, who, project}`
+ *   · 真未绑定   → `{bound:false}`（identityOfSync 正常返回 null）
+ *   · 拿不到会话 → `{bound:false}`（assembly 没有 agent，官方 "absent on diagnostics"）
+ *   · 取值失败   → `{bound:false, unavailable:true}`（host 缺失/抛错等瞬时原因）
+ *
+ * 为什么分第四态：旧实现把一切异常都当「真未绑定」，于是宿主瞬时抖动时
+ * 已绑定会话被误判未绑定 → 注入「本轮第一件事去问身份」硬流程，制造不必要的
+ * bind 摩擦与噪声。「不崩 prompt」的初衷正确，但取值失败不该强推 bind，
+ * 渲染成中性提示即可（见 renderIdentityContext 的 unavailable 分支）。
  *
  * **绝不抛错**：注入渲染失败会导致整个 prompt assembly 失败，比少一段文字严重得多。
  */
@@ -285,7 +293,7 @@ function identityFor(ctx, context) {
     if (!agent) return { bound: false };
 
     const host = ctx?.get?.(HOST_SERVICE);
-    if (!host || typeof host.identityOfSync !== 'function') return { bound: false };
+    if (!host || typeof host.identityOfSync !== 'function') return { bound: false, unavailable: true };
 
     const id = host.identityOfSync(agent);
     if (!id) return { bound: false };
@@ -299,7 +307,7 @@ function identityFor(ctx, context) {
     }
     return { bound: true, who: id['智能体'] ?? id.who, project };
   } catch {
-    // 注入永远不该因为读身份失败而崩掉整个 prompt
-    return { bound: false };
+    // 取值失败（瞬时）：不是真未绑定，别强推 bind。仍绝不抛错。
+    return { bound: false, unavailable: true };
   }
 }

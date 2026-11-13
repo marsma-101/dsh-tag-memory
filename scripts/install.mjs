@@ -324,6 +324,12 @@ if (action === 'uninstall') {
 
   if (keepRuntime) {
     say(`· 数据目录 ${located.dir}（${located.source}）：按 --keep-runtime 全部保留`)
+  } else if (located.locked) {
+    // P1-14（2026-11-12）：①config / ②env 指定的位置是**用户显式指定**的，
+    // 脚本无权假设它归自己管（locateDataDir 注释承诺）。旧实现 locked 只用于打印来源、
+    // 不参与清理决策，于是用户外部目录的 records/backup/settings.json 也被删。
+    // 现在 locked=true 一律跳过运行期产物清理（库本就保留），尊重用户指定位置。
+    say(`· 数据目录 ${located.dir}（${located.source}）：由配置/环境变量显式指定，运行期产物全部保留（脚本不清用户指定的位置）`)
   } else {
     purge = planRuntimePurge({ dataDir: located.dir, keepBackups })
     say(`数据目录：${located.dir}`)
@@ -627,15 +633,37 @@ if (!doIt) {
 
 /* ── apply：落盘 ──────────────────────────────────────── */
 // 1) 本体副本
+// P1-13（2026-11-12）：旧实现先 rmSync 本体再 cpSync，中途失败（权限/磁盘/占用）
+// 会让旧本体已删、新本体不全，插件损坏且无恢复。改为「复制到临时目录 → 原子替换」，
+// 失败时旧本体原样保留。
 if (!bodySameAsSource) {
-  if (fs.existsSync(bodyDir)) fs.rmSync(bodyDir, { recursive: true, force: true })
   fs.mkdirSync(path.dirname(bodyDir), { recursive: true })
-  fs.cpSync(PACKAGE_DIR, bodyDir, {
-    recursive: true,
-    force: true,
-    filter: (src) => !skipOnCopy(path.basename(src)),
-  })
-  say(`✓ 已复制本体 → ${bodyDir}`)
+  const staging = `${bodyDir}.staging-${process.pid}-${Date.now()}`
+  const backup = `${bodyDir}.old-${process.pid}-${Date.now()}`
+  try {
+    fs.cpSync(PACKAGE_DIR, staging, {
+      recursive: true,
+      force: true,
+      filter: (src) => !skipOnCopy(path.basename(src)),
+    })
+    // 原子替换：先把旧本体挪到 backup（不是删），再把 staging 挪到位。
+    if (fs.existsSync(bodyDir)) fs.renameSync(bodyDir, backup)
+    try {
+      fs.renameSync(staging, bodyDir)
+    } catch (e) {
+      // 新本体落地失败：把旧本体挪回来，绝不留下损坏态。
+      if (fs.existsSync(backup) && !fs.existsSync(bodyDir)) fs.renameSync(backup, bodyDir)
+      throw e
+    }
+    // 成功：清掉旧本体备份与可能的 staging 残留
+    if (fs.existsSync(backup)) fs.rmSync(backup, { recursive: true, force: true })
+    say(`✓ 已复制本体 → ${bodyDir}`)
+  } catch (err) {
+    // 清掉半成品 staging，旧本体（若已挪回）保持可用
+    if (fs.existsSync(staging)) fs.rmSync(staging, { recursive: true, force: true })
+    say(`✗ 本体复制失败，已保留旧版本：${err?.message ?? err}`)
+    process.exit(1)
+  }
 } else {
   say(`· 本体已在 ${bodyDir}，跳过复制`)
 }

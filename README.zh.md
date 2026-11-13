@@ -2,9 +2,9 @@
 
 > 给 DSH 智能体一套**标签化、可检索、跨会话**的长期记忆。
 
-[![Version](https://img.shields.io/badge/version-1.2.8-blue)]()
-[![DSH](https://img.shields.io/badge/DSH-0.2.1%2B-orange)]()
-[![Tests](https://img.shields.io/badge/tests-323%20passing-brightgreen)]()
+[![Version](https://img.shields.io/badge/version-1.4.4-blue)]()
+[![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1%2B-orange)]()
+[![Tests](https://img.shields.io/badge/tests-464%20passing-brightgreen)]()
 
 [English](README.md) | 中文
 
@@ -56,7 +56,7 @@ AND   状态 = 生效
 
 | 否决 | 条件 | 含义 |
 |---|---|---|
-| 条目侧 | `e_ratio > 0.5` 才通过（**严格大于**） | 这条记忆被 query 命中了多少 |
+| 条目侧 | `e_ratio > 0.3` 才通过（**严格大于**） | 这条记忆被 query 命中了多少 |
 | query 侧 | `q_ratio >= 0.15` 才通过 | query 的方向对不对 |
 
 擦边未过的会进 `near`（最多 3 条），让模型能区分**真查空**和**假查空**。
@@ -95,7 +95,7 @@ dsh plugin --profile web add github:marsma-101/dsh-tag-memory
 **只要 `node ≥ 24.9` + `npx`——不需要 pnpm、git、已装插件，也不需要模型。**
 
 ```bash
-npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.2.8 apply
+npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.4.4 apply
 ```
 
 `npx` 只负责把包拉下来；真正干活的是包里的 [`scripts/install.mjs`](scripts/install.mjs)（纯 node、零依赖、约 1 秒）：
@@ -149,7 +149,7 @@ node scripts/install.mjs apply                 # 包已经在本地时，直接�
 
 对 agent 只需要一句话：
 
-> 从这个 URL 装最新版：`npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.2.8 apply`，
+> 从这个 URL 装最新版：`npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.4.4 apply`，
 > 别手写 profile 的 `package.json` / `cordis.patch.yml`；装完把输出贴出来，等用户重启 dsh。
 
 它会自动落到容器里 `/opt/dsh/profiles/<profile>`（靠 `$DSH_PROFILE_DIR`），不需要 `--dsh-home`。
@@ -307,24 +307,29 @@ node scripts/seed.mjs apply --force  # 库里已有内容也强行加
 | 防污染 | 规则 | 种子不是用户事实，别以为看过了就了解用户 |
 | 子智能体身份 | 技能 | 给子智能体带身份的正确做法（见下） |
 
-### 标签为什么恰好 3 个
+### 标签数量与召回闸门
 
-这不是随手定的，是召回闸门逼出来的。`read.mjs` L388 的硬闸门是：
+召回有一道条目侧硬闸门（`read.mjs`，阈值出厂 **0.3**，2026-11-11 标定）：
 
 ```
-e_ratio = 命中标签数 / 条目标签数   必须 严格大于 0.5
+e_ratio = 命中标签数 / 条目标签数   必须 严格大于 0.3
 ```
 
-即**条目一半以上的标签必须被命中**，否则该条直接被否决。于是：
+即**命中的标签占比要超过 30%**，否则该条被否决。于是查 2 个标签时：
 
 | 条目标签数 | 查 2 个标签 | 结果 |
 |---|---|---|
-| 5 个 | 2/5 = 0.40 | 否决 |
-| 3 个 | 2/3 = 0.67 | **通过** |
-| 2 个 | 2/2 = 1.00 | 通过，但查 1 个时 1/2 = 0.50 就被否决 |
+| 6 个 | 2/6 = 0.33 | **通过**（>0.3） |
+| 7 个 | 2/7 = 0.29 | 否决 |
+| 3 个 | 2/3 = 0.67 | 通过 |
+| 2 个 | 2/2 = 1.00 | 通过 |
 
-所以 3 是「用两个词就能召回」的最大标签数。**标签多不是好事，它会让条目更难被召回**——
-这是反直觉但已实测的规则。种子之间也刻意不共享标签，否则一次查询会同时命中两条，互相抢 Top-K。
+所以「用两个词就能召回」的上限是 **6 个标签**（2/6≈0.33 仍过线，2/7≈0.29 被否）。
+早期文档按旧阈值 0.5 推出「恰好 3 个」，**0.3 标定后该结论已不成立**，这里更正。
+
+不变的规律是：**标签越多，单个词越难把条目捞起来**——标签多不是好事。
+种子之间也刻意不共享标签，否则一次查询会同时命中两条，互相抢 Top-K。
+阈值与判定符（条目侧 `>`、query 侧 `>=`）以 `scoring.json` 为准，不要凭记忆改。
 
 ### 给子智能体带身份（重要，容易想错）
 
@@ -444,11 +449,11 @@ Windows:      %USERPROFILE%\.dsh\tag-memory （= C:\Users\<你>\.dsh\tag-memory�
 
 ```bash
 # 全量测试（零外部依赖，不需要任何 shim）
-node --test --test-isolation=none
+node --test
 ```
 
 ```
-323 条测试：319 通过 / 0 失败 / 4 条视觉如实未验
+468 条测试：464 通过 / 0 失败 / 4 条视觉如实未验
 ```
 
 ### 零框架依赖

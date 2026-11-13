@@ -111,6 +111,7 @@ test('H4 精简后 section 里不得再出现这些细则（否则就是没砍�
 test('H5 标签字典.md 仍是完整说明的落地处（模型主动读得到）', () => {
   const dict = fs.readFileSync(path.join(PACKAGE_DIR, '标签字典.md'), 'utf8');
   assert.ok(dict.includes('写入原则'), '文档里要有写入原则全文');
-  assert.ok(dict.includes('纯数字') && dict.includes('来源标记'), '文档里要有标签禁忌');
+  // 2026-11-12 P1-10：不再要求「来源标记」禁词——原话/推断 作类别首词合法（与 classTag 一致）。
+  assert.ok(dict.includes('纯数字') && dict.includes('转述'), '文档里要有标签禁忌（纯数字/转述句）');
   assert.ok(dict.includes('6~8'), '文档里要有数量建议');
 })
