@@ -669,17 +669,16 @@ function createHostService(ctx, config) {
     // 正确规则：**库已存在就完全不动 seedState**。播种结论只由真正执行复制的那一次
     // 决定（成功→seeded:true / EEXIST→exists / 无种子→no-bundled-seed），
     // 后续任何「库已在」的复查都不得改写它。
-    if (!issue) {
-      try {
-        await fsp.access(layout.libraryCsv);
-        // 只在**还没有任何结论**时记 exists（用户本来就有库的情形）；
-        // 已有结论（尤其 seeded:true）一律保留，绝不覆盖。
-        if (seedState === null) seedState = { seeded: false, reason: 'exists' };
-        return;
-      } catch {
-        /* 不存在，继续往下铺 */
-      }
-    }
+    // ⚠️ 2026-11-13：这里**不再做 access 预检**（P2 那次优化被撤回）。
+    //
+    // Linux CI 三次实测定位：apply 的异步播种与调用方显式 _ensureInitialized()
+    // 并发执行。加了 access 预检后，「库已存在」分支会绕过 copyFile，
+    // 于是播种结论由**后到的那一次**臆断成 exists，把先到的成功结论覆盖掉
+    // （实测 T1: seed={seeded:false,reason:'exists'} 而 total=6，种子明明铺上了）。
+    //
+    // 正解是回到原子的 copyFile(COPYFILE_EXCL)：谁先复制成功谁记 seeded:true，
+    // 后到的必然 EEXIST。再用下面的「EEXIST 不覆盖已有成功结论」定序，
+    // 并发下结论稳定。一次多余的 copyFile 尝试远比结论错乱便宜。
 
     const bundled = path.join(PACKAGE_DIR, 'data', 'store', 'memory.csv');
 
@@ -751,9 +750,15 @@ function createHostService(ctx, config) {
       ctx.logger?.info?.('[dsh-tag-memory] 已铺初始记忆库（包内自带）。');
       seedState = { seeded: true, reason: null };
     } catch (err) {
-      // EEXIST = 库已存在（正常，不覆盖）
+      // EEXIST = 库已存在（正常，不覆盖）。
+      //
+      // ⚠️ 并发定序（2026-11-13 Linux CI 实测）：apply 的异步播种与调用方显式
+      // _ensureInitialized() 可能同时进来。先复制成功的那次已记 seeded:true，
+      // 后到的这次拿到 EEXIST——**绝不能**把它覆盖成 exists，否则明明铺上了
+      // 却报「本来就有」（S3 在 Linux 上必挂的真因）。
+      // 只有还没有任何结论时，才认定是「用户本来就有库」。
       if (err?.code === 'EEXIST') {
-        seedState = { seeded: false, reason: 'exists' };
+        if (seedState === null) seedState = { seeded: false, reason: 'exists' };
         return;
       }
       // ⚠️ ENOENT 曾在这里**静默吞掉**，注释写「包里没带初始库（旧版本包）」。
