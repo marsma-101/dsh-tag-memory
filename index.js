@@ -660,16 +660,22 @@ function createHostService(ctx, config) {
 
     // P2（2026-11-12）：ensureDirs 每次读写都调本函数，库已存在时不必再 copyFile。
     //
-    // ⚠️ 2026-11-13 CI 回归教训：这里**绝不能静默 return**。
-    // 首版守卫直接 return，导致 seedState 停在初始值——Linux 上 ensureInitialized
-    // 播种后再走 ensureDirs 时，EEXIST 分支不再执行，overview 的 seed.seeded 不是 true，
-    // S3「包内有种子 → 真的铺上」失败（本地 Windows 时序恰好掩盖了它）。
-    // 正确做法：跳过 IO，但**保留已有的成功结论**；没有结论时才记 exists。
+    // ⚠️ 2026-11-13 Linux CI 实测定位（两次修法都不对，这次按实测数据改）：
+    // 诊断输出 `csv after=true, total=6, seed={seeded:false,reason:'exists'}`
+    // ——种子**确实铺上了**，但结论被改写。真因是 getOverview 内部又走 ensureDirs
+    // → 再进本函数（此时 issue 为 undefined、库已存在），把刚成功的 seeded:true
+    // 覆盖成 exists。Windows 上时序恰好没触发，Linux 上必然触发。
+    //
+    // 正确规则：**库已存在就完全不动 seedState**。播种结论只由真正执行复制的那一次
+    // 决定（成功→seeded:true / EEXIST→exists / 无种子→no-bundled-seed），
+    // 后续任何「库已在」的复查都不得改写它。
     if (!issue) {
       try {
         await fsp.access(layout.libraryCsv);
-        if (seedState?.seeded !== true) seedState = { seeded: false, reason: 'exists' };
-        return; // 库已在，跳过复制（不覆盖已记下的播种成功结论）
+        // 只在**还没有任何结论**时记 exists（用户本来就有库的情形）；
+        // 已有结论（尤其 seeded:true）一律保留，绝不覆盖。
+        if (seedState === null) seedState = { seeded: false, reason: 'exists' };
+        return;
       } catch {
         /* 不存在，继续往下铺 */
       }
