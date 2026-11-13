@@ -73,6 +73,12 @@ jobs:
             exit 1
           fi
 
+      # 装 devDependency（yaml）：P5 要求 cordis.patch.yml 必须用真 YAML 解析器验，
+      # 正则不算（Q2 裁定）。不装的话 CI 里解析器缺失 → P5 硬失败。
+      # 用 --no-audit/--no-fund 减少噪声；只有 devDependency，不影响发布内容。
+      - name: Install dev dependencies
+        run: npm install --no-audit --no-fund
+
       # 跑测试：发布前最后一道闸
       - name: Run tests
         run: npm test

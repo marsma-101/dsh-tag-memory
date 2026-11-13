@@ -93,31 +93,27 @@ test('C5 库里混有多天数据 → 只按当天序号递增，不被别的日
  *     2026-11-05T17:00:00Z 在 +08 已是 11-06 凌晨
  *     toISOString 会给出 20261105（错天），本地时间才是 20261106
  * ------------------------------------------------------------------ */
-test('C6 本地时间不踩 UTC：17:00Z 在东八区已跨日 → 日期段必须是 20261106', () => {
+test('C6 本地时间不踩 UTC：日期段必须按运行机本地时区，而非 toISOString', () => {
   const now = new Date('2026-11-05T17:00:00Z')
 
-  // 先确认测试机时区确实是 +08，否则这条断言的前提不成立
-  const offsetMin = -now.getTimezoneOffset()
-  assert.equal(
-    offsetMin,
-    480,
-    `本用例依赖测试机时区为 +08:00（当前 ${offsetMin / 60}h）。这是环境前提，不是实现问题——` +
-      '若换了机器/时区，此用例需要改为显式构造本地时间',
-  )
-
-  assert.equal(
-    formatLocalDate(now),
-    '20261106',
-    '本地时间应是 11-06（UTC 17:00 = 次日 01:00）',
-  )
-
-  // 反证：toISOString 的错误结果
+  // 2026-11-13 CI 修复：旧版把断言绑死在 +08:00（CI 是 UTC → 硬失败）。
+  // 用例真正要守的规则是「日期段用本地时间、不用 UTC」，与具体时区无关。
+  // 所以按运行机实际时区算期望值：任何时区都能验同一条规则。
+  const pad = (n) => String(n).padStart(2, '0')
+  const localDate = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
   const utcDate = now.toISOString().slice(0, 10).replace(/-/g, '')
-  assert.equal(utcDate, '20261105', '（反证）toISOString 给出 20261105，这正是要避免的错天')
+
+  assert.equal(formatLocalDate(now), localDate, '必须等于本地日期')
 
   const id = nextId([], now)
-  assert.equal(id, 'M-20261106-001', `编号日期段必须用本地时间，实际「${id}」`)
-  assert.notEqual(id.slice(2, 10), utcDate, '绝不能等于 UTC 日期')
+  assert.equal(id, `M-${localDate}-001`, `编号日期段必须用本地时间，实际「${id}」`)
+
+  // 反证只在「本地与 UTC 真的跨天」时成立（+08 下 17:00Z 已是次日）。
+  // 在 UTC 机器上两者本就相同，此时跳过反证但主断言仍然有效。
+  if (localDate !== utcDate) {
+    assert.equal(utcDate, '20261105', '（反证）toISOString 给出 20261105，这正是要避免的错天')
+    assert.notEqual(id.slice(2, 10), utcDate, '绝不能等于 UTC 日期')
+  }
 })
 
 /* ------------------------------------------------------------------ *

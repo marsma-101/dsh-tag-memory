@@ -658,13 +658,18 @@ function createHostService(ctx, config) {
     // 库已存在且**没有**需要自动处理的结论 → 一律不动。
     if (issue?.exists && issue?.autoFixable !== true) return;
 
-    // P2（2026-11-12）：ensureDirs 每次读写都调本函数。库已存在时直接返回，
-    // 不必每次都 copyFile→EEXIST→把 seedState 翻成 {seeded:false,reason:'exists'}
-    // （无谓 IO + overview 的 seed 态抖动）。真正的首次播种由 ensureInitialized 负责。
+    // P2（2026-11-12）：ensureDirs 每次读写都调本函数，库已存在时不必再 copyFile。
+    //
+    // ⚠️ 2026-11-13 CI 回归教训：这里**绝不能静默 return**。
+    // 首版守卫直接 return，导致 seedState 停在初始值——Linux 上 ensureInitialized
+    // 播种后再走 ensureDirs 时，EEXIST 分支不再执行，overview 的 seed.seeded 不是 true，
+    // S3「包内有种子 → 真的铺上」失败（本地 Windows 时序恰好掩盖了它）。
+    // 正确做法：跳过 IO，但**保留已有的成功结论**；没有结论时才记 exists。
     if (!issue) {
       try {
         await fsp.access(layout.libraryCsv);
-        return; // 库已在，跳过
+        if (seedState?.seeded !== true) seedState = { seeded: false, reason: 'exists' };
+        return; // 库已在，跳过复制（不覆盖已记下的播种成功结论）
       } catch {
         /* 不存在，继续往下铺 */
       }

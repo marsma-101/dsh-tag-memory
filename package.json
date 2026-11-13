@@ -55,6 +55,9 @@
     "verify": "node scripts/verify-install.mjs",
     "install:plugin": "node scripts/install.mjs apply"
   },
+  "devDependencies": {
+    "yaml": "^2.6.0"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

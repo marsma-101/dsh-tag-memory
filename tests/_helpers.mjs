@@ -2,8 +2,9 @@
 // 只做读取与匹配，不改任何业务文件。
 
 import { readFileSync, existsSync, statSync, readdirSync } from 'node:fs'
-import { join, relative, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import path, { join, relative, sep } from 'node:path'
+import os from 'node:os'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 /** 包根目录（tests/ 的上一级） */
 export const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '')
@@ -73,7 +74,9 @@ export function listAllFiles(dir = ROOT, acc = []) {
 const DEV_ONLY_SCRIPTS = new Set(['scripts/probe-recall.mjs', 'scripts/dump-injection.mjs'])
 
 export function listRuntimeFiles() {
-  const AUTO_INCLUDED = new Set(['package.json'])
+  // package-lock.json（2026-11-13）：npm 装 devDependency 时生成的锁文件，
+  // 由 npm 自己管理、不属于插件运行时，不该要求进 files 白名单。
+  const AUTO_INCLUDED = new Set(['package.json', 'package-lock.json'])
   return listAllFiles().filter((f) => {
     const base = f.split('/').pop()
     if (AUTO_INCLUDED.has(base)) return false
@@ -147,21 +150,29 @@ export function matchesOf(files, pattern, all = listRuntimeFiles()) {
 /**
  * 解析 YAML 解析器。
  * Q2 裁定：必须真解析，正则不算。
- * 优先本地 node_modules 的 yaml（devDependency），
- * 缺失时回落到本机 DSH 自带的 yaml，并标注实际来源。
+ *
+ * 2026-11-13 CI 修复：yaml 已声明为 devDependency（CI 跑 npm ci 装它）。
+ * 旧版回退路径硬编码某台机器的 npx 缓存绝对路径，换机器必然失效——
+ * 那种「本机能过」不是可移植的验证。现在只走标准解析：
+ * 本地 node_modules → DSH 安装目录（真实运行环境自带）→ 找不到返回 null。
  */
 export async function loadYaml() {
   try {
     const m = await import('yaml')
     return { parse: m.parse, source: 'local node_modules/yaml' }
-  } catch {
-    const fallback =
-      'file:///C:/Users/Administrator/AppData/Local/npm-cache/_npx/1e7f6d9597241db0/node_modules/yaml/dist/index.js'
-    try {
-      const m = await import(fallback)
-      return { parse: m.parse, source: 'npx cache yaml (本地 devDependency 未安装)' }
-    } catch {
-      return null
+  } catch { /* 未装 devDependency，试 DSH 自带 */ }
+
+  const rel = 'node_modules/yaml/dist/index.js'
+  const homes = [process.env.DSH_HOME, path.join(os.homedir(), '.dsh')].filter(Boolean)
+  for (const h of homes) {
+    for (const profile of ['web', 'tui']) {
+      const p = path.join(h, 'profiles', profile, rel)
+      try {
+        if (!existsSync(p)) continue
+        const m = await import(pathToFileURL(p).href)
+        return { parse: m.parse, source: `DSH 自带 yaml（${profile}）` }
+      } catch { /* 试下一个 */ }
     }
   }
+  return null
 }
