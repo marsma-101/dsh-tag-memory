@@ -33,6 +33,10 @@ on:
   push:
     tags:
       - 'v*'
+  # 手动触发：只跑验证、不发布（2026-11-13）。
+  # 为什么需要：S3 那类缺陷只在 Linux 上出现，本地全绿也可能 CI 挂。
+  # 有了这个入口就能「先验 CI 再打 tag」，不必靠反复重打 tag 试错。
+  workflow_dispatch:
 
 jobs:
   publish:
@@ -64,6 +68,8 @@ jobs:
       # 版本一致性：tag 必须与 package.json 的 version 对得上。
       # 不做这一步的话，npm 会等到上传阶段才报错，而且错误信息很难懂。
       - name: Verify tag matches package.json version
+        # 手动触发是「只验证不发布」，没有 tag，跳过这一步
+        if: github.event_name == 'push'
         run: |
           TAG="${GITHUB_REF#refs/tags/v}"
           PKG=$(node -p "require('./package.json').version")
@@ -87,4 +93,6 @@ jobs:
       #    npm 会先尝试 OIDC；只要环境里还留着一个 token，
       #    它就会退回用 token（于是又变成需要 2FA 的老路）。
       - name: Publish
+        # 只有推 tag 才真发布；手动触发只跑测试（先验 CI 再发版）
+        if: github.event_name == 'push'
         run: npm publish --provenance --access public
