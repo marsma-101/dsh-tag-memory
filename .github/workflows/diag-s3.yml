@@ -1,0 +1,45 @@
+// 临时 CI 诊断 workflow：在 Linux 上打印 S3 的真实中间状态。
+// 用完即删（不进主发布流程）。
+name: Diagnose S3 on Linux
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --no-audit --no-fund
+      - name: Print seed facts
+        run: |
+          echo "--- data/ 是否存在 ---"
+          ls -la data/store/ || echo "data/store 不存在"
+          echo "--- 种子字节与行尾 ---"
+          wc -c data/store/memory.csv
+          file data/store/memory.csv
+          echo "--- 前 2 行 ---"
+          head -2 data/store/memory.csv
+      - name: Run S3 with verbose state
+        run: |
+          cat > /tmp/diag.mjs <<'EOF'
+          import fs from 'node:fs';
+          const { makeHostCtx } = await import('./tests/_host-ctx.mjs');
+          const h = await makeHostCtx({ identity: { 智能体: 'seed-agent', 项目: 'seed-project' }, seed: true });
+          try {
+            const l = await h.host._resolveLayout();
+            console.log('dataDir =', l.layout.dataDir);
+            console.log('source  =', l.source);
+            console.log('csv before =', fs.existsSync(l.layout.libraryCsv));
+            const r = await h.host._ensureInitialized();
+            console.log('init issue =', JSON.stringify(r.issue));
+            console.log('csv after =', fs.existsSync(l.layout.libraryCsv));
+            if (fs.existsSync(l.layout.libraryCsv)) console.log('csv bytes =', fs.statSync(l.layout.libraryCsv).size);
+            const ov = await h.host.getOverview();
+            console.log('seed =', JSON.stringify(ov.seed), 'total =', ov.total);
+          } finally { h.cleanup(); }
+          EOF
+          node /tmp/diag.mjs
