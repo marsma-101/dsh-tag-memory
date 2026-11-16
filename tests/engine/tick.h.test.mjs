@@ -79,27 +79,29 @@ test('H4 时距 9 被召回 → 变 10', () => {
 })
 
 /* ------------------------------------------------------------------ *
- * H5 【两个 10 之二】tickCap 字段值封顶 = 10
+ * H5 【字段值上限】tickCap 封顶后连召 5 次不再增长
+ *     2026-11-16：tickCap 由 10 抬到 32，测试改为从配置读，不再写死 10
  * ------------------------------------------------------------------ */
-test('H5 【字段值上限】时距 10 再被召回 → 仍为 10；连召 5 次仍是 10', () => {
-  assert.equal(CONFIG.tickCap, 10, '（前提）出厂 tickCap = 10')
+test('H5 【字段值上限】时距到 tickCap 后再被召回仍不变；连召 5 次都不动', () => {
+  const cap = CONFIG.tickCap
+  assert.ok(Number.isFinite(cap) && cap > 0, `（前提）出厂 tickCap 必须是正整数，实际 ${cap}`)
 
-  let records = [rec({ 编号: 'M-20261105-001', 时距: 10 })]
+  let records = [rec({ 编号: 'M-20261105-001', 时距: cap })]
   for (let i = 0; i < 5; i++) {
-    const r = applyTick(records, ['M-20261105-001'], { cap: CONFIG.tickCap })
+    const r = applyTick(records, ['M-20261105-001'], { cap })
     records = r.records
     assert.equal(
       tickOf(records, 'M-20261105-001'),
-      10,
-      `第 ${i + 1} 次召回后时距必须封顶 10，实际 ${tickOf(records, 'M-20261105-001')}`,
+      cap,
+      `第 ${i + 1} 次召回后时距必须封顶 ${cap}，实际 ${tickOf(records, 'M-20261105-001')}`,
     )
   }
 })
 
 /* ------------------------------------------------------------------ *
- * H6 【核心】两个 10 不互相影响
+ * H6 【核心】tickCap 与 tickMaxScore 互不影响
  * ------------------------------------------------------------------ */
-test('H6 两个「10」互不影响：改 tickCap 不动打分，改 tickMaxScore 不动字段', () => {
+test('H6 tickCap 与 tickMaxScore 互不影响：改一个不动另一个', () => {
   // (a) tickCap → 5：字段封顶变 5，但打分公式仍按 log2
   const cap5 = { ...CONFIG, tickCap: 5 }
   let records = [rec({ 编号: 'M-20261105-001', 时距: 5 })]
@@ -110,17 +112,21 @@ test('H6 两个「10」互不影响：改 tickCap 不动打分，改 tickMaxScor
   const scoreAt5 = tickScoreOf(5, cap5)
   assert.ok(Math.abs(scoreAt5 - Math.log2(5) * 2) < 1e-9, `tickCap 不应影响打分，实际 ${scoreAt5}`)
 
-  // (b) weights.tickMaxScore → 6：打分封顶变 6，但字段仍封 10
+  // (b) weights.tickMaxScore → 6：打分封顶变 6，但字段仍按 tickCap
   const win6 = { ...CONFIG, weights: { ...CONFIG.weights, tickMaxScore: 6 } }
   assert.equal(tickScoreOf(1000, win6), 6, 'tickMaxScore=6 时打分应封顶 6')
 
-  let records2 = [rec({ 编号: 'M-20261105-002', 时距: 10 })]
-  records2 = applyTick(records2, ['M-20261105-002'], { cap: CONFIG.tickCap }).records
-  assert.equal(tickOf(records2, 'M-20261105-002'), 10, 'tickMaxScore 不应改变字段封顶（仍是 10）')
+  const cap = CONFIG.tickCap
+  let records2 = [rec({ 编号: 'M-20261105-002', 时距: cap })]
+  records2 = applyTick(records2, ['M-20261105-002'], { cap }).records
+  assert.equal(
+    tickOf(records2, 'M-20261105-002'),
+    cap,
+    `tickMaxScore 不应改变字段封顶（仍是 tickCap=${cap}）`,
+  )
 
-  // (c) 两个键必须是不同的键
-  assert.notEqual('tickCap' in CONFIG && 'tickMaxScore' in CONFIG.weights, undefined)
-  assert.equal(CONFIG.tickCap, 10, 'tickCap 在顶层')
+  // (c) 两个键必须是不同的键、在不同的层级
+  assert.equal(CONFIG.tickCap, 32, 'tickCap 在顶层')
   assert.equal(CONFIG.weights.tickMaxScore, 10, 'tickMaxScore 在 weights 下')
 })
 

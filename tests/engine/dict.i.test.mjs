@@ -57,28 +57,51 @@ test('I1 schema.json 存在可解析，含 9 列 / 6 形态 / 3 稳定性 / 3 �
 })
 
 /* ------------------------------------------------------------------ *
- * I2 scoring.json（含两个 10 分开命名）
+ * I2 scoring.json（含两个「10 之外」的口径分开命名）
  * ------------------------------------------------------------------ */
-test('I2 scoring.json 含权重/及格线/否决阈值/两个 10（tickMaxScore 与 tickCap 分开）', async () => {
+test('I2 scoring.json 含权重/及格线/否决阈值/tickMaxScore 与 tickCap 分开', async () => {
   clearConfigCache()
   const cfg = await loadScoring({ baseDir: TEMPLATES_DIR })
 
-  assert.equal(cfg.weights.shapeHit, 50)
-  assert.equal(cfg.weights.tagMax, 40)
+  assert.equal(cfg.weights.shapeHit, 30, '2026-11-16 权重重构：形态 50→30')
+  assert.equal(cfg.weights.tagMax, 60, '2026-11-16 权重重构：标签 40→60')
   assert.equal(cfg.weights.tickMaxScore, 10, '打分权重上限必须是 weights.tickMaxScore')
 
-  assert.equal(cfg.passLine, 40)
-  assert.equal(cfg.veto.entryRatio, 0.3, '2026-11-11 标定：出厂 0.5 → 0.3（《改进与迭代方向》§4.1），判定符仍为 >')
-  assert.equal(cfg.veto.queryFloor, 0.15, 'Q4 裁定：queryFloor 出厂 0.15')
+  assert.equal(cfg.passLine, 45, '2026-11-16：及格线 40→45（形态分 30 不得单独及格）')
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(cfg.veto, 'entryRatio'),
+    false,
+    'entryRatio 必须已删除：它的分母是条目标签数，会形成"标签越多越召不回"的死锁',
+  )
+  assert.equal(cfg.veto.minHit, 1, 'minHit 出厂 1：零交集必拒')
+  assert.equal(cfg.veto.queryFloor, 0.5, 'queryFloor 出厂 0.5：查询词至少命中一半')
 
-  assert.equal(cfg.tickCap, 10, '时距字段值上限必须是顶层 tickCap')
+  assert.equal(cfg.tickCap, 32, '时距字段值上限必须是顶层 tickCap，且 = 2^(tickMaxScore/multiplier)')
   assert.equal(cfg.topK, 5)
   assert.equal(cfg.nearLimit, 3)
   assert.equal(cfg.writeLogTagLimit, 10)
 
-  // 两个 10 必须在不同位置，且都不是同一个键
+  // 两个上限必须在不同位置，且都不是同一个键
   assert.notEqual('tickCap' in cfg.weights, true, 'tickCap 不应在 weights 下（那是打分权重区）')
   assert.notEqual('tickMaxScore' in cfg, true, 'tickMaxScore 不应在顶层（必须属于 weights）')
+
+  // 2026-11-16 新增的不变式：三项权重之和 = 100
+  assert.equal(
+    cfg.weights.shapeHit + cfg.weights.tagMax + cfg.weights.tickMaxScore,
+    100,
+    '三项权重之和必须恰为 100，及格线才有绝对意义',
+  )
+
+  // 2026-11-16 新增的不变式：封顶时距能拿满时距分（旧版 10 vs 10 数学互斥）
+  const maxTickScore = Math.min(
+    Math.log2(cfg.tickCap) * cfg.tickScore.multiplier,
+    cfg.weights.tickMaxScore,
+  )
+  assert.equal(
+    maxTickScore,
+    cfg.weights.tickMaxScore,
+    `tickCap=${cfg.tickCap} 封顶时时距分应恰好能拿满 ${cfg.weights.tickMaxScore}，实际 ${maxTickScore}`,
+  )
 })
 
 /* ------------------------------------------------------------------ *

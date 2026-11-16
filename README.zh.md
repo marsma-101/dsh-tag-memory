@@ -2,7 +2,7 @@
 
 > 给 DSH 智能体一套**标签化、可检索、跨会话**的长期记忆。
 
-[![Version](https://img.shields.io/badge/version-1.4.4-blue)]()
+[![Version](https://img.shields.io/badge/version-1.5.0-blue)]()
 [![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1%2B-orange)]()
 [![Tests](https://img.shields.io/badge/tests-464%20passing-brightgreen)]()
 
@@ -45,19 +45,31 @@ AND   状态 = 生效
 ### 召回：分数只用来筛「有用」
 
 ```
-形态命中    50 分
-标签交集    0~40 分（按 q_ratio 线性）
+形态命中    30 分
+标签交集    0~60 分（按 q_ratio 线性）
 时距加成    0~10 分（min(log2(时距) × 2, 10)）
 ──────────────
-及格线      40 分
+及格线      45 分
 ```
+
+> 权重这样分配的理由：**任一单项都不能单独越过及格线**。
+> 形态分 30 < 45，标签分在最低命中率下也只有 30 < 45，必须两者配合才能过线。
+> 旧版是 50/40 + 及格线 40，形态命中直接 50 分就越线，标签质量对筛选毫无作用——
+> 及格线因此成了死代码（实测：被及格线拦下的条目数为 0）。这个不变式现在由
+> `loadScoring` 强制校验，调坏了会当场抛错。
 
 但**过线不等于返回**，还有两道否决：
 
 | 否决 | 条件 | 含义 |
 |---|---|---|
-| 条目侧 | `e_ratio > 0.3` 才通过（**严格大于**） | 这条记忆被 query 命中了多少 |
-| query 侧 | `q_ratio >= 0.15` 才通过 | query 的方向对不对 |
+| 命中数 | `命中标签数 >= 1`（`minHit`） | 与查询**零交集**的条目绝不返回 |
+| 查询覆盖率 | `q_ratio >= 0.5`（`queryFloor`） | query 的**词**至少有一半能在库里找到 |
+
+> 判据的分母只有**查询词数**，没有条目标签数。
+> 旧版是 `e_ratio = 命中数 / 条目标签数 > 0.3`，分母由写入侧自由决定，
+> 导致「标签越多越召不回」的数学死锁：1 个词查询要求条目标签 ≤3 个，
+> 而写入规则建议 6~8 个 —— 从写入那一刻起就注定召不回。
+> 现在 `e_ratio` 仍会计算并显示，但**只用于诊断，不参与判决**。
 
 擦边未过的会进 `near`（最多 3 条），让模型能区分**真查空**和**假查空**。
 
@@ -95,7 +107,7 @@ dsh plugin --profile web add github:marsma-101/dsh-tag-memory
 **只要 `node ≥ 24.9` + `npx`——不需要 pnpm、git、已装插件，也不需要模型。**
 
 ```bash
-npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.4.4 apply
+npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.5.0 apply
 ```
 
 `npx` 只负责把包拉下来；真正干活的是包里的 [`scripts/install.mjs`](scripts/install.mjs)（纯 node、零依赖、约 1 秒）：
@@ -149,7 +161,7 @@ node scripts/install.mjs apply                 # 包已经在本地时，直接�
 
 对 agent 只需要一句话：
 
-> 从这个 URL 装最新版：`npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.4.4 apply`，
+> 从这个 URL 装最新版：`npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.5.0 apply`，
 > 别手写 profile 的 `package.json` / `cordis.patch.yml`；装完把输出贴出来，等用户重启 dsh。
 
 它会自动落到容器里 `/opt/dsh/profiles/<profile>`（靠 `$DSH_PROFILE_DIR`），不需要 `--dsh-home`。

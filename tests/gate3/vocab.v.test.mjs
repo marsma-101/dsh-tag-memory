@@ -193,21 +193,29 @@ async function recallWith(records, queryTags) {
 }
 
 test('V9 召回撞空时 near 必须带「条目原始标签」，让模型自己判断该换什么词', () => {
-  // 复刻 2026-11-11 事故形态：5 个标签，命中 1 个 → 0.2 不过 0.3 闸门 → near
+  // ── 2026-11-16 场景重构 ──────────────────────────────────
+  // 旧版复刻的是「5 标签条目 + 1 词查询 → e_ratio=0.2 不过闸」。
+  // 新判据下 1 词命中即 q_ratio=1，会直接过闸——那条事故形态**已经修好了**，
+  // 不能再拿它当"必然撞空"的样本。
+  //
+  // 但 V9 要守的东西没变：**撞空时 near 必须给原始标签**。
+  // 所以改用新判据下仍会撞空的形态：查询词多于命中数，q_ratio 不足 0.5。
+  //   查询 4 个词，条目只命中 1 个 → q_ratio = 0.25 < 0.5 → 否决 → near
   const records = [
     rec('M-1', ['源码', '生产端', '同步', '边界', '改动落点']),
     rec('M-2', ['别的', '无关', '词']),
   ];
-  return recallWith(records, ['源码']).then((r) => {
-    assert.equal(r.hits.length, 0, '（前提）只命中 1/5 应被否决');
+  return recallWith(records, ['源码', 'zzz', 'yyy', 'xxx']).then((r) => {
+    assert.equal(r.hits.length, 0, '（前提）q_ratio=0.25 < 0.5 应被否决');
     assert.ok(r.near.length > 0, '必须有擦边条目');
 
     const n = r.near.find((x) => x['编号'] === 'M-1');
     assert.ok(n, 'M-1 应进 near');
     assert.ok(n['自由标签'], 'near 必须带出条目原始标签——没有它模型无从判断该换什么词');
     assert.ok(String(n['自由标签']).includes('生产端'), '标签要原样给出，不能加工成建议词');
-    assert.equal(n.gap, 1, '还差 1 个标签过闸，gap 应为 1');
+    assert.equal(n.gap, 1, '还差 1 个查询词就能过闸，gap 应为 1');
     assert.deepEqual(n.hitTags, ['源码'], '已命中的标签也要给出，模型才知道「差的是哪一类」');
+    assert.equal(n.reason, 'QUERY_FLOOR', '新判据下否决原因只有 QUERY_FLOOR / MIN_HIT');
   });
 });
 
@@ -215,8 +223,10 @@ test('V10 near 不许自动生成「建议补哪个词」（实测证明那是�
   // 实测：四个毫不相关的查询（源码/npm/生产端/召回）返回的建议完全一样
   // （记忆库位置/数据目录/CSV），因为「最能解锁的词」由全库分布决定、与查询无关。
   // 所以 near 只允许出现「原料字段」，不允许出现 suggestion/tip 一类结论字段。
+  //
+  // 2026-11-16：查询词数改为 4（保证撞空），验证的意图不变。
   const records = [rec('M-1', ['源码', '生产端', '同步', '边界', '改动落点'])];
-  const r = await recallWith(records, ['源码']);
+  const r = await recallWith(records, ['源码', 'zzz', 'yyy', 'xxx']);
   assert.ok(r.near.length > 0, '（前提）应有擦边条目');
 
   const n = r.near[0];

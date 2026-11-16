@@ -2,7 +2,7 @@
 
 > Tag-based, searchable, cross-session long-term memory for DSH agents.
 
-[![Version](https://img.shields.io/badge/version-1.4.4-blue)]()
+[![Version](https://img.shields.io/badge/version-1.5.0-blue)]()
 [![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1%2B-orange)]()
 [![Tests](https://img.shields.io/badge/tests-464%20passing-brightgreen)]()
 
@@ -45,21 +45,38 @@ AND  entry.status = active
 ### Recall: scores only decide "useful or not"
 
 ```
-shape match    50 points
-tag overlap    0–40 points (linear in q_ratio)
+shape match    30 points
+tag overlap    0–60 points (linear in q_ratio)
 distance bonus 0–10 points (min(log2(distance) × 2, 10))
 ──────────────
-pass line      40 points
+pass line      45 points
 ```
+
+> Why these weights: **no single factor may clear the pass line on its own.**
+> Shape is 30 < 45; the tag score is at most 30 at the minimum accepted hit rate, also < 45.
+> Both must contribute. The old 50/40 with a pass line of 40 let a shape match alone
+> score 50 and clear the line, making the tag quality irrelevant to filtering —
+> the pass line was dead code (measured: 0 entries were ever blocked by it).
+> `loadScoring` now enforces this invariant and throws on a bad configuration.
 
 Passing the line is not enough — two vetoes still apply:
 
 | Veto | Condition | Meaning |
 |---|---|---|
-| Entry side | `e_ratio > 0.3` (strictly greater) | how much of this entry the query hit |
-| Query side | `q_ratio >= 0.15` | whether the query points the right way |
+| Hit count | `matched tags >= 1` (`minHit`) | an entry sharing **zero** tags with the query never returns |
+| Query coverage | `q_ratio >= 0.5` (`queryFloor`) | at least **half the query words** must be found in the library |
+
+> Both denominators are the **query word count** — never the entry tag count.
+> The old rule was `e_ratio = matched / entry tags > 0.3`, whose denominator is chosen
+> freely by the writer. That created a mathematical deadlock where **more tags meant
+> permanently unretrievable**: a one-word query required an entry to have ≤3 tags,
+> while the write rules recommend 6–8. Any entry with ≥7 tags could never be found,
+> no matter what was queried. `e_ratio` is still computed and shown, but is
+> **diagnostic only — it no longer participates in any decision**.
 
 Near-misses land in `near` (max 3), so the model can tell **a real empty result from a false one**.
+`near[].gap` is the number of **query words** still missing to clear `queryFloor`
+(it used to count entry tags, which the model cannot see and therefore could not act on).
 
 ### Storage: CSV you can edit by hand
 
@@ -96,7 +113,7 @@ dsh plugin --profile web add github:marsma-101/dsh-tag-memory
 **Requires only `node ≥ 24.9` + `npx` — no pnpm, no git, no installed plugins, no model.**
 
 ```bash
-npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.4.4 apply
+npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.5.0 apply
 ```
 
 `npx` only downloads the package; the real work is [`scripts/install.mjs`](scripts/install.mjs)
@@ -201,27 +218,42 @@ Six entries are seeded, all things the injection cannot provide:
 
 ### Tag count and the recall gate
 
-Recall has an entry-side hard gate (`read.mjs`; factory threshold **0.3**, calibrated 2026-11-11):
+**Tag count does not affect retrievability** (as of the 2026-11-16 criterion rework).
+The gate only looks at the query side:
 
 ```
-e_ratio = matched tags / entry tags   must be STRICTLY greater than 0.3
+minHit       = matched tags >= 1                    (zero overlap never returns)
+queryFloor   = matched / query tags >= 0.5          (at least half the query words)
 ```
 
-The matched fraction must exceed 30%, or the entry is vetoed. Querying with 2 tags:
-
-| Entry tags | Query with 2 tags | Result |
+| Entry tags | Query with 2 tags, both matched | Result |
 |---|---|---|
-| 6 | 2/6 = 0.33 | **passes** (>0.3) |
-| 7 | 2/7 = 0.29 | vetoed |
-| 3 | 2/3 = 0.67 | passes |
-| 2 | 2/2 = 1.00 | passes |
+| 2 | q_ratio = 2/2 = 1.00 | passes |
+| 6 | q_ratio = 2/2 = 1.00 | passes |
+| 20 | q_ratio = 2/2 = 1.00 | passes |
 
-So the largest tag count still findable with two words is **6** (2/6≈0.33 passes, 2/7≈0.29 is vetoed).
-Earlier docs derived "exactly three" from the old 0.5 threshold; **that no longer holds after the 0.3 calibration** and is corrected here.
+The entry's own tag count no longer appears anywhere in the decision.
+Measured before/after on the production library (364 entries):
 
-The invariant remains: **more tags make an entry harder to retrieve** with a single word.
-Seeds also never share a tag, otherwise one query matches two entries and they compete for Top-K.
-The threshold and comparators (entry side `>`, query side `>=`) live in `scoring.json` — do not change them from memory.
+| Metric | Before | After |
+|---|---|---|
+| Self-query recall, k=1 | 7% | **88%** |
+| Self-query recall, k=2 | 75% | **100%** |
+| Recall by tag-count band (1–3 / 4–6 / 7–10 / 11+) | 7–10 band collapses | **all 100%** |
+| Real replayed queries returning anything | 17/26 | **20/26** |
+| Cross-topic noise (zero tag overlap) | 0 | **0** |
+| Shape mismatch still retrievable | 75% | **95%** |
+
+Historical note: this section used to state the opposite — that "more tags make an entry
+harder to retrieve", with 6 tags as the ceiling for a two-word query. That was a faithful
+description of the old `e_ratio` rule, but the rule itself was the defect: it let the writer's
+tag count permanently cap the reader's reach. The behaviour was fixed rather than documented.
+
+Query words: **1–3 is the sweet spot.** The gate requires at least half the query words to
+match, so piling on words dilutes coverage. Prefer fewer, more precise words.
+
+Seeds still never share a tag, otherwise one query matches two entries and they compete for Top-K.
+Thresholds and comparators live in `scoring.json` — do not change them from memory.
 
 ### Handing an identity to a subagent (easy to get wrong)
 
