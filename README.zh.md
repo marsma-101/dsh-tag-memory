@@ -2,7 +2,7 @@
 
 > 给 DSH 智能体一套**标签化、可检索、跨会话**的长期记忆。
 
-[![Version](https://img.shields.io/badge/version-1.5.0-blue)]()
+[![Version](https://img.shields.io/badge/version-1.6.0-blue)]()
 [![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1%2B-orange)]()
 [![Tests](https://img.shields.io/badge/tests-464%20passing-brightgreen)]()
 
@@ -107,7 +107,7 @@ dsh plugin --profile web add github:marsma-101/dsh-tag-memory
 **只要 `node ≥ 24.9` + `npx`——不需要 pnpm、git、已装插件，也不需要模型。**
 
 ```bash
-npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.5.0 apply
+npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.6.0 apply
 ```
 
 `npx` 只负责把包拉下来；真正干活的是包里的 [`scripts/install.mjs`](scripts/install.mjs)（纯 node、零依赖、约 1 秒）：
@@ -161,7 +161,7 @@ node scripts/install.mjs apply                 # 包已经在本地时，直接�
 
 对 agent 只需要一句话：
 
-> 从这个 URL 装最新版：`npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.5.0 apply`，
+> 从这个 URL 装最新版：`npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.6.0 apply`，
 > 别手写 profile 的 `package.json` / `cordis.patch.yml`；装完把输出贴出来，等用户重启 dsh。
 
 它会自动落到容器里 `/opt/dsh/profiles/<profile>`（靠 `$DSH_PROFILE_DIR`），不需要 `--dsh-home`。

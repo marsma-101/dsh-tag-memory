@@ -2,7 +2,7 @@
 
 > Tag-based, searchable, cross-session long-term memory for DSH agents.
 
-[![Version](https://img.shields.io/badge/version-1.5.0-blue)]()
+[![Version](https://img.shields.io/badge/version-1.6.0-blue)]()
 [![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1%2B-orange)]()
 [![Tests](https://img.shields.io/badge/tests-464%20passing-brightgreen)]()
 
@@ -113,7 +113,7 @@ dsh plugin --profile web add github:marsma-101/dsh-tag-memory
 **Requires only `node ≥ 24.9` + `npx` — no pnpm, no git, no installed plugins, no model.**
 
 ```bash
-npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.5.0 apply
+npx -y https://codeload.github.com/marsma-101/dsh-tag-memory/tar.gz/refs/tags/v1.6.0 apply
 ```
 
 `npx` only downloads the package; the real work is [`scripts/install.mjs`](scripts/install.mjs)

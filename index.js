@@ -106,7 +106,7 @@ import {
 } from './lib/engine/backup.mjs';
 import { planTidy } from './lib/engine/tidy.mjs';
 import { isBackupDue, isTidyDue } from './lib/engine/schedule.mjs';
-import { canMigrate, verifyMigration } from './lib/engine/migrate.mjs';
+import { canMigrate, verifyMigration, shouldSkipOnMigrate, copyTreeFiltered } from './lib/engine/migrate.mjs';
 import { checkForUpdate } from './lib/engine/update-check.mjs';
 import {
   loadSchema,
@@ -231,12 +231,14 @@ function headerFatal(errors) {
  * “参数不合法”——把明确的业务原因误报成“参数写错了”，模型会去改本来正确的参数。
  * 这个坑我对三种情况都踩过（未绑定 / 缺 basis / 缺编号），统一走这个函数。
  */
-function reject(code, message, field = null) {
+function reject(code, message, field = null, details = null) {
   return {
     ok: false,
     code,
     errors: [{ code, field, message }],
     message,
+    // details 用于携带「源库是否完好」这类可编程判断的信息（2026-11-16 迁移事务需要）
+    ...(details ? { details } : {}),
   };
 }
 
@@ -401,23 +403,34 @@ function createHostService(ctx, config) {
    * 返回 { layout, source, locked, lockedHint, warning }。
    */
   async function resolveLayout() {
-    const settingsDir = await readSettingsDir();
+    const loc = await readLocation();
     const resolved = resolveDataDir({
       configDir: config?.dataDir,
       envDir: process.env.DSH_TAG_MEMORY_DATA_DIR,
-      settingsDir,
+      settingsDir: loc.current,
       dshHomeDir: currentDshHome(),
       packageDir: PACKAGE_DIR,
     });
     const locked = resolved.source === 'config' || resolved.source === 'env';
     const source = resolved.source;
     if (source === 'package') warnPackageFallbackOnce(resolved.dir);
+
+    // ── 备份目录（2026-11-16 解耦）──
+    // 优先级：① config.backupDir  ② location.json 的 backupDir  ③ 默认 <dataDir>/backup
+    // 为什么 config 优先：它是运维手段（cordis.patch.yml），应当能压过用户界面里的选择。
+    const cfgBackupDir = str(config?.backupDir);
+    const backupDir = cfgBackupDir !== '' ? cfgBackupDir : loc.backupDir;
+
     return {
-      layout: layoutOf(resolved.dir),
+      layout: layoutOf(resolved.dir, { backupDir }),
       source,
       locked,
       lockedHint: locked ? lockedHintOf(source) : null,
       warning: packageFallbackWarning(source, resolved.dir),
+      // 位置历史：UI 可据此显示"这个库搬过几次、从哪搬来的"
+      history: loc.history,
+      // 备份位置是否被独立指定（UI 提示"备份在别处"）
+      backupDirSource: cfgBackupDir !== '' ? 'config' : loc.backupDir ? 'settings' : 'default',
     };
   }
 
@@ -825,32 +838,129 @@ function createHostService(ctx, config) {
    * 现在写到 DSH_HOME 下（包外、跨升级稳定）：`$DSH_HOME/tag-memory-settings.json`。
    * DSH_HOME 拿不到时退回包内（与旧行为一致，至少不崩）。
    */
-  function settingsPointerFile() {
+  /**
+   * 位置描述符文件路径（**在数据目录之外**，所以迁移不会搬走它自己）。
+   *
+   * ── 2026-11-16：从"设置指针"升级为"位置描述符" ────────────────
+   * 旧文件 `tag-memory-settings.json` 只存 `{ dataDir }`，迁移后旧目录不留任何痕迹，
+   * 导致「库分叉但无从判断哪份有效」。
+   *
+   * 新文件 `tag-memory-location.json` 是旧格式的**超集**：
+   *   { version, current, backupDir, history: [{dir, retiredAt, reason, records, bytes}] }
+   * 读的时候兼容旧格式（只认 dataDir），首次写入时自动升级。
+   */
+  function locationFile() {
+    const home = currentDshHome();
+    if (home) return path.join(home, 'tag-memory-location.json');
+    return path.join(PACKAGE_DIR, 'config', 'location.json');
+  }
+
+  /** 旧版指针文件（只读兼容；写入统一走 locationFile）。 */
+  function legacySettingsPointerFile() {
     const home = currentDshHome();
     if (home) return path.join(home, 'tag-memory-settings.json');
     return path.join(PACKAGE_DIR, 'config', 'data-dir.json');
   }
 
-  async function readSettingsDir() {
-    // 先读稳定位置；读不到再兼容旧的包内指针（升级前搬过家的用户）。
-    const candidates = [settingsPointerFile(), path.join(PACKAGE_DIR, 'config', 'data-dir.json')];
-    for (const file of candidates) {
+  /**
+   * 读位置描述符。
+   *
+   * 返回 `{ current, backupDir, history }`，全部字段都可能为 null/空数组。
+   * 兼容三种来源（按优先级）：
+   *   ① 新格式 location.json
+   *   ② 旧格式 tag-memory-settings.json（只有 dataDir）
+   *   ③ 更旧的包内 config/data-dir.json
+   */
+  async function readLocation() {
+    const empty = { current: null, backupDir: null, history: [] };
+
+    // ① 新格式
+    try {
+      const raw = await fsp.readFile(locationFile(), 'utf8');
+      const obj = JSON.parse(raw);
+      const current = typeof obj?.current === 'string' && obj.current !== '' ? obj.current : null;
+      const backupDir = typeof obj?.backupDir === 'string' && obj.backupDir !== '' ? obj.backupDir : null;
+      const history = Array.isArray(obj?.history) ? obj.history.filter((h) => h && typeof h.dir === 'string') : [];
+      if (current || backupDir) return { current, backupDir, history };
+    } catch {
+      /* 试下一个 */
+    }
+
+    // ②③ 旧格式（只有 dataDir）
+    for (const file of [legacySettingsPointerFile(), path.join(PACKAGE_DIR, 'config', 'data-dir.json')]) {
       try {
         const raw = await fsp.readFile(file, 'utf8');
         const obj = JSON.parse(raw);
-        if (typeof obj?.dataDir === 'string' && obj.dataDir !== '') return obj.dataDir;
+        if (typeof obj?.dataDir === 'string' && obj.dataDir !== '') {
+          return { current: obj.dataDir, backupDir: null, history: [] };
+        }
       } catch {
         /* 试下一个 */
       }
     }
-    return null;
+
+    return empty;
   }
 
-  /** 写设置页的库位置（写到包外稳定位置，升级不丢）。 */
-  async function writeSettingsDir(target) {
-    const file = settingsPointerFile();
+  /**
+   * 写位置描述符（整份覆盖，调用方负责传完整状态）。
+   *
+   * 为什么整份覆盖而不是局部更新：这个文件很小，且**一致性比写入量重要**——
+   * 局部更新容易出现「current 改了但 history 没追」这种半更新状态。
+   */
+  async function writeLocation({ current, backupDir, history }) {
+    const file = locationFile();
     await fsp.mkdir(path.dirname(file), { recursive: true });
-    await fsp.writeFile(file, `${JSON.stringify({ dataDir: target }, null, 2)}\n`, 'utf8');
+    const payload = {
+      version: 1,
+      current: typeof current === 'string' && current !== '' ? current : null,
+      backupDir: typeof backupDir === 'string' && backupDir !== '' ? backupDir : null,
+      history: Array.isArray(history) ? history : [],
+    };
+    // 原子写：先写 tmp 再 rename，避免中途崩溃留下半个 JSON
+    const tmp = `${file}.${process.pid}.tmp`;
+    await fsp.writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+    await fsp.rename(tmp, file);
+    return payload;
+  }
+
+  /** 只读当前生效的数据目录（resolveLayout 用）。 */
+  async function readSettingsDir() {
+    const loc = await readLocation();
+    return loc.current;
+  }
+
+  /**
+   * 记录一次迁移：把旧目录写进 history，current 指向新目录。
+   *
+   * `backupDir` 不动——用户可能已经把备份独立配置了，迁移数据目录不该顺带改备份位置。
+   */
+  async function recordMigration({ from, to, snapshot }) {
+    const loc = await readLocation();
+    const history = [
+      ...loc.history,
+      {
+        dir: from,
+        retiredAt: new Date().toISOString(),
+        reason: 'migrated',
+        records: Number(snapshot?.records ?? 0),
+        bytes: Number(snapshot?.bytes ?? 0),
+        movedTo: to,
+      },
+    ];
+    return writeLocation({ current: to, backupDir: loc.backupDir, history });
+  }
+
+  /** 只改备份位置（不动数据目录）。 */
+  async function writeBackupDir(target) {
+    const loc = await readLocation();
+    return writeLocation({ current: loc.current, backupDir: target, history: loc.history });
+  }
+
+  /** 写设置页的库位置（写到包外稳定位置，升级不丢）。保留给旧调用方。 */
+  async function writeSettingsDir(target) {
+    const loc = await readLocation();
+    return writeLocation({ current: target, backupDir: loc.backupDir, history: loc.history });
   }
 
   /** 取三份配置（进程内缓存，dispose 时清空；templates 改动需重载插件才生效，不会自动重读）。 */
@@ -2443,31 +2553,52 @@ function createHostService(ctx, config) {
     return ra > rb;
   }
 
-  /** 搬家：把数据目录搬到新位置。①② 优先级锁定时拒绝并说明改哪一行。 */
+  /**
+   * 搬家：把数据目录搬到新位置。
+   *
+   * ── 2026-11-16 重写（三个洞一起修）──────────────────────────────
+   * 旧实现的三个问题：
+   *   ① **只挡相等不挡包含** → 目标在源内部时无限递归复制（实测嵌套 41 层）。
+   *   ② **直接往 dest 写** → 中途失败留下半成品，且无法判断"搬完了没"。
+   *   ③ **只复制不删源** → `moved` 名不副实，旧库无标记，库会分叉。
+   *
+   * 新实现是**事务**：
+   *   前置校验（含 realpath 后的包含关系）
+   *   → 复制到 dest/.migrating-<ts>/（不污染 dest 本身）
+   *   → 校验（字节 + 记录数 + 逐行解析）
+   *   → 原子提交：把临时目录里的东西搬到 dest 顶层
+   *   → 写位置描述符（指针切换）
+   *   → 源目录留 MIGRATED-TO.txt 标记（不删，可回退）
+   *
+   * 任何一步失败 → 清理临时目录，**源库与指针都不动**。
+   */
   async function migrateDataDir({ target } = {}) {
     const dest = str(target);
     if (dest === '') return reject('TARGET_REQUIRED', '必须给出目标目录。', 'target');
 
     const { layout, source, locked, lockedHint } = await resolveLayout();
-    if (locked) {
+    const from = layout.dataDir;
+    const destAbs = path.resolve(dest);
+
+    // ── ① 路径关系校验（先于 locked：这是数据安全问题，比"能不能搬"更优先）──
+    // 必须用 realpath：dest 可能是指向 from 的软链接，纯字符串比不出来。
+    // realpath 对不存在的路径会抛，所以目标不存在时退化为 resolve 后的路径。
+    const realFrom = await realpathOr(dest === '' ? '' : from, from);
+    const realTo = await realpathOr(destAbs, destAbs);
+    const verdict = canMigrate({ source, from, to: dest, realFrom, realTo });
+    if (!verdict.ok) {
+      // 把 engine 的 code 原样透出（TARGET_INSIDE_SOURCE / TARGET_IS_PARENT / SAME_DIR / DATA_DIR_LOCKED）
       return {
         ok: false,
-        code: 'DATA_DIR_LOCKED',
-        message: lockedHint,
-        details: {
-          source,
-          where: source === 'config' ? 'cordis.patch.yml 的 config.dataDir' : '环境变量 DSH_TAG_MEMORY_DATA_DIR',
-        },
+        code: verdict.code,
+        message: verdict.message,
+        hint: verdict.hint ?? null,
+        details: { from: realFrom, to: realTo, source },
       };
     }
-    if (path.resolve(dest) === path.resolve(layout.dataDir)) {
-      return reject('TARGET_SAME', '目标目录就是当前目录，不需要搬。', 'target');
-    }
 
-    const from = layout.dataDir;
-    const destLayout = layoutOf(path.resolve(dest));
-
-    // P1-6（2026-11-12）：目标已有库 → 拒绝，绝不静默覆盖（目标侧数据丢失）。
+    // ── ② 目标非空检查（绝不静默覆盖）──
+    const destLayout = layoutOf(destAbs);
     try {
       const dstLib = await fsp.stat(destLayout.libraryCsv);
       if (dstLib.isFile() && dstLib.size > 0) {
@@ -2481,7 +2612,7 @@ function createHostService(ctx, config) {
       /* 目标库不存在＝可搬 */
     }
 
-    // 搬家前记源库的字节/记录数，搬完据此校验（verifyMigration 原来引了从不调）。
+    // ── ③ 记源库快照（搬完据此校验）──
     const { schema } = await loadConfigs();
     const srcLib = await readLibraryCsv(layout.libraryCsv, schema);
     let srcBytes = 0;
@@ -2492,43 +2623,160 @@ function createHostService(ctx, config) {
     }
     const before = { bytes: srcBytes, records: srcLib.records.length };
 
-    let moved = false;
-    // 全程持源库锁：复制期间并发 write/recall 会造成新旧两侧不一致。
+    // ── ④ 事务：复制到临时目录 → 校验 → 提交 ──
+    const stamp = backupStamp();
+    const stagingName = `.migrating-${stamp}`;
+    const staging = path.join(destAbs, stagingName);
+    let committed = false;
+
     try {
       await withFileLock(layout.lockFile, async () => {
-        await fsp.mkdir(dest, { recursive: true });
+        // 4.1 建临时目录（不是 dest 本身）
+        await fsp.mkdir(staging, { recursive: true });
+
+        // 4.2 复制到临时目录
+        //
+        // ⚠️ 不能直接用 fsp.cp({recursive:true})：它整棵树搬过去，**不会回调跳过规则**。
+        // 端到端实测发现 `store/.memory.lock` 会被原样带到新目录，
+        // 导致新目录首次操作因锁文件残留而 LOCK_TIMEOUT。
+        // 所以用 copyTreeFiltered 逐层应用 shouldSkipOnMigrate。
         const entries = await fsp.readdir(from, { withFileTypes: true }).catch(() => []);
         for (const ent of entries) {
-          // 排除锁文件与临时文件：搬过去会让新目录首次操作 LOCK_TIMEOUT，
-          // 或把半成品 tmp 当数据。backup/ 要搬（旧实现漏了，契约与实现脱节）。
-          if (ent.name === '.memory.lock' || ent.name.endsWith('.tmp')) continue;
+          if (shouldSkipOnMigrate(ent.name)) continue;
           const srcPath = path.join(from, ent.name);
-          const dstPath = path.join(dest, ent.name);
-          await fsp.cp(srcPath, dstPath, { recursive: true, force: true });
+          const dstPath = path.join(staging, ent.name);
+          if (ent.isDirectory()) {
+            await copyTreeFiltered({
+              src: srcPath,
+              dst: dstPath,
+              cpFn: (s, d) => fsp.copyFile(s, d),
+              readdirFn: (p, o) => fsp.readdir(p, o),
+              mkdirFn: (p, o) => fsp.mkdir(p, o),
+            });
+          } else {
+            await fsp.copyFile(srcPath, dstPath);
+          }
         }
-        moved = true;
+
+        // 4.3 校验临时目录里的库（此时还没碰 dest 顶层）
+        const stagedLibPath = path.join(staging, 'store', 'memory.csv');
+        const stagedLib = await readLibraryCsv(stagedLibPath, schema);
+        let stagedBytes = 0;
+        try {
+          stagedBytes = (await fsp.stat(stagedLibPath)).size;
+        } catch {
+          stagedBytes = 0;
+        }
+        const check = verifyMigration(before, { bytes: stagedBytes, records: stagedLib.records.length });
+        if (!check.ok) {
+          throw Object.assign(new Error(check.message), { __verifyFailed: true });
+        }
+
+        // 4.4 提交：把临时目录里的条目搬到 dest 顶层
+        // 用 rename（同盘原子）；跨盘时 rename 会 EXDEV，退化为 cp + 删
+        const staged = await fsp.readdir(staging);
+        for (const name of staged) {
+          const srcPath = path.join(staging, name);
+          const dstPath = path.join(destAbs, name);
+          await moveInto(srcPath, dstPath);
+        }
+        // 临时目录已空，删掉壳
+        await fsp.rmdir(staging).catch(() => {});
+        committed = true;
       });
     } catch (err) {
-      return reject('MIGRATE_FAILED', `搬家失败：${err?.message ?? err}`);
+      // 失败：清理临时目录，源库与指针一律不动
+      await fsp.rm(staging, { recursive: true, force: true }).catch(() => {});
+      if (err && err.__verifyFailed) {
+        return {
+          ok: false,
+          code: 'MIGRATE_VERIFY_FAILED',
+          message: err.message,
+          from,
+          to: dest,
+          // 明确告诉用户：源库完好，目标未受影响
+          details: { sourceIntact: true, targetUntouched: true },
+        };
+      }
+      return reject('MIGRATE_FAILED', `搬家失败：${err?.message ?? err}`, null, {
+        sourceIntact: true,
+        targetUntouched: true,
+      });
     }
 
-    // 搬后校验：字节数 + 记录数。不过就报失败，不切指针（否则指向一个坏库）。
-    const dstLib = await readLibraryCsv(destLayout.libraryCsv, schema);
-    let dstBytes = 0;
+    if (!committed) {
+      return reject('MIGRATE_FAILED', '搬家未完成（提交阶段中断）。源库未受影响。', null, {
+        sourceIntact: true,
+      });
+    }
+
+    // ── ⑤ 提交成功：写位置描述符（指针切换 + 历史追加）──
+    // 用 recordMigration 而不是 writeSettingsDir：要把旧位置写进 history，
+    // 否则「这个库搬过几次、从哪搬来的」无从追溯（这正是洞 B 的一半）。
+    await recordMigration({ from, to: destAbs, snapshot: before });
+
+    // ── ⑥ 源目录留标记（不删，可回退）──
+    const retired = await markSourceRetired(from, destAbs, before);
+
+    return {
+      ok: true,
+      from,
+      to: destAbs,
+      moved: true,
+      verified: verifyMigration(before, before).message,
+      // 旧目录的去向，让用户知道"东西没丢，只是搬走了"
+      sourceRetired: retired,
+    };
+  }
+
+  /** realpath，失败（不存在/无权限）就返回 fallback。 */
+  async function realpathOr(p, fallback) {
     try {
-      dstBytes = (await fsp.stat(destLayout.libraryCsv)).size;
+      return await fsp.realpath(p);
     } catch {
-      dstBytes = 0;
+      return fallback;
     }
-    const verdict = verifyMigration(before, { bytes: dstBytes, records: dstLib.records.length });
-    if (!verdict.ok) {
-      return { ok: false, code: 'MIGRATE_VERIFY_FAILED', message: verdict.message, from, to: dest };
+  }
+
+  /**
+   * 把 src 移到 dst。
+   * 同盘用 rename（原子）；跨盘 rename 会 EXDEV，退化为 cp + rm。
+   */
+  async function moveInto(src, dst) {
+    try {
+      await fsp.rename(src, dst);
+    } catch (err) {
+      if (err && err.code === 'EXDEV') {
+        await fsp.cp(src, dst, { recursive: true, force: true });
+        await fsp.rm(src, { recursive: true, force: true });
+        return;
+      }
+      throw err;
     }
+  }
 
-    // 校验通过才记录选择（④包内 时才允许设置页生效；③设置页 也是可写的）
-    await writeSettingsDir(dest);
-
-    return { ok: true, from, to: dest, moved, verified: verdict.message };
+  /**
+   * 在旧数据目录留一个 MIGRATED-TO.txt。
+   *
+   * 为什么要有：迁移后源目录原样保留（可回退），但**一个空壳旧目录会让人以为数据丢了**。
+   * 留个说明文件，用户看到就知道"搬到哪了、什么时候搬的、多少条"。
+   *
+   * 失败不致命：标记写不上不影响迁移本身已经成功。
+   */
+  async function markSourceRetired(from, to, snapshot) {
+    const marker = path.join(from, 'MIGRATED-TO.txt');
+    const text =
+      `本目录的记忆库已于 ${new Date().toISOString()} 迁移到：\n` +
+      `  ${to}\n\n` +
+      `迁移时快照：${snapshot.records} 条记录 / ${snapshot.bytes} 字节。\n\n` +
+      `本目录不再被读取。确认新位置运行正常后，可以手工删除本目录。\n` +
+      `若需回退，把本文件删掉并在插件设置里把数据目录改回 ${from}。\n`;
+    try {
+      await fsp.writeFile(marker, text, 'utf8');
+      return marker;
+    } catch {
+      return null;
+    }
   }
 
   /* ---------------- 设置 ---------------- */

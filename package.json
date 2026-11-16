@@ -1,6 +1,6 @@
 {
   "name": "dsh-tag-memory",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "type": "module",
   "description": "Tag-based long-term memory for DSH agents.",
   "keywords": [
@@ -27,9 +27,6 @@
     "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
-  },
-  "bin": {
-    "dsh-tag-memory": "./scripts/install.mjs"
   },
   "files": [
     "index.js",
