@@ -70,15 +70,18 @@ export function clearTagRulesCache() {
  * 形态：每行一条记忆的全部标签（`a|b|c`），同行标签天然相连，
  *       跨记忆的同名标签再形成新连接——这份文本本身就是那张网。
  *
- * 三个来源决定（都是用户明确的）：
+ * 三个来源决定（前两个是用户明确的，第三个 2026-11-17 修订）：
  *   1. **不带编号**——编号只是存储用的，模型要的是内容和关系，不需要回指。
  *   2. **按视角隔离**——只含 `(项目∈{当前,通用}) AND (智能体∈{当前,通用})`。
  *      实测 92% 的标签只属于单一项目，不隔离会把大量无关词灌进来。
- *   3. **全量给**——不加频次截断。用户测算：约 1400 tokens，
- *      而「读错了重读」或「想不起来再问一遍」的代价远高于此。
+ *   3. **体积治理**（2026-11-17，依据 积分消耗诊断-2026-11-17.md）——
+ *      原裁定「全量给」（约 1400 tokens）在库涨到 368 条后失效：单份 6.4KB
+ *      且随库线性增长。改为「锚定行过滤（minTagCount=2）+ 3KB 硬上限」，
+ *      且**只在 dtm_recall 注入一份**（原 dtm_write/dtm_recall 双份 ~5000 tokens/步）。
+ *      阈值可在 free-tag-rules.json 的 network 段覆盖。
  *
  * 注入时机（用户明确）：**不每轮注入**。模型调 dtm_write / dtm_recall 时
- * 随工具一起给。体积 1400 tokens 在工具描述里完全可接受。
+ * 随工具一起给。
  * ------------------------------------------------------------------ */
 
 let networkCache = { key: '', text: '' };
@@ -123,7 +126,15 @@ export function renderNetworkFromLibrary(libraryCsv, view = {}, rules = freeTagR
     });
     const active = String(rules?.network?.statusActive ?? '生效');
     const visible = selectVisible(records, { project, agent, statusActive: active });
-    const text = renderTagNetwork(visible);
+    // 2026-11-17 体积治理（积分消耗诊断-2026-11-17.md §3 问题 3）：
+    // 只保留「含 ≥2 个出现≥2 次标签」的行 + 3KB 硬上限。阈值可在
+    // free-tag-rules.json 的 network 段覆盖（minTagCount / maxBytes）。
+    // 频次过滤的语义：孤词行（全是只出现过一次的标签）没有跨记忆共现价值；
+    // 锚定行里的孤词原样保留——新词发现靠锚定行，不能抠掉。
+    const text = renderTagNetwork(visible, {
+      minTagCount: Number(rules?.network?.minTagCount ?? 2),
+      maxBytes: Number(rules?.network?.maxBytes ?? 3072),
+    });
     networkCache = { key, text };
     return text;
   } catch {
@@ -299,10 +310,12 @@ const DEFS = [
           // 数量区间、`|` 拒写），只去掉与后半句重复的措辞。
           // 完整说明在 标签字典.md 与 free-tag-rules.json；被拒时返回值还会再给一遍。
           //
-          // 2026-11-11：末尾追加**标签共现网络**（用户裁定：写和读都直接给 wiki）。
-          // 模型看一眼现有的网就知道新记忆该填什么词——不用背词表，也不用解释每个词。
+          // 2026-11-17 改动：不再在这里注入标签共现网络。
+          // 网络只保留在 dtm_recall 的描述里（约 3-6KB，双份就是每步 ~5000 tokens
+          // 的固定浪费，见 积分消耗诊断-2026-11-17.md §3 问题 2）。模型能同时看到
+          // 所有工具的 description，dtm_recall 描述里的网络对写侧同样可见，无需重复。
           `${renderTagRules('write')} 召回主信号；程序做交集匹配，同义词由等价表归一。`
-          + (ctx?.networkText ? `\n\n现有标签网络（每行一条记忆的标签，同行即相关；首词通常是类别）：\n${ctx.networkText}` : ''),
+          + (ctx?.networkText ? '\n\n现有标签网络见 dtm_recall 工具描述。' : ''),
       },
       // 注意：**没有 `稳定性` 参数**（2026-11-08 硬性裁定）。
       // 首次落库恒为「观察」——此刻是模型单方面写下的，没经过系统性验证，
@@ -512,9 +525,43 @@ const DEFS = [
       },
     }),
   },
+
+  /* ---------------- 11. dtm_tidy_prompt ---------------- */
+  {
+    name: 'dtm_tidy_prompt',
+    when: '要整理记忆库时（生成一段提示词，复制到新会话执行）',
+    description:
+      '**只读**：生成一段「记忆库整理」提示词，用户复制到新会话粘贴，由那个会话的模型执行整理。' +
+      '本工具不改库、不写台账、不需要备份。返回值里的 prompt 请**原样展示**给用户。',
+    params: () => ({
+      limit: {
+        type: 'integer',
+        description: '候选条数上限，默认 20。传 0 = 不限（一次给全部，可能很长）。',
+      },
+    }),
+  },
+
+  /* ---------------- 12. dtm_merge_prompt ---------------- */
+  {
+    name: 'dtm_merge_prompt',
+    when: '要合并一份外来记忆文件时（生成一段提示词，复制到新会话执行）',
+    description:
+      '**只读**：解析一份外来记忆文件（CSV / Markdown / JSON / 纯文本），' +
+      '生成一段「记忆库合并」提示词，用户复制到新会话粘贴执行。' +
+      '本工具不改库、不写台账、不需要备份。返回值里的 prompt 请**原样展示**给用户。',
+    params: () => ({
+      path: {
+        type: 'string',
+        required: true,
+        description:
+          '要解析的外来记忆文件路径。必须在数据目录/备份目录/台账目录内（越界报 PATH_NOT_ALLOWED）。' +
+          '支持 CSV / Markdown / JSON / 纯文本；数据库文件请先导出成 CSV/JSON。',
+      },
+    }),
+  },
 ];
 
-/** 10 个工具的规范名（qa K1/K2/K3 与注入 L1 共用同一份） */
+/** 12 个工具的规范名（qa K1/K2/K3 与注入 L1 共用同一份） */
 export const TOOL_NAMES = DEFS.map((d) => d.name);
 
 /**

@@ -30,7 +30,10 @@ export const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]
  * 匹配方式：精确名（`EXCLUDE_DIRS`）+ 前缀模式（`EXCLUDE_DIR_PREFIXES`），
  * 后者专门处理 `._*` 这类"名字不固定但形态固定"的本地产物。
  */
-const EXCLUDE_DIRS = new Set(['.git', '.github', 'node_modules', '内部文档', 'tests'])
+const EXCLUDE_DIRS = new Set(['.git', '.github', 'node_modules', '内部文档', 'tests',
+  // 2026-11-17：_dsh_docs/ 是本机缓存的 dsh 官方文档镜像（排查时落盘的开发资料），
+  // 不是插件运行时，与 `内部文档` 同理排除。
+  '_dsh_docs'])
 
 /**
  * 需要按前缀排除的目录名。
@@ -71,7 +74,24 @@ export function listAllFiles(dir = ROOT, acc = []) {
  *     前者硬编码开发机库路径/身份，后者名实不符（自称只读实际写盘），都不随包发布，
  *     也不是运行时文件，故排除——否则 P8 会要求把它们塞进 files。
  */
-const DEV_ONLY_SCRIPTS = new Set(['scripts/probe-recall.mjs', 'scripts/dump-injection.mjs'])
+const DEV_ONLY_SCRIPTS = new Set([
+  // 2026-11-12 P1-16：开发期探针
+  'scripts/probe-recall.mjs',
+  'scripts/dump-injection.mjs',
+  // 2026-11-17：积分消耗诊断工具（内部文档/积分消耗诊断-2026-11-17.md 的配套脚本，
+  // 只读本机会话日志做归因分析，不随包发布）
+  'scripts/cost-report.mjs',
+  'scripts/day-report.mjs',
+  'scripts/session-focus.mjs',
+  'scripts/cache-breaker.mjs',
+  'scripts/cache-killers.mjs',
+  'scripts/inject-pos.mjs',
+  'scripts/model-per-step.mjs',
+  'scripts/prefix-diff.mjs',
+  'scripts/qoder-attribution.mjs',
+  'scripts/qoder-cost.mjs',
+  'scripts/sys-diff.mjs',
+])
 
 export function listRuntimeFiles() {
   // package-lock.json（2026-11-13）：npm 装 devDependency 时生成的锁文件，
@@ -82,6 +102,10 @@ export function listRuntimeFiles() {
     if (AUTO_INCLUDED.has(base)) return false
     if (base.startsWith('.')) return false // dotfiles：.gitignore / .npmignore / .env...
     if (DEV_ONLY_SCRIPTS.has(f)) return false // 开发探针，不随包发布
+    // 2026-11-17：根级 `_*.txt` 这类 `_` 前缀文件是诊断脚本的落盘输出
+    // （_cb.txt / _ck.txt 等），不是运行时文件——与 EXCLUDE_DIRS 的 `_dsh_docs`
+    // 同一批本地产物，这里兜底排除，P8 不再要求它们进 files 白名单。
+    if (base.startsWith('_') && !f.includes('/')) return false
     return true
   })
 }

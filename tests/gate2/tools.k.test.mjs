@@ -19,7 +19,7 @@ import { createFakeCtx } from '../_fake-ctx.mjs'
 import { apply as applyPreset } from '../../preset/index.js'
 import { registerTools, TOOL_NAMES, HOST_SERVICE } from '../../preset/tools.js'
 
-/** 规格钦定的 10 个工具（《功能说明》§十四「插件层」原文顺序） */
+/** 规格钦定的工具清单（《功能说明》§十四「插件层」原文顺序 + 2026-11-17 两个提示词工具） */
 const SPEC_TOOLS = [
   'dtm_write',
   'dtm_bind',
@@ -31,22 +31,28 @@ const SPEC_TOOLS = [
   'dtm_export',
   'dtm_records',
   'dtm_merge',
+  'dtm_tidy_prompt',
+  'dtm_merge_prompt',
 ]
 
 /* ------------------------------------------------------------------ *
- * K1 恰好 10 个
+ * K1 恰好 SPEC_TOOLS.length 个
  * ------------------------------------------------------------------ */
-test('K1 假 ctx 加载后 ctx.tools.register 恰好被调用 10 次', () => {
+test('K1 假 ctx 加载后 ctx.tools.register 恰好被调用 12 次', () => {
   const ctx = createFakeCtx()
   registerTools(ctx, {})
 
-  assert.equal(ctx.__tools.length, 10, `必须恰好注册 10 个工具，实际 ${ctx.__tools.length} 个`)
+  assert.equal(
+    ctx.__tools.length,
+    SPEC_TOOLS.length,
+    `必须恰好注册 ${SPEC_TOOLS.length} 个工具，实际 ${ctx.__tools.length} 个`,
+  )
 })
 
 /* ------------------------------------------------------------------ *
  * K2 逐个点名（缺哪个报哪个）
  * ------------------------------------------------------------------ */
-test('K2 10 个 dtm_* 逐个点名，一个不缺', () => {
+test('K2 12 个 dtm_* 逐个点名，一个不缺', () => {
   const ctx = createFakeCtx()
   registerTools(ctx, {})
 
@@ -54,7 +60,7 @@ test('K2 10 个 dtm_* 逐个点名，一个不缺', () => {
   const missing = SPEC_TOOLS.filter((t) => !names.includes(t))
 
   assert.deepEqual(missing, [], `缺少工具：${missing.join(', ')}（实际注册：${names.join(', ')}）`)
-  assert.equal(TOOL_NAMES.length, 10, `TOOL_NAMES 导出应 10 个，实际 ${TOOL_NAMES.length}`)
+  assert.equal(TOOL_NAMES.length, SPEC_TOOLS.length, `TOOL_NAMES 导出应 ${SPEC_TOOLS.length} 个，实际 ${TOOL_NAMES.length}`)
 })
 
 /* ------------------------------------------------------------------ *
@@ -220,11 +226,11 @@ test('K8 每个工具都有 output.schema 与 output.render（否则模型看不
 /* ------------------------------------------------------------------ *
  * K-附加 预设入口 apply 能跑通，且注册与注入都发生
  * ------------------------------------------------------------------ */
-test('K-附加 preset/index.js 的 apply 能完整跑通：注册 10 工具 + 1 段注入 + 1 段身份上下文', () => {
+test('K-附加 preset/index.js 的 apply 能完整跑通：注册 12 工具 + 1 段注入 + 1 段身份上下文', () => {
   const ctx = createFakeCtx()
   applyPreset(ctx, {})
 
-  assert.equal(ctx.__tools.length, 10, `apply 后应注册 10 个工具，实际 ${ctx.__tools.length}`)
+  assert.equal(ctx.__tools.length, SPEC_TOOLS.length, `apply 后应注册 ${SPEC_TOOLS.length} 个工具，实际 ${ctx.__tools.length}`)
   assert.equal(ctx.__sections.length, 1, `应注册 1 段固定注入（section），实际 ${ctx.__sections.length}`)
   // 身份必须走 context 而非 section —— 否则每轮毁掉系统提示词缓存前缀
   assert.equal(ctx.__contexts.length, 1, `应注册 1 段身份上下文（context），实际 ${ctx.__contexts.length}`)

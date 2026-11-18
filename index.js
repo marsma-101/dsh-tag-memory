@@ -108,6 +108,10 @@ import { planTidy } from './lib/engine/tidy.mjs';
 import { isBackupDue, isTidyDue } from './lib/engine/schedule.mjs';
 import { canMigrate, verifyMigration, shouldSkipOnMigrate, copyTreeFiltered } from './lib/engine/migrate.mjs';
 import { checkForUpdate } from './lib/engine/update-check.mjs';
+import { parseSource } from './lib/engine/parse-source.mjs';
+import { pickTidyCandidates } from './lib/engine/pick-tidy-candidates.mjs';
+import { renderTidyPrompt, renderMergePrompt } from './lib/engine/prompt-templates.mjs';
+import { countTags } from './lib/engine/vocab.mjs';
 import {
   loadSchema,
   loadScoring,
@@ -2531,6 +2535,120 @@ function createHostService(ctx, config) {
     return { merged: Array.from(byId.values()), added, changed, conflicts };
   }
 
+  /* ---------------------------------------------------------------- *
+   * 整理 / 合并「提示词」生成（2026-11-17，只读）
+   *
+   * 用户定案：插件生成一段提示词，用户复制到**新会话**粘贴，由那个会话的模型
+   * 用现有 dtm_* 工具执行整理/合并。所以这两个方法：
+   *   · 只读：不改库、不写台账、不备份、不持锁
+   *   · 只产出**文本**：模型展示给用户，不该自己拿去执行
+   *
+   * 依据《整理合并-复制提示词方案-2026-11-16.md》
+   * ---------------------------------------------------------------- */
+
+  /** 生成整理提示词。 */
+  async function tidyPrompt({ limit } = {}) {
+    const { layout } = await resolveLayout();
+    const { schema } = await loadConfigs();
+    const { records } = await readLibraryCsv(layout.libraryCsv, schema);
+
+    let rules = {};
+    try {
+      rules = JSON.parse(
+        await fsp.readFile(path.join(PACKAGE_DIR, 'lib', 'engine', 'templates', 'free-tag-rules.json'), 'utf8'),
+      );
+    } catch {
+      rules = {}; // 规则文件读不到不致命，内置排除名单仍生效
+    }
+
+    const cap = Number(limit);
+    const picked = pickTidyCandidates({
+      records,
+      limit: Number.isFinite(cap) ? cap : 20,
+      tagRules: rules?.write ?? rules,
+    });
+
+    const prompt = renderTidyPrompt(picked);
+    return {
+      ok: true,
+      prompt,
+      stats: picked.stats,
+      truncated: picked.truncated,
+      // 明确告诉模型：这是给用户复制的，不是让你执行的
+      readOnly: true,
+    };
+  }
+
+  /** 生成合并提示词（解析外来文件，不改库）。 */
+  async function mergePrompt({ path: srcPath } = {}) {
+    const src = str(srcPath);
+    if (src === '') return reject('PATH_REQUIRED', '必须给出要解析的文件路径。', 'path');
+
+    const { layout, source } = await resolveLayout();
+
+    // ⚠️ 顺序：**先确认存在，再过围栏**。
+    // confinePath 对不存在的路径会先做前缀判断并报 PATH_NOT_ALLOWED，
+    // 那样「文件不存在」就会被误报成「路径越界」，用户无从下手。
+    // 不改现有 confinePath（它服务 mergeLibrary 等既有调用方），只在这里调顺序。
+    try {
+      const st = await fsp.stat(src);
+      if (!st.isFile()) {
+        return reject('MERGE_SOURCE_NOT_FILE', `路径不是文件：${src}。`, 'path');
+      }
+    } catch (err) {
+      if (err && err.code === 'ENOENT') {
+        return reject(
+          'MERGE_SOURCE_NOT_FOUND',
+          `要解析的文件不存在：${src}。请确认路径（插件运行在沙箱/容器里，宿主机路径在这侧可能不存在）。`,
+          'path',
+        );
+      }
+      return reject('MERGE_SOURCE_UNREADABLE', `读不了这个文件：${err?.message ?? err}`, 'path');
+    }
+
+    // 存在后再过围栏：越界就是真的越界，不会被「不存在」干扰。
+    const conf = await confinePath(src, layout, { mustExist: true });
+    if (!conf.ok) return reject(conf.code, conf.message, 'path');
+
+    let text;
+    try {
+      text = await fsp.readFile(src, 'utf8');
+    } catch (err) {
+      return reject('MERGE_SOURCE_UNREADABLE', `读不了这个文件：${err?.message ?? err}`, 'path');
+    }
+
+    const { schema } = await loadConfigs();
+    const parsed = parseSource({ text, filename: path.basename(src), schema });
+
+    // 泛词频次：给模型看「哪些词已被用滥」，帮助它打高区分度标签
+    const { records } = await readLibraryCsv(layout.libraryCsv, schema);
+    const { counts } = countTags(records.filter((r) => String(r?.['状态'] ?? '').trim() === '生效'));
+    const commonWords = [...counts.entries()]
+      .sort((a, b) => (b[1] !== a[1] ? b[1] - a[1] : a[0].localeCompare(b[0])))
+      .slice(0, 10);
+
+    const prompt = renderMergePrompt({
+      parsed,
+      filename: path.basename(src),
+      commonWords,
+      currentView: {
+        project: projectOfSync ? String(projectOfSync() ?? '') : '',
+        agent: currentAgentNameSync ? String(currentAgentNameSync() ?? '') : '',
+      },
+    });
+
+    return {
+      ok: true,
+      prompt,
+      format: parsed.format,
+      parsed: parsed.parsed,
+      warnings: parsed.warnings,
+      exact: parsed.exact,
+      source,
+      readOnly: true,
+    };
+  }
+
   /** 编号 M-YYYYMMDD-NNN 的“较新”判定：先比日期，再比序号。 */
   /**
    * 同编号冲突时判断「哪条更新」。
@@ -2925,6 +3043,9 @@ function createHostService(ctx, config) {
     restore,
     mergeLibrary,
     migrateDataDir,
+    // 整理/合并提示词生成（只读，2026-11-17）
+    tidyPrompt,
+    mergePrompt,
     getSettings,
     runTidy,
     // 生命周期

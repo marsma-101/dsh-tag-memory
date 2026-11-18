@@ -448,6 +448,34 @@ function executeMerge(ctx) {
   };
 }
 
+/**
+ * dtm_tidy_prompt / dtm_merge_prompt —— 生成提示词（**只读**）。
+ *
+ * 宿主方法返回的 `prompt` 要**原样**放进 text，不能改写、不能总结。
+ * 模型会把它展示给用户复制；用户在新会话里粘贴后由那个会话的模型执行。
+ * 这两个方法不改库，所以不需要备份，也不怕误调。
+ */
+function executePromptTool(ctx, hostMethod, argBuilder) {
+  return async (args) => {
+    const h = requireHost(ctx);
+    if (!h.ok) return h.result;
+
+    const r = await callHost(h.host, hostMethod, [argBuilder(args)]);
+    if (!r.ok) return r;
+    const out = r.result;
+    return {
+      ok: true,
+      text: String(out?.prompt ?? ''),
+      // 附加信息放这里，不混进 prompt 正文（正文要能整段复制）
+      stats: out?.stats ?? null,
+      format: out?.format ?? null,
+      parsed: out?.parsed ?? null,
+      warnings: out?.warnings ?? [],
+      readOnly: true,
+    };
+  };
+}
+
 /** 未绑定拒写的统一文案（宿主返回 blocked 时用） */
 function unboundWrite() {
   return {
@@ -497,6 +525,8 @@ export function registerTools(ctx, domain, options = {}) {
     dtm_records: executeRecords(ctx),
     dtm_export: executeExport(ctx),
     dtm_merge: executeMerge(ctx),
+    dtm_tidy_prompt: executePromptTool(ctx, 'tidyPrompt', (args) => ({ limit: args.limit })),
+    dtm_merge_prompt: executePromptTool(ctx, 'mergePrompt', (args) => ({ path: args.path })),
   };
 
   const dispose = [];
