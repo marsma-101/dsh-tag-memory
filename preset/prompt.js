@@ -88,7 +88,7 @@ export function renderInjection({ writeRoutes, dimensions } = {}) {
 
   lines.push('## 长期记忆（dsh-tag-memory）');
   lines.push('');
-  lines.push('库是一张表，行只追加。读写**只用这 10 个工具**。');
+  lines.push('库是一张表，行只追加。读写**只用这些工具**。');
   lines.push('');
 
   /* ── 工具入口（一个不能缺，这是「调哪个」）──────────────────── */
