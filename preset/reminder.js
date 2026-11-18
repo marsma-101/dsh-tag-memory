@@ -87,14 +87,21 @@ export function shouldRemind({ step, sawUser, wrote, reminded } = {}) {
 }
 
 /**
- * 在已认领消息之后插入提醒（官方同款写法）。
- * 不改入参数组，返回新数组；`findLastIndex` 为 -1 时插到最前（step>=2 时 claimed 常为空）。
+ * 在已认领消息之后插入提醒。
+ * 不改入参数组，返回新数组。
+ *
+ * 2026-11-17 改动：`findLastIndex` 为 -1 时**追加到末尾**，不再插到最前。
+ * 为什么：实测（积分消耗诊断-2026-11-17.md §3 问题 1）在消息数组前部/中部
+ * 插入一条消息，插入点之后的全部历史缓存前缀作废——这是插件侧唯一真正
+ * 毁 KV cache 的点。提醒本来就是「补一句」的兜底，放末尾语义也顺、
+ * 对模型的作用不受影响（它读的是最新消息）。
  */
 export function insertReminder(decisionMessages, claimedMessages, desired) {
   const list = Array.isArray(decisionMessages) ? decisionMessages : [];
   if (list.some((m) => sameMessage(m, desired))) return list; // 去重
   const claimed = Array.isArray(claimedMessages) ? claimedMessages : [];
   const lastClaimedIndex = list.findLastIndex((m) => claimed.includes(m));
+  if (lastClaimedIndex < 0) return [...list, desired]; // 无认领点 → 追加末尾（保护缓存前缀）
   return list.toSpliced(lastClaimedIndex + 1, 0, desired);
 }
 

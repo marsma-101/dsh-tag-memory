@@ -34,7 +34,7 @@ import {
 import { readLibraryCsv } from '../../lib/engine/core.mjs';
 import { recall, buildEquivalenceIndex } from '../../lib/engine/read.mjs';
 import { loadSchema, loadScoring, loadTagEquivalence } from '../../lib/engine/dict.mjs';
-import { buildToolDefs, clearNetworkCache, renderNetworkFromLibrary } from '../../preset/tool-defs.js';
+import { buildToolDefs, clearNetworkCache, renderNetworkFromLibrary, TOOL_NAMES } from '../../preset/tool-defs.js';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const TEMPLATES = join(ROOT, 'lib', 'engine', 'templates');
@@ -347,13 +347,15 @@ test('V15 【事故回归】网络里「源码」与「生产端」必须同行�
   assert.ok(line.includes('生产端'), '「源码」与「生产端」必须同一行——否则网络救不了这次事故');
 });
 
-test('V16 网络注入到 dtm_write / dtm_recall 描述；库读不到时静默降级', async () => {
+test('V16 网络只注入 dtm_recall；dtm_write 只留指引；库读不到时静默降级', async () => {
   clearNetworkCache();
   const domain = { shapes: ['技能', '流程', '规则', '偏好', '事实', '模板'] };
 
-  // ① 无库路径 → 不渲染网络，但 10 个工具照常产出
+  // ① 无库路径 → 不渲染网络，但所有工具照常产出
+  // 守的是「网络可选增强不影响工具数量」，所以断言的是与 TOOL_NAMES 一致，
+  // 而不是写死某个数字（2026-11-17 新增两个提示词工具后 10→12）。
   const without = buildToolDefs(domain, {});
-  assert.equal(without.length, 10, '网络是可选增强，不能影响工具数量');
+  assert.equal(without.length, TOOL_NAMES.length, '网络是可选增强，不能影响工具数量');
   for (const name of ['dtm_write', 'dtm_recall']) {
     const d = without.find((x) => x.name === name).parameters['自由标签'].description;
     assert.equal(d.includes('现有标签网络'), false, `${name}：没有库就不该出现网络`);
@@ -361,34 +363,70 @@ test('V16 网络注入到 dtm_write / dtm_recall 描述；库读不到时静默�
 
   // ② 给了不存在的路径 → 同样降级，不抛错
   const bogus = buildToolDefs(domain, { libraryCsv: join(ROOT, '__not_exist__.csv') });
-  assert.equal(bogus.length, 10, '读库失败不能让工具注册挂掉');
+  assert.equal(bogus.length, without.length, '读库失败不能让工具注册挂掉');
 
-  // ③ 真库 → 两个工具都出现网络
+  // ③ 真库 → 网络只在 dtm_recall（2026-11-17 去重：dtm_write 不再重复注入，
+  // 双份是 ~5000 tokens/步的固定浪费，见 内部文档/积分消耗诊断-2026-11-17.md §3 问题 2）
   clearNetworkCache();
   const fsMod = await import('node:fs');
   const fakeCsv = join(ROOT, 'tests', '_network-fixture.csv');
+  // fixture 需要构造「锚定行」：minTagCount=2 过滤要求每行至少 2 个出现≥2 次的标签。
+  // M-1/M-3 让 规矩、源码、生产端 各出现 2 次 → 两行都是锚定行；
+  // M-2 孤词行（缓存治理）应被滤掉；M-4 是别的项目 → 视角隔离。
   const rows = [
     '编号,主要内容,形态,项目,智能体,自由标签,稳定性,时距,状态',
     'M-1,"x",技能,项目A,甲,"规矩|源码|生产端",观察,1,生效',
-    'M-2,"y",技能,项目B,乙,"别的|项目的|词",观察,1,生效',
+    'M-2,"y",技能,项目A,甲,"缓存治理",观察,1,生效',
+    'M-3,"z",技能,项目A,甲,"源码|生产端|调试",观察,1,生效',
+    'M-4,"w",技能,项目B,乙,"别的|项目的|词",观察,1,生效',
   ].join('\n');
   fsMod.writeFileSync(fakeCsv, rows, 'utf8');
   try {
     const body = renderNetworkFromLibrary(fakeCsv, { project: '项目A', agent: '甲' });
     assert.ok(body.includes('源码|生产端'), `网络应含目标行，实际：${body}`);
     assert.equal(body.includes('别的'), false, '别的项目/身份的词必须被隔离掉');
+    assert.equal(body.includes('缓存治理'), false, '孤词行（无 ≥2 个高频标签）应被频次过滤滤掉');
 
     clearNetworkCache();
     const defs = buildToolDefs(domain, { libraryCsv: fakeCsv, view: { project: '项目A', agent: '甲' } });
-    for (const name of ['dtm_write', 'dtm_recall']) {
-      const d = defs.find((x) => x.name === name).parameters['自由标签'].description;
-      assert.ok(d.includes('现有标签网络'), `${name}：有库时描述里应出现网络`);
-      assert.ok(d.includes('规矩|源码|生产端'), `${name}：网络内容要真的进去`);
-    }
+    const recallDesc = defs.find((x) => x.name === 'dtm_recall').parameters['自由标签'].description;
+    assert.ok(recallDesc.includes('现有标签网络'), 'dtm_recall：有库时描述里应出现网络');
+    assert.ok(recallDesc.includes('规矩|源码|生产端'), 'dtm_recall：网络内容要真的进去');
+
+    const writeDesc = defs.find((x) => x.name === 'dtm_write').parameters['自由标签'].description;
+    assert.equal(writeDesc.includes('规矩|源码|生产端'), false, 'dtm_write：不得再注入网络本体（去重）');
+    assert.ok(writeDesc.includes('现有标签网络见 dtm_recall'), 'dtm_write：只留一句指引（模型看得到 dtm_recall 描述）');
   } finally {
     fsMod.rmSync(fakeCsv, { force: true });
     clearNetworkCache();
   }
+});
+
+test('V18 体积治理：minTagCount 锚定行过滤 + maxBytes 截断；默认关闭行为不变', () => {
+  // 2026-11-17 新增（积分消耗诊断-2026-11-17.md §3 问题 3）：
+  // 库涨到 368 条后 91% 标签是孤词，网络必须能过滤；但 V15 的事故回归要求
+  // 锚定行里的孤词（源码）原样保留——新词发现靠锚定行。
+  const records = [
+    rec('M-1', ['规矩', '源码', '生产端']),
+    rec('M-2', ['孤词甲']),                       // 纯孤词行 → 无共现价值
+    rec('M-3', ['源码', '生产端', '调试']),        // 与 M-1 共享 2 个高频词 → 锚定行
+  ];
+
+  // 默认关闭 → 全量，行为与 1.6.0 完全一致（老调用方/老测试不受影响）
+  const full = renderTagNetwork(records);
+  assert.equal(full.split('\n').length, 3, '默认 minTagCount=0 应全量渲染');
+
+  // minTagCount=2 → 孤词行滤掉，锚定行内孤词保留
+  const filtered = renderTagNetwork(records, { minTagCount: 2 });
+  const fl = filtered.split('\n');
+  assert.equal(fl.length, 2, '纯孤词行应被滤掉');
+  assert.ok(fl[0].includes('规矩|源码|生产端'), '锚定行里孤词（源码）必须原样保留');
+  assert.equal(filtered.includes('孤词甲'), false, '孤词行不得出现');
+
+  // maxBytes 截断：预算内贪心保序
+  const oneLine = renderTagNetwork(records, { maxBytes: 24 }); // 恰好放下一行（23B + 分隔 1B）
+  assert.equal(oneLine, '规矩|源码|生产端', '超限按原始顺序截断');
+  assert.equal(renderTagNetwork(records, { maxBytes: 1 }), '', '一行都放不下时为空串');
 });
 
 test('V17 网络绝不进 section（KV cache 硬约束）', () => {

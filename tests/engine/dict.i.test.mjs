@@ -205,12 +205,13 @@ test('I5 dict.mjs 从磁盘读 标签字典.md（Q3），能提取区块并渲�
     assert.equal(typeof t, 'string', `工具项必须能取到名字，实际 ${JSON.stringify(t)}`)
   }
 
-  // 10 个工具一个不缺（渲染注入的前提）
+  // 工具一个不缺（渲染注入的前提）。2026-11-17 新增两个提示词工具，10 → 12。
   const TOOLS = [
     'dtm_bind', 'dtm_write', 'dtm_recall', 'dtm_supersede', 'dtm_archive',
     'dtm_retag', 'dtm_review', 'dtm_records', 'dtm_export', 'dtm_merge',
+    'dtm_tidy_prompt', 'dtm_merge_prompt',
   ]
-  assert.equal(toolNames.length, 10, `必须提取到正好 10 个工具，实际 ${toolNames.length}：${toolNames.join(',')}`)
+  assert.equal(toolNames.length, TOOLS.length, `必须提取到正好 ${TOOLS.length} 个工具，实际 ${toolNames.length}：${toolNames.join(',')}`)
   for (const t of TOOLS) {
     assert.ok(toolNames.includes(t), `字典区块未提取到工具「${t}」，实际：${toolNames.join(',')}`)
   }

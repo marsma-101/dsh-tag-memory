@@ -95,8 +95,15 @@ test('R6 insertReminder 插在已认领消息之后，且去重', () => {
   // 同一条提醒已在 decision 里 → 不重复插入
   assert.equal(insertReminder([...decision, desired], claimed, desired).length, 4)
 
-  // claimed 为空（step>=2 常见）→ 插到最前
-  assert.equal(insertReminder([ctxMsg], [], desired)[0], desired)
+  // claimed 为空（step>=2 常见）→ 追加到末尾（2026-11-17：不再插到最前，
+  // 前部插入会使其后全部历史缓存前缀作废，见 积分消耗诊断-2026-11-17.md §3.1）
+  {
+    const arr = [ctxMsg]
+    const out = insertReminder(arr, [], desired)
+    assert.equal(out[out.length - 1], desired, '无认领点时应追加到末尾')
+    assert.equal(out[0], ctxMsg)
+    assert.equal(arr.length, 1, '不得原地改入参数组')
+  }
   assert.equal(decision.length, 3, '不得原地改入参数组（waterfall 用返回值）')
 })
 
@@ -133,10 +140,12 @@ test('R9 关闭时两个钩子都不注册', () => {
   assert.equal(events.includes('tools/result'), false)
 })
 
-test('R10 新增钩子不破坏既有结构：仍是 10 工具 / 1 section / 1 context', () => {
+test('R10 新增钩子不破坏既有结构：仍是 12 工具 / 1 section / 1 context', () => {
+  // 2026-11-17：复制提示词方案新增 dtm_tidy_prompt / dtm_merge_prompt，10 → 12。
+  // 本条守的是「提醒钩子不额外注册工具」，所以断言工具数与规范清单一致即可。
   const ctx = createFakeCtx()
   applyPreset(ctx, {})
-  assert.equal(ctx.__tools.length, 10)
+  assert.equal(ctx.__tools.length, 12)
   assert.equal(ctx.__sections.length, 1)
   assert.equal(ctx.__contexts.length, 1)
 })

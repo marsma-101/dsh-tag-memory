@@ -34,10 +34,13 @@
   },
 
   "network": {
-    "_why": "标签共现网络（2026-11-11 用户裁定的 wiki 真实形态）。每行一条记忆的标签串，同行即相关，跨行同名标签再连成新关系。模型调 dtm_write/dtm_recall 时随工具给出，照着它挑词/填词。取代了早期的「频次词表 + 触发词」方案——后者实测无法分开中文泛词与精准词，且触发词功能从未接线，已删除（含开发期残留词 privhub）。",
-    "_boundary": "走工具 description 通道，不进 section（section 每轮在 system prompt 里，内容一变就毁其后整段 KV cache 前缀）。由 tool-defs.js 的 renderNetworkFromLibrary 按当前视角（项目∈{当前,通用} AND 智能体∈{当前,通用}）实时生成。全量不截断（约 1400 tokens，用户裁定：读错重读的代价远高于此）。",
+    "_why": "标签共现网络（2026-11-11 用户裁定的 wiki 真实形态）。每行一条记忆的标签串，同行即相关，跨行同名标签再连成新关系。模型调 dtm_recall 时随工具给出，照着它挑词/填词。取代了早期的「频次词表 + 触发词」方案——后者实测无法分开中文泛词与精准词，且触发词功能从未接线，已删除（含开发期残留词 privhub）。",
+    "_boundary": "走工具 description 通道，不进 section（section 每轮在 system prompt 里，内容一变就毁其后整段 KV cache 前缀）。由 tool-defs.js 的 renderNetworkFromLibrary 按当前视角（项目∈{当前,通用} AND 智能体∈{当前,通用}）实时生成。",
+    "_sizing": "2026-11-17 体积治理（依据 内部文档/积分消耗诊断-2026-11-17.md）：原「全量不截断」在库涨到 368 条后失效（单份 6.4KB 且线性增长，91% 标签是孤词）。改为：① 只在 dtm_recall 注入一份（dtm_write 不再重复，模型本就能看到全部工具描述）；② minTagCount=2 —— 只保留含 ≥2 个高频标签的锚定行，锚定行内的孤词原样保留（新词发现靠锚定行）；③ maxBytes=3072 硬上限，超限按库内顺序截断。两个阈值可在此覆盖。",
+    "minTagCount": 2,
+    "maxBytes": 3072,
     "statusActive": "生效"
   },
 
-  "_delivery": "工具 description 通道。网络与标签规则都渲染进 dtm_write/dtm_recall 的参数 description，不进 section、不新增第 11 个工具。section 实测约 3786 字节（预算 6000），早期注释里的 5998/6000 已 stale。"
+  "_delivery": "工具 description 通道。标签规则渲染进 dtm_write/dtm_recall 的参数 description；网络只渲染进 dtm_recall（2026-11-17 起去重）。不进 section、不新增第 11 个工具。section 实测约 3786 字节（预算 6000），早期注释里的 5998/6000 已 stale。"
 }

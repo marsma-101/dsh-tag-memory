@@ -34,11 +34,13 @@ import {
 const SPEC_TOOLS = [
   'dtm_bind', 'dtm_write', 'dtm_recall', 'dtm_supersede', 'dtm_archive',
   'dtm_retag', 'dtm_review', 'dtm_records', 'dtm_export', 'dtm_merge',
+  // 2026-11-17：复制提示词方案新增的两个只读工具
+  'dtm_tidy_prompt', 'dtm_merge_prompt',
 ]
 const SHAPES = ['技能', '流程', '规则', '偏好', '事实', '模板']
 
-/** Q1 的三条阈值（Lead 拍板，改需经 Lead） */
-const Q1 = { maxBytes: 6000, maxLines: 130, toolCount: 10, shapeCount: 6 }
+/** Q1 的三条阈值（Lead 拍板，改需经 Lead）；工具数随新增能力同步更新 */
+const Q1 = { maxBytes: 6000, maxLines: 130, toolCount: SPEC_TOOLS.length, shapeCount: 6 }
 
 /** 取出注册进 systemPrompt.section 的固定判据文本 */
 function registeredSection(ctx) {
@@ -59,7 +61,7 @@ function registeredContext(ctx, agent = null) {
 /* ------------------------------------------------------------------ *
  * L1 十入口一个不缺
  * ------------------------------------------------------------------ */
-test('L1 注入文本含全部 10 个 dtm_* 工具名（一个不缺）', () => {
+test('L1 注入文本含全部 12 个 dtm_* 工具名（一个不缺）', () => {
   const ctx = createFakeCtx()
   applyPreset(ctx, {})
   const { text } = registeredSection(ctx)
@@ -164,7 +166,7 @@ test('L3c context 与 section 的 name/order 各自唯一且互不冲突', () =>
 /* ------------------------------------------------------------------ *
  * L4 【Q1 裁定】精简度：三条同时满足
  * ------------------------------------------------------------------ */
-test('L4 【Q1】精简度三条同时满足：≤6000 字节 + ≤130 行 + 含 10 入口与 6 形态', () => {
+test('L4 【Q1】精简度三条同时满足：≤6000 字节 + ≤130 行 + 含 12 入口与 6 形态', () => {
   const ctx = createFakeCtx()
   applyPreset(ctx, {})
   const text = registeredSection(ctx).text
@@ -314,8 +316,8 @@ test('L7 注入段 name 唯一、order 与其他插件不冲突（同 name 重�
 
   assert.ok(SECTION_NAME.includes('dsh-tag-memory'), `name 应带包名便于诊断，实际「${SECTION_NAME}」`)
 
-  // TOOL_WHENS 必须覆盖 10 个（字典里"各一行"的数据来源）
-  assert.equal(TOOL_WHENS.length, 10, `TOOL_WHENS 应 10 条，实际 ${TOOL_WHENS.length}`)
+  // TOOL_WHENS 必须覆盖全部工具（字典里"各一行"的数据来源）
+  assert.equal(TOOL_WHENS.length, SPEC_TOOLS.length, `TOOL_WHENS 应 ${SPEC_TOOLS.length} 条，实际 ${TOOL_WHENS.length}`)
   for (const t of SPEC_TOOLS) {
     const item = TOOL_WHENS.find((x) => x.name === t)
     assert.ok(item, `TOOL_WHENS 缺少「${t}」`)

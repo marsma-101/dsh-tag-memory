@@ -19,6 +19,7 @@ import {
   renderTagRules,
   freeTagRulesFor,
   clearTagRulesCache,
+  TOOL_NAMES,
 } from '../../preset/tool-defs.js';
 import { renderInjection } from '../../preset/prompt.js';
 
@@ -139,7 +140,15 @@ test('T4b 精简后仍保留全部取值域与省略语义（防误用）', () =
 test('T5 【硬约束】说明不进 section、不新增工具、注入字节仍 ≤6000', () => {
   const ctx = createFakeCtx();
   applyPreset(ctx, {});
-  assert.equal(ctx.__tools.length, 10, '工具数必须仍是 10');
+  // 2026-11-17：注册工具由 10 增至 12（新增 dtm_tidy_prompt / dtm_merge_prompt）。
+  // 本条守的是「说明表自身不引入额外工具」，所以断言的是**恰好 12 个且与
+  // TOOL_NAMES 完全一致**，而不是某个与说明表无关的固定数字。
+  assert.equal(ctx.__tools.length, 12, '工具数必须是 12（10 个原有 + 2 个提示词生成工具）');
+  assert.deepEqual(
+    ctx.__tools.map((t) => t.name).sort(),
+    [...TOOL_NAMES].sort(),
+    '注册的工具必须与 TOOL_NAMES 一一对应（说明表没偷偷多注册工具）',
+  );
   assert.equal(ctx.__sections.length, 1);
   assert.equal(ctx.__contexts.length, 1);
 
