@@ -2,9 +2,9 @@
 
 > Tag-based, searchable, cross-session long-term memory for DSH agents.
 
-[![Version](https://img.shields.io/badge/version-1.6.0-blue)]()
+[![Version](https://img.shields.io/badge/version-1.7.0-blue)]()
 [![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1%2B-orange)]()
-[![Tests](https://img.shields.io/badge/tests-464%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-574%20passing-brightgreen)]()
 
 English | [中文](README.zh.md)
 

@@ -96,7 +96,7 @@ import {
 import { diagnoseLibrary, diagnoseMultiple, findLibraries, inspectMergeFields } from './lib/engine/diagnose.mjs';
 
 import { buildNewRecord, buildWriteLog } from './lib/engine/write.mjs';
-import { recall as engineRecall, buildReadLog, ownershipVisible } from './lib/engine/read.mjs';
+import { recall as engineRecall, buildReadLog, ownershipVisible, ownershipWritable } from './lib/engine/read.mjs';
 import { applyTick } from './lib/engine/tick.mjs';
 import {
   backupLibrary,
@@ -1679,9 +1679,11 @@ function createHostService(ctx, config) {
         return;
       }
 
-      // 归属守卫（2026-11-12 P1-18）：工具通道只能改自己可见的条，
-      // 不能借编号改别的项目/身份的条目。UI 通道（agent=null）是用户手动，放行。
-      if (identity && !ownershipVisible(records[idx], { project: projectOfSync(agent), agent: identity.智能体 }, schema)) {
+      // 归属守卫（2026-11-12 P1-18；2026-11-19 方案A 改可写口径）：
+      // 工具通道只能改**自己可写**的条——公共条目（智能体=通用）放开给任何
+      // 已绑定身份维护（无主资产修复），其余口径不变；跨项目写仍拒。
+      // UI 通道（agent=null）是用户手动，放行。
+      if (identity && !ownershipWritable(records[idx], { project: projectOfSync(agent), agent: identity.智能体 }, schema)) {
         outcome = { ok: false, errors: [{ code: 'OWNERSHIP_DENIED', field: '编号', message: `条目 ${targetId} 不属于当前项目/身份，无权修改。` }] };
         return;
       }
@@ -1835,9 +1837,10 @@ function createHostService(ctx, config) {
         return;
       }
 
-      // 归属守卫（2026-11-12 P1-18）：只能顶替自己可见的条。
+      // 归属守卫（2026-11-12 P1-18；2026-11-19 方案A 改可写口径）：
+      // 只能顶替**自己可写**的条——公共条目放开给任何已绑定身份（无主资产修复）。
       const scope = { project: projectOfSync(agent), agent: identity.智能体 };
-      if (!ownershipVisible(records[idx], scope, schema)) {
+      if (!ownershipWritable(records[idx], scope, schema)) {
         outcome = { ok: false, errors: [{ code: 'OWNERSHIP_DENIED', field: '旧编号', message: `条目 ${oldId} 不属于当前项目/身份，无权顶替。` }] };
         return;
       }
@@ -1908,8 +1911,9 @@ function createHostService(ctx, config) {
         outcome = { ok: false, errors: [{ code: 'ID_NOT_FOUND', field: '编号', message: `库里没有编号 ${targetId} 的条目。` }] };
         return;
       }
-      // 归属守卫（2026-11-12 P1-18）：只能归档自己可见的条。
-      if (!ownershipVisible(records[idx], { project: projectOfSync(agent), agent: identity.智能体 }, schema)) {
+      // 归属守卫（2026-11-12 P1-18；2026-11-19 方案A 改可写口径）：
+      // 只能归档**自己可写**的条——公共条目放开给任何已绑定身份（无主资产修复）。
+      if (!ownershipWritable(records[idx], { project: projectOfSync(agent), agent: identity.智能体 }, schema)) {
         outcome = { ok: false, errors: [{ code: 'OWNERSHIP_DENIED', field: '编号', message: `条目 ${targetId} 不属于当前项目/身份，无权归档。` }] };
         return;
       }
@@ -2564,16 +2568,49 @@ function createHostService(ctx, config) {
     const cap = Number(limit);
     const picked = pickTidyCandidates({
       records,
-      limit: Number.isFinite(cap) ? cap : 20,
+      limit: 0, // 先不截断：分完可写/不可写再各自套上限（方案C，2026-11-19）
       tagRules: rules?.write ?? rules,
     });
 
-    const prompt = renderTidyPrompt(picked);
+    // ── 方案 C（2026-11-19 派单）：候选按「当前绑定作用域可写」过滤 ──
+    // 旧版把全库候选一把给：用户复制到新会话后，属于别的项目的条目 retag
+    // 必报 OWNERSHIP_DENIED，16 条候选 14 条做不了——清单本身成了废纸。
+    // 现在生成时就知道谁是谁：
+    //   · 可写（当前项目/公共条目）→ 主清单，模型逐条处理
+    //   · 不可写（别的项目的专属条目）→ 附件清单，明确「需在对应项目会话处理」
+    // 注意：tidyPrompt 不接收 agent（生成的是给用户复制的文本，不是本会话执行），
+    // 所以这里用「最近绑定身份 + 当前工作目录」做口径——与新会话绑定后的
+    // 视角一致（同一用户同一目录才会复制这份提示词）。
+    const view = {
+      project: currentProjectNameSync(),
+      agent: currentAgentNameSync(),
+    };
+    const writable = [];
+    const foreign = [];
+    for (const c of picked.candidates) {
+      const rec = records.find((r) => str(r['编号']) === c['编号']);
+      if (!rec) continue;
+      if (ownershipWritable(rec, view, schema)) writable.push(c);
+      else foreign.push({ ...c, 归属: `${rec['项目'] || '通用'}/${rec['智能体'] || '通用'}` });
+    }
+
+    // 各自套上限：主清单最多 cap 条（默认 20），附件清单只报编号不占主配额
+    const writableCapped = Number.isFinite(cap) && cap > 0 ? writable.slice(0, cap) : writable;
+    const truncated = Number.isFinite(cap) && cap > 0 && writable.length > cap;
+
+    const prompt = renderTidyPrompt({
+      candidates: writableCapped,
+      stats: picked.stats,
+      truncated,
+      foreignCandidates: foreign,
+    });
     return {
       ok: true,
       prompt,
       stats: picked.stats,
-      truncated: picked.truncated,
+      truncated,
+      // 方案 C 附带：分拣结果也让调用方（工具层）可见
+      foreignCount: foreign.length,
       // 明确告诉模型：这是给用户复制的，不是让你执行的
       readOnly: true,
     };
