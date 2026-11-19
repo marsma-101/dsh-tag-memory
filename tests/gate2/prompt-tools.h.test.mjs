@@ -181,7 +181,17 @@ test('H6 mergePrompt 路径越界 → 拒绝（与 dtm_merge 同一围栏）', a
   const h = await makeHostCtx({ identity: BOUND });
   try {
     seedLibrary(h.dataDir);
-    const r = await h.host.mergePrompt({ path: 'C:\\Windows\\win.ini' });
+    // ⚠️ 平台中立的越界路径（2026-11-19 修）：
+    // 旧版硬编码 'C:\\Windows\\win.ini'——Windows 上它真实存在，stat 成功后
+    // 走到 confinePath 报 PATH_NOT_ALLOWED；Linux runner 上它是不存在的相对
+    // 路径，mergePrompt「先 stat 再围栏」的顺序里 stat 先报 ENOENT，
+    // 返回 MERGE_SOURCE_NOT_FOUND，断言必挂（v1.6.0/v1.6.1 CI 因此红）。
+    // 白名单（数据目录）的**兄弟目录**在任何平台都在围栏外，且可控制其
+    // 存在性：写一个真实文件进去，stat 必成功，必然走到围栏判定。
+    const outside = path.join(path.dirname(h.dataDir), 'outside-fence', 'foreign.json');
+    fs.mkdirSync(path.dirname(outside), { recursive: true });
+    fs.writeFileSync(outside, '[]', 'utf8');
+    const r = await h.host.mergePrompt({ path: outside });
     assert.equal(r.ok, false);
     assert.equal(r.code, 'PATH_NOT_ALLOWED');
   } finally {
